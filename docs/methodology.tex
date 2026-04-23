@@ -1,0 +1,22 @@
+\section{Methodology Overview}
+
+\subsection{Research Questions}
+This study examines longitudinal research productivity effects associated with
+Australian Research Council (ARC) funding, using grant records from 2001--2025.
+Primary questions include the productivity trajectory before and after award,
+and differences between awardees and a matched non-awardee comparison group.
+
+\subsection{Data Sources}
+\begin{itemize}
+    \item ARC grants data (2001--2025), sourced from the ARC public API
+    \item OpenAlex publication records, used for investigator disambiguation
+    and publication linkage
+\end{itemize}
+
+\subsection{Investigator Disambiguation Strategy}
+Disambiguation proceeds in confidence tiers, prioritising precision over recall.
+A false merge (two investigators treated as one) introduces greater analytical
+bias than a missing record. See Section~\ref{sec:decisions} for design decisions.
+
+\subsection{Matched Comparison Set}
+To be defined after Phase 0 data profiling is complete.
