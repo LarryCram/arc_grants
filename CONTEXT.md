@@ -69,8 +69,19 @@ Match ARC ORCID ↔ OpenAlex ORCID. Four sub-cases:
 ARC ORCID coverage: 44.5%. OpenAlex AU coverage higher than global 30% due to AU ~2015 requirement.
 OpenAlex author entity table has: orcid, display_name, display_name_alternatives, last_known_institution.
 
-**Layer 2 — Co-investigator network expansion**
-Use ORCID-anchored investigators as seeds. Match no-ORCID investigators through repeated co-appearance with matched investigators on both ARC grants and OpenAlex works.
+**Layer 2 — Name + institution matching**
+Match remaining investigators by name against OAX AU authors, confirmed by institution.
+Do NOT attempt name matching for investigators already matched in Layer 1.
+
+Matching rules (designed for precision over recall):
+- Search OAX display_name AND all display_name_alternatives
+- If ARC has a full first name: require a full first-name token match — do NOT give credit for an OAX initial matching an ARC full name (too many false positives)
+- If ARC has an initial-only first name: initial match against OAX full names is acceptable
+- Diacriticals: strip in first pass (ARC rarely uses them; OAX retains them). After seeing the misses, add a diacritical-normalisation pass
+- Multiple OAX candidates above threshold → flag as ambiguous → Layer 3
+- Institution (ARC admin_org vs OAX last_known_institutions) used as confirmation signal, not primary filter
+
+Rationale for name over co-author network: Australia's multicultural population means most names are effectively unique. Name + institution matching is direct evidence; co-author network is indirect, computationally heavier, and less informative about misses and duplicates.
 
 **Layer 3 — AI for residual**
 Estimated ~10–15% of investigators after Layers 1–2. Bounded, well-defined problem — genuinely hard cases only.

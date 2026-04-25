@@ -23,11 +23,12 @@ PROFILES_OUT = OUTPUT_ROOT / "profiles"
 # Source data files
 ARC_GRANTS_CSV      = RAW_DATA / "raw_json.csv"
 GRANT_SUMMARIES_CSV = RAW_DATA / "grant_summaries.csv"
+ADMIN_ORGS_CSV      = DATA_ROOT / "admin_orgs.csv"   # read-only concordance seed
 
 # OpenAlex
-OPENALEX_DIR        = DATA_ROOT / "OPENALEX"
-OAX_AUTHORS_AU      = OPENALEX_DIR / "authors_AU.parquet"
-OAX_AUTHORSHIPS_AU  = OPENALEX_DIR / "authorships_AU.parquet"
+OPENALEX_DIR        = Path(os.getenv("OPENALEX_DIR", str(DATA_ROOT / "OPENALEX")))
+OAX_AUTHORS         = OPENALEX_DIR / "authors"
+OAX_AUTHORSHIPS     = OPENALEX_DIR / "authorships"
 
 # Validate on import
 if not DATA_ROOT:
