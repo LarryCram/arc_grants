@@ -8,14 +8,16 @@ Three outputs: colleague commission report, policy report, scholarly paper.
 ERC extension planned once ARC pipeline is established.
 
 ## My Stack
-Python, SQL, DuckDB, Parquet. Windows. VS Code. Moderate disambiguation experience.
+Python, SQL, DuckDB, Parquet. Linux (home/lc/m SSD mount). VS Code. Moderate disambiguation experience.
 Prefer .py files over notebooks. LaTeX in codebase as living methodology document.
 
 ## Data
 - ARC grants CSV, ~34,000 records, sourced from ARC public API
 - OpenAlex Feb 2026 snapshot as parquets
-- All data on portable SSD — DATA_ROOT set in .env pointing to SSD mount
-- SSD mount: D:\DATA_TRANSFER\ARC\
+- Working data: `/home/lc/m/working/ARC/` (DATA_ROOT in .env)
+- OpenAlex authors: `/home/lc/m/openalex_feb26/parquet/authors/*.parquet` (OPENALEX_DIR in .env)
+  - 99 partitions, ~106M authors globally
+  - 579,975 AU authors (last_known_institutions); 1,139,293 ever-AU (affiliations field)
 
 ## Key Decisions Made
 - Precision over recall in disambiguation (false merge worse than missing record)
@@ -23,80 +25,72 @@ Prefer .py files over notebooks. LaTeX in codebase as living methodology documen
 - ORCID treated as hint requiring validation, not authoritative
 - Chronological strategy: anchor on post-2018 grants, extend backwards
 - No embeddings/vectors until deterministic methods are exhausted
-- No GPU infrastructure — CPU only if embeddings needed at all
 
 ## Scope Decisions (config/scope.py)
 **KEEP_ROLES (14):** CI, CI-DORA, DECRA, FT, FL, FF, APD, APF, ARF, QEII, APDI, ARFI, DAATSIA, IRF
-- Excluded: PI, NP, OI (non-investigator); ECIF/MCIF/LXF*/ILF/DIA/LIF/RC-ATSI (travel grants, not fellowship holders)
-- Note: DAATSIA has zero survivors after scheme filter — all in out-of-scope schemes
-
 **KEEP_SCHEMES (7):** DP, LP, DE, FT, FL, FF, DI
-- Excluded: LE/IE (equipment), LX/IN/IL (mobility), IH (industry hubs), SR, CE, and small schemes
 
 ## Phase Status
-**Phase 0 — COMPLETE.** ARC CSV profiled. Outputs written.
-**Phase 1 — COMPLETE.** Wrangled and filtered. Outputs written.
-**Phase 2 — BLOCKED.** Disambiguation cannot start until OpenAlex author entity parquet is available.
+**Phase 0 — COMPLETE.** `src/00_profile_arc.py`
+**Phase 1 — COMPLETE.** `src/01_wrangle.py`
+**Phase 2 — IN PROGRESS.** Disambiguation scripts 02–06 written and producing output.
 
 ## Completed Scripts
-- `src/00_profile_arc.py` — parses raw_json.csv, extracts grants/investigators/FOR codes, writes parquets + profile txt
-- `src/01_wrangle.py` — joins grant_summaries enrichment, filters to in-scope schemes/roles, writes wrangled parquets
+| Script | Purpose | Status |
+|---|---|---|
+| `src/00_profile_arc.py` | Parse raw_json.csv, extract grants/investigators/FOR | Complete |
+| `src/01_wrangle.py` | Join summaries, filter to in-scope schemes/roles | Complete |
+| `src/02_profile_openalex_authors.py` | Profile OAX authors table | Complete |
+| `src/03_match_layer1_orcid.py` | ORCID matching, two passes (AU then global) | Complete |
+| `src/04_build_institution_concordance.py` | ARC admin_org → OAX institution_id | Complete |
+| `src/05_match_layer2_names.py` | Family-name candidates + first_score signal | Complete |
+| `src/06_assign_layer2_matches.py` | Tiered assignment of Layer 2 matches | Complete |
 
-## Current Outputs (D:\DATA_TRANSFER\ARC\processed\)
+## Current Processed Outputs (`/home/lc/m/working/ARC/processed/`)
 | File | Rows | Notes |
 |---|---|---|
-| grants_flat.parquet | 33,650 | Phase 0 — all grants |
-| investigators_raw.parquet | 116,238 | Phase 0 — all roles |
-| for_codes.parquet | 115,880 | Phase 0 |
-| grants.parquet | 30,551 | Phase 1 — enriched + filtered |
-| investigators.parquet | 62,747 | Phase 1 — in-scope roles only |
-| for_codes_wrangled.parquet | 104,530 | Phase 1 — filtered |
+| grants.parquet | 30,551 | Phase 1 |
+| investigators.parquet | 62,747 | Phase 1 |
+| layer1_orcid_matches.parquet | 10,971 | Layer 1 — one row per matched ORCID |
+| layer1_residual.parquet | 31,054 | Layer 1 — no_orcid / not_in_oax |
+| institution_concordance.parquet | 114 | ARC org → OAX institution_id (many-many) |
+| layer2_name_candidates.parquet | 2,657,451 | All family-name candidate pairs |
+| layer2_matches.parquet | 6,835 | Layer 2 resolved |
+| layer3_residual.parquet | 13,710 | Input for Layer 3 |
 
-## OpenAlex Data (D:\DATA_TRANSFER\ARC\OPENALEX\)
-- `authors_AU.parquet` — 10.4M rows — authorships format (work_id, author_id, author_name, institution_id, institution_name, ror, country_code). NOT the author entity table.
-- `authorships_AU.parquet` — 11.5M rows — same schema, slightly different filter (reason TBD)
-- **Still needed:** Author entity parquet (one row per author, with orcid, display_name, display_name_alternatives, last_known_institution). This is required for Layer 1 ORCID matching.
+## Disambiguation Summary (~23,041 unique investigators)
+| | Persons | % |
+|---|---|---|
+| Layer 1 ORCID matched | 10,865 | 47% |
+| Layer 2 name matched | 6,835 | 30% |
+| **Total with OAX link** | **17,700** | **77%** |
+| Layer 3 residual | 5,385 | 23% |
 
-## Disambiguation Plan (agreed, not yet coded)
-Three layers:
+## Layer 2 Design
+- Family-name token index on OAX AU authors
+- `first_score`: 1.0 full token match / 0.8 initial match (bidirectional) / 0.0 none
+- Bidirectional initial: ARC initial→OAX full AND ARC full→OAX initial-only both get 0.8
+- Positional-agnostic tokens: "C. Fred Bloggy" yields [c, fred, bloggy] — "Fred" matches
+- Assignment tiers: unique full match / unique initial match / inst-confirmed shortlist
 
-**Layer 1 — ORCID anchor**
-Match ARC ORCID ↔ OpenAlex ORCID. Four sub-cases:
-- Both have ORCID → direct match, validate with name similarity
-- ARC has ORCID, OpenAlex doesn't → search by name, confirm with ORCID post-hoc
-- ARC has no ORCID, OpenAlex has ORCID → name match → verify
-- Neither has ORCID → Layer 2/3
-ARC ORCID coverage: 44.5%. OpenAlex AU coverage higher than global 30% due to AU ~2015 requirement.
-OpenAlex author entity table has: orcid, display_name, display_name_alternatives, last_known_institution.
-
-**Layer 2 — Name + institution matching**
-Match remaining investigators by name against OAX AU authors, confirmed by institution.
-Do NOT attempt name matching for investigators already matched in Layer 1.
-
-Matching rules (designed for precision over recall):
-- Search OAX display_name AND all display_name_alternatives
-- If ARC has a full first name: require a full first-name token match — do NOT give credit for an OAX initial matching an ARC full name (too many false positives)
-- If ARC has an initial-only first name: initial match against OAX full names is acceptable
-- Diacriticals: strip in first pass (ARC rarely uses them; OAX retains them). After seeing the misses, add a diacritical-normalisation pass
-- Multiple OAX candidates above threshold → flag as ambiguous → Layer 3
-- Institution (ARC admin_org vs OAX last_known_institutions) used as confirmation signal, not primary filter
-
-Rationale for name over co-author network: Australia's multicultural population means most names are effectively unique. Name + institution matching is direct evidence; co-author network is indirect, computationally heavier, and less informative about misses and duplicates.
-
-**Layer 3 — AI for residual**
-Estimated ~10–15% of investigators after Layers 1–2. Bounded, well-defined problem — genuinely hard cases only.
+## Next Step — Immediate
+Switch script 05 OAX AU pool from `last_known_institutions` to `affiliations`.
+Covers researchers who held ARC grants at AU institutions but have since moved abroad.
+Examples: Adina Roskies (Sydney → UCSB), Aina Puce (UQ/UniMelb → Indiana).
+Pool grows 580k → 1.1M (+96%). Change both WHERE filter and au_inst_ids extraction.
 
 ## Known Data Quality Issues
 - All 51,784 ARC ORCIDs had trailing whitespace (stripped on extraction)
-- 451 investigators with initial-only first names — mostly CI role, genuine disambiguation challenge
-- authors_AU.parquet and authorships_AU.parquet have slightly different row counts for same schema — filter difference TBD
+- 40 Layer 1 name-fail cases: 4 diacriticals (accept), ~3 married name changes, 3 possible wrong OAX ORCIDs
+- OAX AU pool misses researchers who have left Australia (fix: use affiliations field)
+
+## Deferred Tasks
+1. Revert `00_profile_arc.py` to retain both admin_org fields (announcement vs current)
+2. Revisit UNSW Canberra/ADFA split in institution concordance
 
 ## What Claude Should NOT Do
 - Build architecture before data is profiled
 - Add dependencies without discussion
 - Solve edge cases before the common case is working
 - Change scope lists (KEEP_ROLES, KEEP_SCHEMES) without discussion
-
-## Next Step
-Locate or create the OpenAlex author entity parquet. Then write `src/02_profile_openalex_authors.py`.
-Always peek at schema (columns, dtypes, 2 sample rows) before writing any profile script.
+- Use Dropbox paths — working data is always on /home/lc/m/
