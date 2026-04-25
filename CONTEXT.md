@@ -8,13 +8,14 @@ Three outputs: colleague commission report, policy report, scholarly paper.
 ERC extension planned once ARC pipeline is established.
 
 ## My Stack
-Python, SQL, DuckDB, Parquet. Ubuntu. VS Code. Moderate disambiguation experience.
+Python, SQL, DuckDB, Parquet. Windows. VS Code. Moderate disambiguation experience.
 Prefer .py files over notebooks. LaTeX in codebase as living methodology document.
 
 ## Data
-- ARC grants CSV, ~60,000 records, sourced from ARC public API
-- Stored on portable SSD, not in repo
-- DATA_ROOT set in .env pointing to SSD mount
+- ARC grants CSV, ~34,000 records, sourced from ARC public API
+- OpenAlex Feb 2026 snapshot as parquets
+- All data on portable SSD — DATA_ROOT set in .env pointing to SSD mount
+- SSD mount: D:\DATA_TRANSFER\ARC\
 
 ## Key Decisions Made
 - Precision over recall in disambiguation (false merge worse than missing record)
@@ -24,14 +25,67 @@ Prefer .py files over notebooks. LaTeX in codebase as living methodology documen
 - No embeddings/vectors until deterministic methods are exhausted
 - No GPU infrastructure — CPU only if embeddings needed at all
 
-## Current Phase
-Phase 0 — Data profiling. ARC CSV not yet examined.
-Next step: run 00_profile_arc.py once data path is configured.
+## Scope Decisions (config/scope.py)
+**KEEP_ROLES (14):** CI, CI-DORA, DECRA, FT, FL, FF, APD, APF, ARF, QEII, APDI, ARFI, DAATSIA, IRF
+- Excluded: PI, NP, OI (non-investigator); ECIF/MCIF/LXF*/ILF/DIA/LIF/RC-ATSI (travel grants, not fellowship holders)
+- Note: DAATSIA has zero survivors after scheme filter — all in out-of-scope schemes
 
-## Repo
-https://github.com/yourusername/arc_grants
+**KEEP_SCHEMES (7):** DP, LP, DE, FT, FL, FF, DI
+- Excluded: LE/IE (equipment), LX/IN/IL (mobility), IH (industry hubs), SR, CE, and small schemes
+
+## Phase Status
+**Phase 0 — COMPLETE.** ARC CSV profiled. Outputs written.
+**Phase 1 — COMPLETE.** Wrangled and filtered. Outputs written.
+**Phase 2 — BLOCKED.** Disambiguation cannot start until OpenAlex author entity parquet is available.
+
+## Completed Scripts
+- `src/00_profile_arc.py` — parses raw_json.csv, extracts grants/investigators/FOR codes, writes parquets + profile txt
+- `src/01_wrangle.py` — joins grant_summaries enrichment, filters to in-scope schemes/roles, writes wrangled parquets
+
+## Current Outputs (D:\DATA_TRANSFER\ARC\processed\)
+| File | Rows | Notes |
+|---|---|---|
+| grants_flat.parquet | 33,650 | Phase 0 — all grants |
+| investigators_raw.parquet | 116,238 | Phase 0 — all roles |
+| for_codes.parquet | 115,880 | Phase 0 |
+| grants.parquet | 30,551 | Phase 1 — enriched + filtered |
+| investigators.parquet | 62,747 | Phase 1 — in-scope roles only |
+| for_codes_wrangled.parquet | 104,530 | Phase 1 — filtered |
+
+## OpenAlex Data (D:\DATA_TRANSFER\ARC\OPENALEX\)
+- `authors_AU.parquet` — 10.4M rows — authorships format (work_id, author_id, author_name, institution_id, institution_name, ror, country_code). NOT the author entity table.
+- `authorships_AU.parquet` — 11.5M rows — same schema, slightly different filter (reason TBD)
+- **Still needed:** Author entity parquet (one row per author, with orcid, display_name, display_name_alternatives, last_known_institution). This is required for Layer 1 ORCID matching.
+
+## Disambiguation Plan (agreed, not yet coded)
+Three layers:
+
+**Layer 1 — ORCID anchor**
+Match ARC ORCID ↔ OpenAlex ORCID. Four sub-cases:
+- Both have ORCID → direct match, validate with name similarity
+- ARC has ORCID, OpenAlex doesn't → search by name, confirm with ORCID post-hoc
+- ARC has no ORCID, OpenAlex has ORCID → name match → verify
+- Neither has ORCID → Layer 2/3
+ARC ORCID coverage: 44.5%. OpenAlex AU coverage higher than global 30% due to AU ~2015 requirement.
+OpenAlex author entity table has: orcid, display_name, display_name_alternatives, last_known_institution.
+
+**Layer 2 — Co-investigator network expansion**
+Use ORCID-anchored investigators as seeds. Match no-ORCID investigators through repeated co-appearance with matched investigators on both ARC grants and OpenAlex works.
+
+**Layer 3 — AI for residual**
+Estimated ~10–15% of investigators after Layers 1–2. Bounded, well-defined problem — genuinely hard cases only.
+
+## Known Data Quality Issues
+- All 51,784 ARC ORCIDs had trailing whitespace (stripped on extraction)
+- 451 investigators with initial-only first names — mostly CI role, genuine disambiguation challenge
+- authors_AU.parquet and authorships_AU.parquet have slightly different row counts for same schema — filter difference TBD
 
 ## What Claude Should NOT Do
 - Build architecture before data is profiled
 - Add dependencies without discussion
 - Solve edge cases before the common case is working
+- Change scope lists (KEEP_ROLES, KEEP_SCHEMES) without discussion
+
+## Next Step
+Locate or create the OpenAlex author entity parquet. Then write `src/02_profile_openalex_authors.py`.
+Always peek at schema (columns, dtypes, 2 sample rows) before writing any profile script.
