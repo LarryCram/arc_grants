@@ -23,6 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import PROCESSED_DATA, GRANT_SUMMARIES_CSV
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
+from src.utils.io import setup_stdout_utf8
 
 # Columns to pull from grant_summaries and their target names
 SUMMARY_COLS = {
@@ -38,9 +39,7 @@ SUMMARY_COLS = {
 
 
 def main():
-    import io
-    if isinstance(sys.stdout, io.TextIOWrapper):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    setup_stdout_utf8()
 
     # ── Load Phase 0 outputs ─────────────────────────────────────────────────
     df_grants = pd.read_parquet(PROCESSED_DATA / "grants_flat.parquet")
@@ -53,11 +52,11 @@ def main():
     print(f"  for_codes:           {len(df_for):>8,}")
 
     # ── Join grant_summaries enrichment ──────────────────────────────────────
-    summaries = (
-        pd.read_csv(GRANT_SUMMARIES_CSV, dtype=str)
-          [list(SUMMARY_COLS.keys())]
-          .rename(columns=SUMMARY_COLS)
-    )
+    summaries = pd.read_csv(
+        GRANT_SUMMARIES_CSV,
+        usecols=list(SUMMARY_COLS.keys()),
+        dtype=str,
+    ).rename(columns=SUMMARY_COLS)
     df_grants = df_grants.merge(summaries, on="grant_code", how="left")
 
     # ── Derive scheme_code from grant_code prefix ────────────────────────────
@@ -86,7 +85,7 @@ def main():
 
     # ── Filter FOR codes to in-scope grants ──────────────────────────────────
     n_before = len(df_for)
-    df_for = df_for[df_for["grant_code"].isin(in_scope_grants)].copy()
+    df_for = df_for[df_for["grant_code"].isin(in_scope_grants)]
     print(f"\nAfter FOR filter:  {len(df_for):>8,}  (dropped {n_before - len(df_for):,})")
 
     # ── Save ─────────────────────────────────────────────────────────────────

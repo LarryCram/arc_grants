@@ -8,12 +8,13 @@ PURPOSE:
     modifying the source file.
 
 INPUT:
-    DATA_ROOT/raw/arc_grants.csv
+    DATA_ROOT/raw/raw_json.csv
 
 OUTPUT:
+    DATA_ROOT/processed/grants_flat.parquet      -- Flattened grant records
+    DATA_ROOT/processed/investigators_raw.parquet -- Extracted investigator records
+    DATA_ROOT/processed/for_codes.parquet        -- Field of research assignments
     OUTPUT_ROOT/profiles/grant_profile.txt       -- Human readable summary
-    OUTPUT_ROOT/profiles/investigators_raw.parquet -- Extracted investigator records
-    OUTPUT_ROOT/profiles/grants_flat.parquet     -- Flattened grant records
 
 DECISIONS ENCODED HERE:
     - investigators-at-announcement used as primary (investigators-current often empty)
@@ -25,24 +26,18 @@ DECISIONS ENCODED HERE:
 
 import json
 import sys
-import duckdb
 import pandas as pd
 from pathlib import Path
-from collections import Counter, defaultdict
 
 # Allow imports from project root
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import ARC_GRANTS_CSV, PROFILES_OUT, PROCESSED_DATA
 from src.utils.paths import ensure_dirs
-
-
-# ── Constants ────────────────────────────────────────────────────────────────
-
-ACADEMIC_ROLES = {"CI", "HD", "PI", "AI", "PD"}  # expand if others found
+from src.utils.io import setup_stdout_utf8
 
 
 def safe_str(val) -> str:
-    """Return stripped string; treats None and explicit JSON null as empty."""
+    # handles explicit JSON null (None) as well as missing keys
     return (val or "").strip()
 
 
@@ -78,16 +73,15 @@ def extract_investigators(attrs: dict, grant_code: str) -> list[dict]:
         orcid_clean = orcid_raw.strip() or None
 
         records.append({
-            "grant_code":       grant_code,
-            "title":            safe_str(inv.get("title")),
-            "first_name":       safe_str(inv.get("firstName")),
-            "family_name":      safe_str(inv.get("familyName")),
-            "role_code":        safe_str(inv.get("roleCode")),
-            "role_name":        safe_str(inv.get("roleName")),
-            "is_fellowship":    inv.get("isFellowship", False),
-            "orcid":            orcid_clean,
-            "orcid_had_spaces": orcid_raw != orcid_raw.strip(),
-            "inv_source":       source,
+            "grant_code":    grant_code,
+            "title":         safe_str(inv.get("title")),
+            "first_name":    safe_str(inv.get("firstName")),
+            "family_name":   safe_str(inv.get("familyName")),
+            "role_code":     safe_str(inv.get("roleCode")),
+            "role_name":     safe_str(inv.get("roleName")),
+            "is_fellowship": inv.get("isFellowship", False),
+            "orcid":         orcid_clean,
+            "inv_source":    source,
         })
     return records
 
@@ -125,9 +119,7 @@ def extract_grant_flat(attrs: dict, grant_code: str) -> dict:
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    import io
-    if isinstance(sys.stdout, io.TextIOWrapper):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    setup_stdout_utf8()
     ensure_dirs()
 
     print(f"Reading: {ARC_GRANTS_CSV}")
@@ -221,7 +213,6 @@ def main():
       f"({100*df_inv.orcid.notna().mean():.1f}%)")
     p(f"    No ORCID:              {df_inv.orcid.isna().sum():>8,}  "
       f"({100*df_inv.orcid.isna().mean():.1f}%)")
-    p(f"    Had trailing spaces:   {df_inv.orcid_had_spaces.sum():>8,}")
 
     p(f"\n  Investigators sourced from 'current' (not announcement):")
     p(f"    {df_inv[df_inv.inv_source=='current'].grant_code.nunique():>8,} grants")
