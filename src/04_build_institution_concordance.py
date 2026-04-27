@@ -48,7 +48,7 @@ def main():
     # ── Direct mappings: institution_arc → institution_id ────────────────────
     direct = (
         df_seed[df_seed["institution_id"] != ""]
-        [["institution_arc", "institution_id", "institution_name"]]
+        [["institution_arc", "institution_id", "institution_name", "hep_code"]]
         .drop_duplicates("institution_arc")
         .rename(columns={"institution_arc": "arc_admin_org"})
     )
@@ -66,6 +66,7 @@ def main():
         on="organisationName",
         how="left",
     ).drop(columns=["organisationName"])
+    # hep_code propagates from the canonical institution via the merge above
 
     n_alias_resolved   = aliases["institution_id"].notna().sum()
     n_alias_unresolved = aliases["institution_id"].isna().sum()
@@ -97,6 +98,7 @@ def main():
             "arc_admin_org":    "The University of New South Wales",
             "institution_id":   "https://openalex.org/I31746571",
             "institution_name": "UNSW Sydney",
+            "hep_code":         "UNSW",
         },
         {
             # OAX also has "UNSW Canberra" (formerly ADFA) as a separate entity;
@@ -104,6 +106,7 @@ def main():
             "arc_admin_org":    "The University of New South Wales",
             "institution_id":   "https://openalex.org/I4394709116",
             "institution_name": "UNSW Canberra",
+            "hep_code":         "UNSW",
         },
         {
             # OAX: "University of Newcastle Australia" (AU) — distinct from
@@ -111,6 +114,7 @@ def main():
             "arc_admin_org":    "The University of Newcastle",
             "institution_id":   "https://openalex.org/I78757542",
             "institution_name": "University of Newcastle Australia",
+            "hep_code":         "UON",
         },
     ])
 

@@ -54,12 +54,26 @@ OAX_GLOB = str(OAX_AUTHORS / "*.parquet")
 
 # ── Name normalisation ────────────────────────────────────────────────────────
 
+# Unicode hyphens that appear in OAX names but are not ASCII '-'
+_EXOTIC_HYPHENS = re.compile(
+    r"[­‐‑‒–—―−－]"
+)
+
+
 def _strip_diacriticals(s: str) -> str:
+    s = _EXOTIC_HYPHENS.sub("-", s)          # non-breaking / em-dash hyphens → ASCII
+    s = s.replace("ı", "i").replace("İ", "I")   # Turkish dotless-ı → i
     return unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode("ascii")
 
 
 def _tokens(name: str) -> list[str]:
     return re.findall(r"[a-z]+", _strip_diacriticals(name).lower())
+
+
+def _family_tokens(family_name: str) -> list[str]:
+    """Tokens from family name after stripping parenthetical content (née, aliases)."""
+    cleaned = re.sub(r"\s*\(.*?\)", "", family_name)
+    return _tokens(cleaned)
 
 
 def _is_initial(first_name: str) -> bool:
@@ -161,16 +175,16 @@ def main():
             display_name,
             display_name_alternatives,
             regexp_replace(orcid, '^https://orcid\\.org/', '') AS orcid,
-            list_transform(
-                list_filter(last_known_institutions, x -> x.country_code = 'AU'),
-                x -> x.id
-            ) AS au_inst_ids
+            list_distinct(list_transform(
+                list_filter(affiliations, x -> x.institution.country_code = 'AU'),
+                x -> x.institution.id
+            )) AS au_inst_ids
         FROM read_parquet('{OAX_GLOB}')
         WHERE list_contains(
-            list_transform(last_known_institutions, x -> x.country_code), 'AU'
+            list_transform(affiliations, x -> x.institution.country_code), 'AU'
         )
     """).df()
-    print(f"  OAX AU authors:           {len(df_oax):>8,}")
+    print(f"  OAX AU authors (ever AU): {len(df_oax):>8,}")
 
     # ── Build family-name index on OAX ───────────────────────────────────────
     def last_norm_token(name: str) -> str:
@@ -185,13 +199,18 @@ def main():
     records = []
 
     for _, arc in persons.iterrows():
-        fam_toks = _tokens(arc["family_name"])
+        fam_toks = _family_tokens(arc["family_name"])
         if not fam_toks:
             continue
-        lookup = max(fam_toks, key=len)
 
-        idxs = fam_index.get(lookup, [])
-        if not len(idxs):
+        # Try every token from the family name and union results.
+        # Needed for compound names: "Del Mar" → try "del" and "mar";
+        # without this, max(key=len) on equal-length tokens picks wrong one.
+        idxs_set: set[int] = set()
+        for tok in fam_toks:
+            idxs_set.update(fam_index.get(tok, []))
+        idxs = list(idxs_set)
+        if not idxs:
             continue
 
         arc_inst_set = set(arc["arc_oax_inst_ids"])

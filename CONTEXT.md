@@ -23,8 +23,12 @@ Prefer .py files over notebooks. LaTeX in codebase as living methodology documen
 - Precision over recall in disambiguation (false merge worse than missing record)
 - FoR codes used at 2-digit level only due to 2018 ANZSRC revision
 - ORCID treated as hint requiring validation, not authoritative
-- Chronological strategy: anchor on post-2018 grants, extend backwards
 - No embeddings/vectors until deterministic methods are exhausted
+- HEP codes (2–5 char strings) used for institution signal — not raw admin_org or OAX IDs
+- Prefer persisted checkpoints over runtime construction
+- Frozensets not required — use serialisable forms (lists, dicts)
+- `first_names_compatible` is a "cannot rule out" criterion, not a positive match
+- Post-nominals (AO, AM, OAM, AC, FAA…) stripped from family_name before any processing
 
 ## Scope Decisions (config/scope.py)
 **KEEP_ROLES (14):** CI, CI-DORA, DECRA, FT, FL, FF, APD, APF, ARF, QEII, APDI, ARFI, DAATSIA, IRF
@@ -33,60 +37,79 @@ Prefer .py files over notebooks. LaTeX in codebase as living methodology documen
 ## Phase Status
 **Phase 0 — COMPLETE.** `src/00_profile_arc.py`
 **Phase 1 — COMPLETE.** `src/01_wrangle.py`
-**Phase 2 — IN PROGRESS.** Disambiguation scripts 02–06 written and producing output.
+**Phase 2 — COMPLETE.** Scripts 02–08 written and producing output. 85% of investigators linked to OAX.
+**Phase 3 — IN DESIGN.** Cluster-based pipeline. Design doc: `docs/cluster_pipeline_design.md`.
 
-## Completed Scripts
-| Script | Purpose | Status |
+## Phase 2 Scripts (complete, do not modify without discussion)
+| Script | Purpose |
+|---|---|
+| `src/00_profile_arc.py` | Parse raw JSON, extract grants/investigators/FOR |
+| `src/01_wrangle.py` | Join summaries, filter to in-scope schemes/roles |
+| `src/02_profile_openalex_authors.py` | Profile OAX authors table |
+| `src/03_match_layer1_orcid.py` | ORCID matching, two passes (AU then global) |
+| `src/04_build_institution_concordance.py` | ARC admin_org → OAX institution_id + hep_code |
+| `src/05_match_layer2_names.py` | Family-name candidates + first_score signal |
+| `src/06_assign_layer2_matches.py` | Tiered assignment of Layer 2 matches |
+| `src/07_filter_layer3_for.py` | FoR→OAX topic pre-pass, tiers 4/5/6 |
+| `src/08_match_layer3_oax_api.py` | OAX API search for no-match residual, tier 7 |
+
+## Analysis/Probe Scripts
+| Script | Purpose |
+|---|---|
+| `src/00b_profile_name_clusters.py` | Name cluster profiling — keep as-is, not a pipeline step |
+| `src/00c_probe_nameparser_family.py` | Validates nameparser on ARC family names |
+
+## Phase 3 Scripts (planned, scripts 10–15)
+| Script | Layer | Output |
 |---|---|---|
-| `src/00_profile_arc.py` | Parse raw_json.csv, extract grants/investigators/FOR | Complete |
-| `src/01_wrangle.py` | Join summaries, filter to in-scope schemes/roles | Complete |
-| `src/02_profile_openalex_authors.py` | Profile OAX authors table | Complete |
-| `src/03_match_layer1_orcid.py` | ORCID matching, two passes (AU then global) | Complete |
-| `src/04_build_institution_concordance.py` | ARC admin_org → OAX institution_id | Complete |
-| `src/05_match_layer2_names.py` | Family-name candidates + first_score signal | Complete |
-| `src/06_assign_layer2_matches.py` | Tiered assignment of Layer 2 matches | Complete |
+| `src/10_build_clusters.py` | Layer 0 | `clusters.jsonl` |
+| `src/11_oax_name_index.py` | Pre-processing | `oax_name_index.parquet` |
+| `src/12_layer1_orcid.py` | Layer 1 | `clusters.jsonl` (updated) |
+| `src/13_layer1_5_orcid_api.py` | Layer 1.5 | `clusters.jsonl` (updated) |
+| `src/14_layer2_names.py` | Layer 2 | `clusters.jsonl` (updated) |
+| `src/15_layer3_for.py` | Layer 3 | `clusters.jsonl` (updated) |
 
 ## Current Processed Outputs (`/home/lc/m/working/ARC/processed/`)
 | File | Rows | Notes |
 |---|---|---|
 | grants.parquet | 30,551 | Phase 1 |
 | investigators.parquet | 62,747 | Phase 1 |
-| layer1_orcid_matches.parquet | 10,971 | Layer 1 — one row per matched ORCID |
-| layer1_residual.parquet | 31,054 | Layer 1 — no_orcid / not_in_oax |
-| institution_concordance.parquet | 114 | ARC org → OAX institution_id (many-many) |
-| layer2_name_candidates.parquet | 2,657,451 | All family-name candidate pairs |
-| layer2_matches.parquet | 6,835 | Layer 2 resolved |
-| layer3_residual.parquet | 13,710 | Input for Layer 3 |
+| institution_concordance.parquet | 115 | hep_code column added; UNSW/UNE/Macquarie/Torrens/Newcastle fixed |
+| layer1_orcid_matches.parquet | 10,971 | Layer 1 |
+| layer2_matches.parquet | 7,881 | Layer 2 |
+| layer3_for_matches.parquet | 749 | Layer 3 FoR tiers 4/5/6 |
+| layer3_api_matches.parquet | 4 | Layer 3 API tier 7 |
+| layer3_residual.parquet | 11,490 | Input for cluster pipeline |
+| name_clusters_summary.csv | 22,524 | Profiling |
+| oax_name_index.parquet | TBD | Planned: reverse OAX name index |
 
 ## Disambiguation Summary (~23,041 unique investigators)
 | | Persons | % |
 |---|---|---|
 | Layer 1 ORCID matched | 10,865 | 47% |
-| Layer 2 name matched | 6,835 | 30% |
-| **Total with OAX link** | **17,700** | **77%** |
-| Layer 3 residual | 5,385 | 23% |
+| Layer 2 name matched | 7,881 | 34% |
+| Layer 3 FoR pre-pass | 749 | 3% |
+| Layer 3 API | 4 | <1% |
+| **Total with OAX link** | **19,499** | **85%** |
+| Residual ambiguous | 3,554 | 15% |
+| Residual no-match | 32 | <1% |
 
-## Layer 2 Design
-- Family-name token index on OAX AU authors
-- `first_score`: 1.0 full token match / 0.8 initial match (bidirectional) / 0.0 none
-- Bidirectional initial: ARC initial→OAX full AND ARC full→OAX initial-only both get 0.8
-- Positional-agnostic tokens: "C. Fred Bloggy" yields [c, fred, bloggy] — "Fred" matches
-- Assignment tiers: unique full match / unique initial match / inst-confirmed shortlist
-
-## Next Step — Immediate
-Switch script 05 OAX AU pool from `last_known_institutions` to `affiliations`.
-Covers researchers who held ARC grants at AU institutions but have since moved abroad.
-Examples: Adina Roskies (Sydney → UCSB), Aina Puce (UQ/UniMelb → Indiana).
-Pool grows 580k → 1.1M (+96%). Change both WHERE filter and au_inst_ids extraction.
+## Institution Signal
+- AU HEPs only (~42 institutions for all time); identified by HEP=y in `DATA_ROOT/admin_orgs.csv`
+- 2–5 char HEP codes: ANU, UNSW, UM, MON, UQ, UWA, UTAS, UNISA, RMIT, QUT, UTS…
+- Non-HEP orgs (research institutes, government) are treated as no institution signal
+- `src/utils/names.py` — shared helpers: strip_postnominals, strip_diacriticals, strip_parens, norm_alpha, tokens
 
 ## Known Data Quality Issues
 - All 51,784 ARC ORCIDs had trailing whitespace (stripped on extraction)
-- 40 Layer 1 name-fail cases: 4 diacriticals (accept), ~3 married name changes, 3 possible wrong OAX ORCIDs
-- OAX AU pool misses researchers who have left Australia (fix: use affiliations field)
+- 10 family_name entries had post-nominal awards (AO, AM, OAM, AC, FAA) — stripped by strip_postnominals()
+- "Rachel Ong ViforJ" — company name appended to family name (4 records, real family = "Ong")
+- 231 family names where nameparser disagrees with ARC: mostly compound names and post-nominals
 
 ## Deferred Tasks
 1. Revert `00_profile_arc.py` to retain both admin_org fields (announcement vs current)
-2. Revisit UNSW Canberra/ADFA split in institution concordance
+2. UNSW Canberra/ADFA split in institution concordance
+3. Fix 5 confirmed compromised matches from Phase 2 (Timothy Dwyer, Claire Roberts, Jun Ma, David Morrison, Paul Burke) — defer until cluster pipeline validates
 
 ## What Claude Should NOT Do
 - Build architecture before data is profiled
@@ -94,3 +117,5 @@ Pool grows 580k → 1.1M (+96%). Change both WHERE filter and au_inst_ids extrac
 - Solve edge cases before the common case is working
 - Change scope lists (KEEP_ROLES, KEEP_SCHEMES) without discussion
 - Use Dropbox paths — working data is always on /home/lc/m/
+- Use frozensets where serialisable forms (lists, dicts) will do
+- Apply institution filter as a gate — it is always a tiebreaker
