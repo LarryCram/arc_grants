@@ -1,17 +1,25 @@
 """
 Tests for Layer 0 cluster building logic in src/10_build_clusters.py.
 """
+import importlib.util
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 from src.utils.names import norm_alpha, strip_postnominals
-# Import functions from the build script directly
-from src.ten_build_clusters import (
-    UnionFind, first_names_compatible,
-    _build_arc_parsed, _build_norm_np_parsed,
-)
+
+module_path = Path(__file__).resolve().parents[1] / "src" / "10_build_clusters.py"
+spec = importlib.util.spec_from_file_location("build_clusters", module_path)
+build_clusters = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(build_clusters)
+
+UnionFind = build_clusters.UnionFind
+first_names_compatible = build_clusters.first_names_compatible
+_build_arc_parsed = build_clusters._build_arc_parsed
+_build_norm_np_parsed = build_clusters._build_norm_np_parsed
 
 
 # ── first_names_compatible ────────────────────────────────────────────────────
