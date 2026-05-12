@@ -229,6 +229,34 @@ multi-investigator grants.
 
 ---
 
+## Layer 0.5 — Fellowship overlap split
+
+**Script:** `10b_split_fellowships.py`
+
+**Operates on:** all `UNRESOLVED` clusters from Layer 0.
+
+**Rule:** A single person cannot hold two ARC fellowships concurrently. If a
+cluster contains two or more fellowship records (identified by `role_code` in
+`FELLOWSHIP_CODES = {FT, FL, FF, DECRA, APD, APF, ARF, QEII, APDI, IRF, ARFI}`)
+whose grant date ranges overlap, those records must belong to different people.
+
+**Date range:** `(funding_commence_year, funding_commence_year + years_funded)`.
+Overlap is tested as `start_a < end_b AND start_b < end_a`. Loaded from
+`grants.parquet` via `grant_code`; dates are not stored in `InvestigatorRecord`.
+
+**Split outcome:**
+- One child cluster per distinct fellowship `grant_code` (all records for that
+  grant code in the child).
+- One residual child for all non-fellowship records, if any exist.
+- Parent marked `SPLIT` with `split_reason = OVERLAPPING_FELLOWSHIPS`.
+
+**Result (2026-05-12):** 200 clusters split → 717 new child clusters. Notable
+cases: Thach Nguyen (18 fellowships), Jason Smith (15), Xiaolin Wang (15).
+
+**Output:** `clusters.jsonl`, `clusters_after_layer0b.jsonl`
+
+---
+
 ## Layer 0 — Build clusters
 
 **Input:** `investigators.parquet`, `grants.parquet`, `for_codes_wrangled.parquet`,
@@ -288,7 +316,17 @@ resolved together when the cluster is MATCHED.
 
 ---
 
-## Layer 1.5 — ORCID API name search
+## Layer 1.5 — ORCID API name search  *(DISABLED)*
+
+**Script:** `13_layer1_5_orcid_api.py` — disabled; exits immediately with a message.
+
+**Reason removed:** Succeeds only when a name search returns exactly one ORCID
+result. For common names (the hard cases) it almost never fires. Rate-limited at
+0.1 s/call → ~20 min for 12k clusters. Layer 2's local name index + institution
+scoring handles the same clusters faster and more reliably. Do not re-enable
+without a measured improvement case.
+
+---original design note---
 
 **Operates on:** clusters still `UNRESOLVED` after Layer 1 (no ORCID in ARC data)
 
@@ -331,6 +369,15 @@ is bounded by the number of unresolved clusters after Layer 1 (~10k at most).
 ---
 
 ## Layer 2 — Name + institution
+
+**Note on partition_038:** `partition_038.parquet` in the OAX snapshot contains
+an invalid UTF-8 byte in a ROR URL. All scripts that bulk-query the author
+parquets (`14_layer2_names.py`, `15_layer3_for.py`, `17b_parquet_oax.py`) use a
+per-partition fallback: attempt the glob query; on `duckdb.InvalidInputException`
+retry each partition file individually and skip the offender. This is handled
+inside each script's `_fetch_oax_data` function.
+
+## Layer 2 — Name + institution (detail)
 
 **Operates on:** clusters still `UNRESOLVED` after Layer 1
 
@@ -478,12 +525,17 @@ required.
 | Script | Reads | Writes |
 |---|---|---|
 | `00b_profile_name_clusters.py` | investigators, grants, for_codes | *(profiling only — keep as-is)* |
-| `10_build_clusters.py` | investigators, grants, for_codes, institution_concordance | `clusters.jsonl` |
+| `10_build_clusters.py` | investigators, grants, for_codes, institution_concordance | `clusters_after_layer0.jsonl` |
+| `10b_split_fellowships.py` | `clusters_after_layer0.jsonl`, grants | `clusters_after_layer0b.jsonl` |
 | `11_oax_name_index.py` | OAX AU authors parquet (ever-AU) | `oax_name_index.parquet` |
-| `12_layer1_orcid.py` | `clusters.jsonl`, OAX authors | `clusters.jsonl` *(updated in place)* |
-| `13_layer1_5_orcid_api.py` | `clusters.jsonl`, ORCID API | `clusters.jsonl` *(updated)* |
-| `14_layer2_names.py` | `clusters.jsonl`, `oax_name_index.parquet` | `clusters.jsonl` *(updated)* |
-| `15_layer3_for.py` | `clusters.jsonl`, OAX topics | `clusters.jsonl` *(updated)* |
+| `12_layer1_orcid.py` | `clusters.jsonl`, OAX authors | `clusters_after_layer1.jsonl` |
+| `13_layer1_5_orcid_api.py` | *(DISABLED — exits immediately)* | — |
+| `14_layer2_names.py` | `clusters.jsonl`, `oax_name_index.parquet` | `clusters_after_layer2.jsonl` |
+| `15_layer3_for.py` | `clusters.jsonl`, OAX topics | `clusters_after_layer3.jsonl` |
+| `16_absent_humanities.py` | `clusters.jsonl` | `clusters_after_layer4.jsonl` |
+| `17b_parquet_oax.py` | `clusters.jsonl`, OAX snapshot | `clusters_after_layer5.jsonl`, `layer5_candidates.csv` |
+| `17c_analysis.py` | `clusters.jsonl`, `layer5_candidates.csv` | *(diagnostic only)* |
+| `17d_resolve.py` | `clusters.jsonl` | `clusters_after_layer5d.jsonl`, `layer5d_resolutions.csv` |
 
 `clusters.jsonl` is the single cluster store — one JSON object per line,
 one line per cluster. Each script loads it, processes its target layer, writes
