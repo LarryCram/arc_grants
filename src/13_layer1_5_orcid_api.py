@@ -1,4 +1,12 @@
 """
+13_layer1_5_orcid_api.py  —  Layer 1.5  [DISABLED]
+
+ORCID API name search adds minimal value over Layer 2's local parquet matching:
+succeeds only for exact single-result name searches, rate-limited at 0.1 s/call,
+and takes ~20 min for 12k clusters. Layer 2 handles the same cases faster via
+the local name index + institution scoring. Do not run this script.
+
+---original docstring---
 13_layer1_5_orcid_api.py  —  Layer 1.5
 
 For UNRESOLVED clusters with no ORCID in ARC data, query the ORCID public
@@ -26,6 +34,11 @@ INPUT:  PROCESSED_DATA/clusters.jsonl
 OUTPUT: PROCESSED_DATA/clusters.jsonl                (updated)
         PROCESSED_DATA/clusters_after_layer1_5.jsonl (checkpoint)
 """
+
+import sys
+print("Layer 1.5 is disabled — ORCID API name search removed from pipeline. Run Layer 2 instead.")
+sys.exit(0)
+
 
 import json
 import re

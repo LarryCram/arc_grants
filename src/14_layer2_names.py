@@ -183,25 +183,39 @@ def _oax_api_candidates(display_name: str) -> list[str]:
 
 # ── Batch OAX data fetch ──────────────────────────────────────────────────────
 
+_OAX_FETCH_SQL = """
+    SELECT
+        ids.openalex                                              AS oax_id,
+        list_transform(affiliations, x -> x.institution.id)      AS aff_ids,
+        list_transform(topics,       x -> x.field.display_name)  AS field_names
+    FROM read_parquet('{source}')
+    WHERE ids.openalex IN (SELECT oax_id FROM _tids)
+      AND ids.openalex IS NOT NULL
+"""
+
+
 def _fetch_oax_data(oax_ids: list[str]) -> dict[str, dict]:
     """Batch-fetch affiliations and topic field names for a list of OAX author IDs."""
+    import glob as glob_module
     if not oax_ids:
         return {}
-    glob = str(OAX_AUTHORS / "*.parquet")
-    con  = duckdb.connect()
+    glob_pat = str(OAX_AUTHORS / "*.parquet")
+    con = duckdb.connect()
     con.execute(
         "CREATE TEMP TABLE _tids AS SELECT unnest(?::VARCHAR[]) AS oax_id",
         [oax_ids],
     )
-    rows = con.execute(f"""
-        SELECT
-            ids.openalex                                              AS oax_id,
-            list_transform(affiliations, x -> x.institution.id)      AS aff_ids,
-            list_transform(topics,       x -> x.field.display_name)  AS field_names
-        FROM read_parquet('{glob}')
-        WHERE ids.openalex IN (SELECT oax_id FROM _tids)
-          AND ids.openalex IS NOT NULL
-    """).fetchall()
+    try:
+        rows = con.execute(_OAX_FETCH_SQL.format(source=glob_pat)).fetchall()
+    except duckdb.InvalidInputException:
+        # Bad UTF-8 in one partition — retry per file, skipping offenders
+        print("  Warning: batch fetch hit bad encoding; retrying per partition...")
+        rows = []
+        for fpath in sorted(glob_module.glob(glob_pat)):
+            try:
+                rows.extend(con.execute(_OAX_FETCH_SQL.format(source=fpath)).fetchall())
+            except duckdb.InvalidInputException:
+                print(f"  Warning: skipping {Path(fpath).name} (invalid encoding)")
     result = {}
     for oax_id, aff_ids, field_names in rows:
         result[oax_id] = {

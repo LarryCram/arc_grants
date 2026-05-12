@@ -1,26 +1,32 @@
 """
-17_mcp_oax.py  —  Layer 5: Live OAX author disambiguation
+17_oax_search.py  —  Layer 5: Live OAX REST API author disambiguation
 
-For UNDECIDABLE clusters, query the live OpenAlex API by author name
-(country_code:au filter) then apply a strict two-signal acceptance gate:
+For UNDECIDABLE clusters, query the OpenAlex /authors search endpoint by name
+(affiliations.institution.country_code:au filter) then apply a strict gate:
 
+  Name match    — OAX display name first token consistent with ARC first name
   Uniqueness    — exactly one candidate survives all filters
   Field match   — candidate OAX topic fields overlap with cluster FoR fields
-  Institution   — candidate OAX affiliations include ≥1 cluster HEP
+  Institution   — candidate OAX affiliations include ≥1 certain cluster HEP
 
 Both field AND institution must fire, AND uniqueness required.
 A "best match" without uniqueness is never accepted.
 
+Each search costs 10 OAX credits ($0.001). Free tier: ~1,000 queries/day.
+The script resumes from where it stopped (skips clusters with oax_candidates
+already set) and checkpoints every 250 clusters.
+
 Usage:
-  python 17_mcp_oax.py              # all UNDECIDABLE clusters
-  python 17_mcp_oax.py --limit 16   # first N only (dry-run / spot-check)
-  python 17_mcp_oax.py --limit 16 --dry-run  # report only, no save
+  python 17_oax_search.py              # all UNDECIDABLE clusters
+  python 17_oax_search.py --limit 128  # first N only (spot-check)
+  python 17_oax_search.py --limit 128 --dry-run  # report only, no save
 
 INPUT:  PROCESSED_DATA/clusters.jsonl
         PROCESSED_DATA/institution_concordance.parquet
         DATA_ROOT/for_oax_concordance.csv
 OUTPUT: PROCESSED_DATA/clusters.jsonl              (updated unless --dry-run)
         PROCESSED_DATA/clusters_after_layer5.jsonl (checkpoint)
+        PROCESSED_DATA/layer5_candidates.csv       (all gate-passing candidates)
 """
 
 import argparse
@@ -142,6 +148,35 @@ def _candidate_fields(author: dict) -> set[str]:
     return fields
 
 
+def _name_consistent(arc_first: str, oax_display_name: str) -> bool:
+    """True if the OAX display name's first token is consistent with the ARC first name.
+
+    Allows: exact match, either side is an initial (single letter), or one is a
+    prefix of the other (Ben/Benjamin).  Rejects clearly different first names
+    (Jan vs John, Daphne vs Timothy, Xi vs Sean).
+    """
+    # First token of OAX display name is the first name in Western-order names.
+    # East-Asian order (family name first, e.g. "NI Bing-jie") will fail the
+    # check and be correctly excluded — the properly-ordered record will match.
+    oax_tokens = oax_display_name.split()
+    if not oax_tokens:
+        return False
+    oax_f = oax_tokens[0].strip(".,").lower().replace("‐", "-")  # normalise Unicode hyphen
+    arc_f = arc_first.strip().lower().replace("‐", "-")
+
+    if not arc_f or not oax_f:
+        return False
+    if arc_f == oax_f:
+        return True
+    # Either side is a single-letter initial
+    if len(arc_f) == 1 or len(oax_f) == 1:
+        return arc_f[0] == oax_f[0]
+    # Prefix match: Ben/Benjamin, Bing-Jie/Bing
+    if arc_f.startswith(oax_f) or oax_f.startswith(arc_f):
+        return True
+    return False
+
+
 def _passes_gate(
     cluster: Cluster,
     author: dict,
@@ -212,6 +247,14 @@ def main():
     print("Building HEP certainty index...")
     grant_ci_count = _build_grant_ci_count(clusters)
 
+    # ── Resume support ────────────────────────────────────────────────────────
+    # Skip clusters already processed in a prior partial run (have oax_candidates
+    # set, or are already MATCHED/ABSENT from this layer).
+    already_done = sum(1 for c in targets if c.oax_candidates or c.status != ClusterStatus.UNDECIDABLE.value)
+    targets = [c for c in targets if not c.oax_candidates and c.status == ClusterStatus.UNDECIDABLE.value]
+    if already_done:
+        print(f"  Resuming: skipping {already_done} already-processed clusters")
+
     # ── Query and filter ──────────────────────────────────────────────────────
     print(f"\nQuerying OAX live API for {len(targets):,} clusters...\n")
     n_matched = n_ambiguous = n_no_inst = n_no_field = n_zero = 0
@@ -229,7 +272,9 @@ def main():
             n_zero += 1
             outcome = "zero results"
         else:
-            passing = [r for r in results if _passes_gate(cluster, r, inst_id_to_hep, for2d_to_fields, cert_heps)]
+            arc_first = cluster.name_forms[0].arc.first
+            name_ok   = [r for r in results if _name_consistent(arc_first, r["display_name"])]
+            passing   = [r for r in name_ok  if _passes_gate(cluster, r, inst_id_to_hep, for2d_to_fields, cert_heps)]
 
             if len(passing) == 1:
                 r       = passing[0]
@@ -245,22 +290,22 @@ def main():
                 n_ambiguous += 1
                 names_same = len({r["display_name"].lower() for r in passing}) == 1
                 tag = " [same-name fragment?]" if names_same else ""
-                outcome = f"ambiguous ({len(passing)} pass gate of {len(results)} AU results){tag}"
-                # Print candidates
-                for r in passing:
-                    orcid = (r.get("orcid") or "").replace("https://orcid.org/", "") or None
-                    print(f"           {r['id'].split('/')[-1]:<14} "
-                          f"works={r.get('works_count'):>4}  cited={r.get('cited_by_count'):>5}  "
-                          f"orcid={orcid}  name={r['display_name']}")
+                outcome = f"ambiguous ({len(passing)} pass gate of {len(name_ok)} name-ok / {len(results)} AU results){tag}"
+                if i % 100 == 0:
+                    for r in passing:
+                        orcid = (r.get("orcid") or "").replace("https://orcid.org/", "") or None
+                        print(f"           {r['id'].split('/')[-1]:<14} "
+                              f"works={r.get('works_count'):>4}  cited={r.get('cited_by_count'):>5}  "
+                              f"orcid={orcid}  name={r['display_name']}")
             else:
                 # Gate fired on none — report which signal failed
-                inst_ok  = [r for r in results if _candidate_heps(r, inst_id_to_hep) & set(cluster.institutions)]
+                inst_ok  = [r for r in name_ok if _candidate_heps(r, inst_id_to_hep) & set(cluster.institutions)]
                 if not inst_ok:
                     n_no_inst += 1
-                    outcome = f"no inst match ({len(results)} AU results)"
+                    outcome = f"no inst match ({len(name_ok)} name-ok / {len(results)} AU results)"
                 else:
                     n_no_field += 1
-                    outcome = f"no field match ({len(results)} AU results, {len(inst_ok)} pass inst)"
+                    outcome = f"no field match ({len(name_ok)} name-ok / {len(results)} AU results, {len(inst_ok)} pass inst)"
 
             # Store all gate-passing candidates on the cluster for future analysis
             if passing and not args.dry_run:
@@ -293,12 +338,23 @@ def main():
                     "outcome":        "MATCHED" if len(passing) == 1 else "AMBIGUOUS",
                 })
 
-        heps = cluster.institutions
-        fors = cluster.for_2d
-        cert_tag = f"  certain={sorted(cert_heps)}" if cert_heps != set(heps) else ""
-        print(f"  [{i:>4}] {name:<30} heps={heps}{cert_tag}  for={fors}")
-        print(f"         {outcome}")
+        if i % 100 == 0:
+            heps = cluster.institutions
+            fors = cluster.for_2d
+            cert_tag = f"  certain={sorted(cert_heps)}" if cert_heps != set(heps) else ""
+            print(f"  [{i:>4}] {name:<30} heps={heps}{cert_tag}  for={fors}")
+            print(f"         {outcome}")
         rows.append({"cluster_id": cluster.cluster_id, "name": name, "outcome": outcome})
+
+        if i % 250 == 0:
+            print(f"\n  ── progress {i}/{len(targets)} ──  "
+                  f"matched={n_matched}  ambiguous={n_ambiguous}  "
+                  f"no_inst={n_no_inst}  no_field={n_no_field}  zero={n_zero}")
+            if not args.dry_run and not args.limit:
+                save_clusters(clusters, path)
+                print(f"  checkpoint saved → {path}\n")
+            else:
+                print()
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\n{'─'*60}")
