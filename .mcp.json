@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "alex-mcp": {
+      "command": "/home/lc/alex-mcp/run_with_project_env.sh",
+      "env": {
+        "OPENALEX_MAILTO": "lawrence.cram@anu.edu.au"
+      }
+    }
+  }
+}

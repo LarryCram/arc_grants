@@ -353,8 +353,25 @@ incompatible with all ARC name forms in the cluster (different full first
 names with no initial relationship). Candidates that cannot be ruled out
 remain in the pool for the assignment tiers to decide.
 
-**Assignment tiers** mirror the current pipeline (unique full match, unique
-initial match, institution-confirmed shortlist).
+**Match scoring** replaces the previous tier logic. Each candidate in the pool
+is scored against the cluster using the following point values:
+
+| Indicator | Points | Notes |
+|---|---|---|
+| ORCID resolves in OAX | 90 | |
+| Full first name match | 55 | norm_np first tokens identical |
+| Initial match only | 20 | full first absent on one or both sides |
+| Institution match | 45 | cluster HEP code in OAX affiliations |
+| FoR overlap ≥ 1 field | 15 | 2-digit code match |
+| FoR overlap ≥ 3 fields | 25 | replaces the ≥ 1 score |
+| Unique in candidate pool | 30 | only one candidate passes the gate |
+
+**Acceptance rule:** score ≥ 100 AND at least 2 indicators contributed.
+If more than one candidate meets the acceptance rule the cluster remains
+`UNRESOLVED` (ambiguous shortlist, not a confident match).
+
+Indicators are additive. Full first and initial are mutually exclusive (only
+the higher applies). FoR ≥ 3 replaces FoR ≥ 1 (not additive).
 
 **Layer 2 API supplement:** after the local parquet match, clusters that are
 still `UNRESOLVED` because the local family-name index returned zero candidates

@@ -1,4 +1,6 @@
 duckdb>=0.10
+nameparser>=1.1
 pandas>=2.0
 python-dotenv>=1.0
 pyarrow>=14.0
+pytest>=8.0

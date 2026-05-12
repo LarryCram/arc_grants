@@ -112,6 +112,10 @@ class Cluster:
     oax_id:  str | None = None
     tier:    int | None = None
 
+    # OAX candidates that passed the gate (populated by Layer 5; empty until then)
+    # Each entry: {oax_id, display_name, orcid, works_count, cited_by_count}
+    oax_candidates: list[dict] = field(default_factory=list)
+
     def to_dict(self) -> dict:
         return {
             "cluster_id":             self.cluster_id,
@@ -127,6 +131,7 @@ class Cluster:
             "status":                 self.status,
             "oax_id":                 self.oax_id,
             "tier":                   self.tier,
+            "oax_candidates":         self.oax_candidates,
         }
 
     @classmethod
@@ -145,6 +150,7 @@ class Cluster:
             status=d.get("status", ClusterStatus.UNRESOLVED.value),
             oax_id=d.get("oax_id"),
             tier=d.get("tier"),
+            oax_candidates=d.get("oax_candidates", []),
         )
 
 
