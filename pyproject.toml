@@ -1,0 +1,5 @@
+[tool.pyrefly]
+python-interpreter = ".venv/bin/python"
+search-path = ["."]
+project-includes = ["**/*.py"]
+project-excludes = [".venv/**"]
