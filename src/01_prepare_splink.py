@@ -7,8 +7,6 @@ in the database to avoid memory overflow.
 """
 
 import sys
-import re
-import unicodedata
 from pathlib import Path
 import duckdb
 from nameparser import HumanName
@@ -16,73 +14,68 @@ from nameparser import HumanName
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import OAX_AUTHORS, PROCESSED_DATA, ADMIN_ORGS_CSV, GRANT_SUMMARIES_CSV
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
+from src.utils.names import make_expanded_for_tokens, name_part_tokens
 
-# ── Name Normalisation Logic ──────────────────────────────────────────────────
 
-_EXOTIC_HYPHENS = re.compile(r"[­‐‑‒–—―−－]")
+def _initials(toks: list[str]) -> list[str]:
+    return [t[0] for t in toks if t]
 
-def _strip_diacriticals(s: str) -> str:
-    if not s:
-        return ""
-    s = _EXOTIC_HYPHENS.sub("-", s)
-    s = s.replace("ı", "i").replace("İ", "I")
-    return unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode("ascii")
-
-def _tokens(name: str) -> list[str]:
-    if not name:
-        return []
-    return re.findall(r"[a-z]+", _strip_diacriticals(name).lower())
-
-def _generate_initials(toks: list[str]) -> list[str]:
-    return [t[0] for t in toks if len(t) > 0]
 
 def arc_name_arrays(first_name: str, family_name: str) -> dict:
     full = f"{first_name or ''} {family_name or ''}".strip()
     hn = HumanName(full)
-    
-    # If nameparser didn't find a last name but found a first name, it's a mononym
+
+    # Mononym: nameparser puts single tokens in first, not last
     if not hn.last and hn.first:
         hn.last = hn.first
-        
-    f_toks = _tokens(hn.first) + _tokens(hn.middle)
-    fam_toks = _tokens(hn.last)
-    
-    first_names = list(set(f_toks + _generate_initials(f_toks)))
+
+    f_toks = name_part_tokens(hn.first) + name_part_tokens(hn.middle)
+    fam_toks = name_part_tokens(hn.last)
+
+    first_names = list(set(f_toks + _initials(f_toks)))
     family_names = list(set(fam_toks))
-    
-    # Ensure initials of family names are in first_names for initial matching (e.g. mononyms)
-    for fam in family_names:
-        if fam: first_names.append(fam[0])
-        
+
+    # Mononym fallback: only when there are no given-name tokens (e.g. "Cher").
+    # Do NOT fire for normal names — adding the family-name initial to first_names
+    # would pollute matching (e.g. "obrien"[0] = "o" falsely appearing as a given name).
+    if not f_toks:
+        for fam in family_names:
+            if fam:
+                first_names.append(fam[0])
+
     return {"first_names": list(set(first_names)), "family_names": family_names}
 
+
 def oax_name_arrays(display_name: str, alts: list[str]) -> dict:
-    all_names = []
-    if display_name:
-        all_names.append(display_name)
+    all_names = [display_name] if display_name else []
     if alts:
         all_names.extend(alts)
-    first_toks = set()
-    family_toks = set()
+
+    first_toks: set[str] = set()
+    family_toks: set[str] = set()
+
     for n in all_names:
-        if not n: continue
+        if not n:
+            continue
         hn = HumanName(n)
-        
-        # If nameparser didn't find a last name but found a first name, it's a mononym
+
         if not hn.last and hn.first:
             hn.last = hn.first
-            
-        f_t = _tokens(hn.first) + _tokens(hn.middle)
-        fam_t = _tokens(hn.last)
-        
+
+        f_t = name_part_tokens(hn.first) + name_part_tokens(hn.middle)
+        fam_t = name_part_tokens(hn.last)
+
         for ft in f_t:
             first_toks.add(ft)
             first_toks.add(ft[0])
-        for fam in fam_t:
-            family_toks.add(fam)
-            
-    for fam in family_toks:
-        if fam: first_toks.add(fam[0])
+        family_toks.update(fam_t)
+
+    # Mononym fallback: only when no given-name tokens were found across all names
+    if not first_toks:
+        for fam in family_toks:
+            if fam:
+                first_toks.add(fam[0])
+
     return {"first_names": list(first_toks), "family_names": list(family_toks)}
 
 def main():
@@ -93,9 +86,15 @@ def main():
                         ['VARCHAR', 'VARCHAR'], 
                         'STRUCT(first_names VARCHAR[], family_names VARCHAR[])')
     
-    con.create_function("oax_names", oax_name_arrays, 
-                        ['VARCHAR', 'VARCHAR[]'], 
+    con.create_function("oax_names", oax_name_arrays,
+                        ['VARCHAR', 'VARCHAR[]'],
                         'STRUCT(first_names VARCHAR[], family_names VARCHAR[])')
+
+    concordance_csv = Path(__file__).resolve().parents[1] / "config" / "for_concordance.csv"
+    expanded_for_tokens = make_expanded_for_tokens(str(concordance_csv))
+    con.create_function("for_tokens", expanded_for_tokens,
+                        ['VARCHAR'],
+                        'VARCHAR[]')
 
     out_arc = PROCESSED_DATA / "arc_investigators_prep.parquet"
     out_oax = PROCESSED_DATA / "openalex_authors_prep.parquet"
@@ -108,7 +107,7 @@ def main():
     con.execute(f"""
         COPY (
             WITH arc_raw AS (
-                SELECT 
+                SELECT
                     i.unique_id,
                     i.grant_code as grant_id,
                     i.first_name,
@@ -116,24 +115,29 @@ def main():
                     g.admin_org as AdminOrg,
                     i.role_code as role,
                     i.orcid,
-                    g.primary_for_name as for_names
+                    g.primary_for_name as for_name,
+                    regexp_extract(s.primary_field_of_research, '^\\d{{4}}') as for_code
                 FROM '{PROCESSED_DATA}/investigators_raw.parquet' i
                 LEFT JOIN '{PROCESSED_DATA}/grants_flat.parquet' g
                     ON i.grant_code = g.grant_code
+                LEFT JOIN read_csv_auto('{GRANT_SUMMARIES_CSV}') s
+                    ON i.grant_code = s.grant_id
                 WHERE i.role_code IN ({roles_sql})
                   AND substring(i.grant_code, 1, 2) IN ({schemes_sql})
             )
-            SELECT 
+            SELECT
                 a.unique_id,
                 CONCAT_WS(' ', a.first_name, a.family_name) AS full_name,
                 arc_names(a.first_name, a.family_name).first_names AS first_names,
                 arc_names(a.first_name, a.family_name).family_names AS family_names,
                 a.orcid,
                 o.institution_id as institution_oax_id,
-                [a.for_names] as for_names,
+                [a.for_name] as for_names,
+                list_filter([a.for_code], x -> x != '') as for_codes,
+                for_tokens(a.for_name) as for_name_tokens,
                 'AU' as country_code
             FROM arc_raw a
-            INNER JOIN read_csv_auto('{ADMIN_ORGS_CSV}') o 
+            INNER JOIN read_csv_auto('{ADMIN_ORGS_CSV}') o
                 ON a.AdminOrg = o.organisationName_alias
         ) TO '{out_arc}' (FORMAT PARQUET)
     """)

@@ -43,3 +43,81 @@ def norm_alpha(s: str) -> str:
 def tokens(s: str) -> list[str]:
     """Lowercase alpha tokens after diacritic stripping."""
     return re.findall(r"[a-z]+", strip_diacriticals(s).lower())
+
+
+# Apostrophe characters that should be collapsed rather than treated as
+# word-splitting punctuation. The standard ASCII apostrophe (U+0027), the
+# Unicode modifier-letter apostrophe (U+02BC), and the grave accent (U+0060)
+# all appear in name data and would otherwise split "O'Brien" into ["o", "brien"].
+_APOSTROPHES = re.compile(r"['ʼ`]")
+
+
+_FOR_STOPWORDS = frozenset({
+    "a", "an", "and", "at", "excl", "for", "in", "incl", "of", "the", "to",
+})
+
+
+def for_name_tokens(name: str) -> list[str]:
+    """Tokenise a FOR field-of-research name into content words."""
+    if not name:
+        return []
+    return [
+        t for t in re.findall(r"[a-z]+", name.lower())
+        if t not in _FOR_STOPWORDS and len(t) > 1
+    ]
+
+
+def make_expanded_for_tokens(concordance_csv: str):
+    """
+    Return a closure that expands FOR tokens using a concordance.
+
+    Each name's token set is unioned with its canonical form's tokens so that
+    J>=0.5 near-synonym pairs share tokens (enabling Level 1 match) while
+    completely different fields share nothing (enabling anti-match at Level 0).
+    The concordance is keyed in both directions so aliases and canonicals
+    both gain the union token set.
+    """
+    import csv as _csv
+    # Build alias → canonical and canonical → [aliases] maps
+    alias_to_canonical: dict[str, str] = {}
+    canonical_to_aliases: dict[str, list[str]] = {}
+    with open(concordance_csv, newline="") as f:
+        for row in _csv.DictReader(f):
+            c, a = row["canonical"], row["alias"]
+            alias_to_canonical[a] = c
+            canonical_to_aliases.setdefault(c, []).append(a)
+
+    def _expanded(name: str) -> list[str]:
+        if not name:
+            return []
+        own = set(for_name_tokens(name))
+        # If this name is an alias, add canonical tokens
+        if name in alias_to_canonical:
+            own |= set(for_name_tokens(alias_to_canonical[name]))
+        # If this name is a canonical, add all alias tokens
+        for alias in canonical_to_aliases.get(name, []):
+            own |= set(for_name_tokens(alias))
+        return sorted(own)
+
+    return _expanded
+
+
+def name_part_tokens(s: str) -> list[str]:
+    """
+    Normalise a nameparser-parsed name part into alpha tokens.
+
+    Intended for the output of HumanName fields (first, middle, last) where
+    nameparser has already done the structural splitting. Within each part:
+      - diacritics are stripped (NFD normalise → ASCII, exotic hyphens → -)
+      - apostrophes are removed without splitting, so "O'Brien" → ["obrien"]
+        rather than ["o", "brien"]
+      - hyphens and spaces still delimit tokens, so "Watson-Parker" → ["watson",
+        "parker"] and "van den Berg" → ["van", "den", "berg"]
+
+    Apply to both ARC and OAX name fields so the token sets are comparable.
+    """
+    if not s:
+        return []
+    s = strip_diacriticals(s)
+    s = _APOSTROPHES.sub("", s)
+    return re.findall(r"[a-z]+", s.lower())
