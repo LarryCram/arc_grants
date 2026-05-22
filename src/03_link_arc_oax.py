@@ -40,15 +40,11 @@ def _prep_arc(con: duckdb.DuckDBPyConnection, path: Path) -> pd.DataFrame:
         full = [t for t in lst if len(t) > 1]
         return max(full, key=len) if full else lst[0]
 
-    def _initial(lst):
-        if lst is None or len(lst) == 0:
-            return None
-        full = [t for t in lst if len(t) > 1]
-        return full[0][0] if full else lst[0]
-
-    df["family_name_main"]    = df["family_names"].apply(_max_by_len)
-    df["first_initial"]       = df["first_names"].apply(_initial)
+    df["family_name_main"]     = df["family_names"].apply(_max_by_len)
     df["first_name_canonical"] = df["first_names"].apply(_canonical)
+    df["first_initial"]        = df["first_name_canonical"].apply(
+        lambda x: x[0] if isinstance(x, str) else None
+    )
     df["full_name_key"] = df.apply(
         lambda r: f"{r['first_name_canonical']}_{r['family_name_main']}"
         if (r["first_name_canonical"] is not None and r["family_name_main"] is not None)
@@ -95,9 +91,14 @@ def _prep_oax(con: duckdb.DuckDBPyConnection, path: Path) -> pd.DataFrame:
         return initials[0]
 
     df["family_name_main"]    = df["family_names"].apply(_max_by_len)
-    df["first_initial"]       = df["first_initials"].apply(_initial)
     df["first_name_canonical"] = df.apply(
         lambda r: _canonical(r["first_name_full"], r["first_initials"]), axis=1
+    )
+    # Derive first_initial from first_name_canonical, not first_initials[0].
+    # first_initials ordering is arbitrary (set-derived); canonical is always
+    # the longest full given name, matching how ARC computes the same field.
+    df["first_initial"] = df["first_name_canonical"].apply(
+        lambda x: x[0] if isinstance(x, str) else None
     )
     df["full_name_key"] = df.apply(
         lambda r: f"{r['first_name_canonical']}_{r['family_name_main']}"
@@ -174,12 +175,14 @@ def main():
             cl.CustomComparison(
                 output_column_name="full_name_key",
                 comparison_levels=[
-                    cll.NullLevel("full_name_key"),
-                    cll.ExactMatchLevel("full_name_key").configure(
-                        tf_adjustment_column="full_name_key",
-                        tf_adjustment_weight=1.0,
-                    ),
-                    cll.ElseLevel(),
+                    {"sql_condition": "full_name_key_l IS NULL OR full_name_key_r IS NULL",
+                     "label_for_charts": "null", "is_null_level": True},
+                    {"sql_condition": "full_name_key_l = full_name_key_r",
+                     "label_for_charts": "Exact match",
+                     "tf_adjustment_column": "full_name_key",
+                     "tf_adjustment_weight": 1.0,
+                     "u_probability": 4.25e-06},
+                    {"sql_condition": "ELSE", "label_for_charts": "All other"},
                 ],
             ),
             cl.ExactMatch("orcid").configure(
@@ -221,6 +224,28 @@ def main():
         .sort_values(["arc_id", "match_probability"], ascending=[True, False])
     )
     links["high_confidence"] = links["match_probability"] >= LINK_THRESHOLD
+
+    # Force-add ORCID-exact-match pairs missed by predict (corrupted OAX name fields
+    # can push score below threshold despite identical ORCID).
+    orcid_pairs = (
+        df_arc[df_arc["orcid"].notna()][["unique_id", "orcid"]]
+        .merge(
+            df_oax[df_oax["orcid"].notna()][["unique_id", "orcid"]],
+            on="orcid",
+            suffixes=("_arc", "_oax"),
+        )
+        .rename(columns={"unique_id_arc": "arc_id", "unique_id_oax": "oax_id"})
+        [["arc_id", "oax_id"]]
+    )
+    existing = set(zip(links["arc_id"], links["oax_id"]))
+    forced = orcid_pairs[
+        ~orcid_pairs.apply(lambda r: (r["arc_id"], r["oax_id"]) in existing, axis=1)
+    ].copy()
+    if len(forced):
+        forced["match_probability"] = 1.0
+        forced["high_confidence"] = True
+        print(f"  Forced {len(forced)} ORCID-exact pairs missed by predict.")
+        links = pd.concat([links, forced], ignore_index=True)
 
     links.to_parquet(out_path, index=False)
 

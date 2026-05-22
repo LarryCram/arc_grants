@@ -14,7 +14,7 @@ from nameparser import HumanName
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import OAX_AUTHORS, PROCESSED_DATA, ADMIN_ORGS_CSV, GRANT_SUMMARIES_CSV
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
-from src.utils.names import make_expanded_for_tokens, name_part_tokens
+from src.utils.names import make_expanded_for_tokens, name_part_tokens, strip_diacriticals
 
 
 def _initials(toks: list[str]) -> list[str]:
@@ -30,47 +30,45 @@ def arc_name_arrays(first_name: str, family_name: str) -> dict:
         hn.last = hn.first
 
     f_toks = name_part_tokens(hn.first) + name_part_tokens(hn.middle)
-    fam_toks = name_part_tokens(hn.last)
+    fam_norm = strip_diacriticals(hn.last).lower().strip() if hn.last else ""
 
     first_names = list(set(f_toks + _initials(f_toks)))
-    family_names = list(set(fam_toks))
+    family_names = [fam_norm] if fam_norm else []
 
-    # Mononym fallback: only when there are no given-name tokens (e.g. "Cher").
-    # Do NOT fire for normal names — adding the family-name initial to first_names
-    # would pollute matching (e.g. "obrien"[0] = "o" falsely appearing as a given name).
-    if not f_toks:
-        for fam in family_names:
-            if fam:
-                first_names.append(fam[0])
+    if not f_toks and fam_norm:
+        first_names.append(fam_norm[0])
 
     return {"first_names": list(set(first_names)), "family_names": family_names}
 
 
 def oax_name_arrays(display_name: str, alts: list[str]) -> dict:
-    all_names = [display_name] if display_name else []
-    if alts:
-        all_names.extend(alts)
-
     first_toks: set[str] = set()
     family_toks: set[str] = set()
 
-    for n in all_names:
+    def _parse_name(n: str) -> None:
         if not n:
-            continue
+            return
         hn = HumanName(n)
-
         if not hn.last and hn.first:
             hn.last = hn.first
-
-        f_t = name_part_tokens(hn.first) + name_part_tokens(hn.middle)
-        fam_t = name_part_tokens(hn.last)
-
-        for ft in f_t:
+        for ft in name_part_tokens(hn.first) + name_part_tokens(hn.middle):
             first_toks.add(ft)
             first_toks.add(ft[0])
-        family_toks.update(fam_t)
+        fam_norm = strip_diacriticals(hn.last).lower().strip() if hn.last else ""
+        if fam_norm:
+            family_toks.add(fam_norm)
 
-    # Mononym fallback: only when no given-name tokens were found across all names
+    # Primary: display_name is always "First Last" and curated by OAX.
+    _parse_name(display_name)
+
+    # Fallback: only use alternatives when display_name yields no family name.
+    # Alternatives are contaminated with co-author names (OAX disambiguation errors)
+    # and include reversed "Last, First" / "Last First" forms; avoid unless necessary.
+    if not family_toks and alts:
+        for alt in alts:
+            _parse_name(alt)
+
+    # Mononym fallback: when no given-name tokens exist, seed with family initial.
     if not first_toks:
         for fam in family_toks:
             if fam:
@@ -145,11 +143,11 @@ def main():
     """)
 
     print(f"\n[2/2] Processing OpenAlex Authors (saving to {out_oax})...")
-    
+
     con.execute(f"""
         COPY (
             WITH base AS (
-                SELECT 
+                SELECT
                     id AS unique_id,
                     display_name AS full_name,
                     oax_names(display_name, display_name_alternatives) AS parsed,
@@ -180,6 +178,48 @@ def main():
             FROM base
         ) TO '{out_oax}' (FORMAT PARQUET)
     """)
+
+    print(f"\n[3/3] Building OAX term-frequency tables...")
+    import pandas as pd
+
+    df_oax = pd.read_parquet(out_oax)
+    n = len(df_oax)
+
+    def _max_by_len(lst):
+        if lst is None or len(lst) == 0:
+            return None
+        return max(lst, key=len)
+
+    def _canonical(row):
+        full = row["first_name_full"]
+        inits = row["first_initials"]
+        if full is not None and len(full) > 0:
+            return max(full, key=len)
+        if inits is not None and len(inits) > 0:
+            return inits[0]
+        return None
+
+    df_oax["family_name_main"]     = df_oax["family_names"].apply(_max_by_len)
+    df_oax["first_name_canonical"] = df_oax.apply(_canonical, axis=1)
+    df_oax["full_name_key"] = df_oax.apply(
+        lambda r: f"{r['first_name_canonical']}_{r['family_name_main']}"
+        if r["first_name_canonical"] is not None and r["family_name_main"] is not None
+        else None,
+        axis=1,
+    )
+
+    for col, fname in [
+        ("family_name_main",     "oax_tf_family_name.parquet"),
+        ("first_name_canonical", "oax_tf_first_name.parquet"),
+        ("full_name_key",        "oax_tf_full_name.parquet"),
+    ]:
+        counts = df_oax[col].dropna().value_counts()
+        tf = counts.reset_index()
+        tf.columns = [col, f"tf_{col}"]
+        tf[f"tf_{col}"] = tf[f"tf_{col}"] / n
+        tf.to_parquet(PROCESSED_DATA / fname, index=False)
+        print(f"  {fname}: {len(tf):,} unique values")
+
     print("Data preparation complete!")
 
 if __name__ == "__main__":
