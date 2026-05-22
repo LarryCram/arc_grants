@@ -53,7 +53,8 @@ _APOSTROPHES = re.compile(r"['ʼ`]")
 
 
 _FOR_STOPWORDS = frozenset({
-    "a", "an", "and", "at", "excl", "for", "in", "incl", "of", "the", "to",
+    "a", "an", "and", "at", "excl", "for", "in", "incl", "of", "other",
+    "the", "to",
 })
 
 

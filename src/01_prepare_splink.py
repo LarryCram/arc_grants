@@ -129,6 +129,8 @@ def main():
                 a.unique_id,
                 CONCAT_WS(' ', a.first_name, a.family_name) AS full_name,
                 arc_names(a.first_name, a.family_name).first_names AS first_names,
+                list_filter(arc_names(a.first_name, a.family_name).first_names, x -> len(x) = 1)  AS first_initials,
+                list_filter(arc_names(a.first_name, a.family_name).first_names, x -> len(x) > 1)  AS first_name_full,
                 arc_names(a.first_name, a.family_name).family_names AS family_names,
                 a.orcid,
                 o.institution_id as institution_oax_id,
@@ -163,10 +165,12 @@ def main():
                     list_transform(affiliations, x -> x.institution.country_code), 'AU'
                 )
             )
-            SELECT 
+            SELECT
                 unique_id,
                 full_name,
                 parsed.first_names AS first_names,
+                list_filter(parsed.first_names, x -> len(x) = 1)  AS first_initials,
+                list_filter(parsed.first_names, x -> len(x) > 1)  AS first_name_full,
                 parsed.family_names AS family_names,
                 orcid,
                 inst_ids,

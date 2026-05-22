@@ -1,36 +1,42 @@
 canonical,alias,jaccard
-Other Human Society,Other Studies In Human Society,0.75
+Psychology,Other Psychology,1.00
 Art Theory and Criticism,"Art History, Theory and Criticism",0.75
 Visual Arts,Visual Arts and Crafts,0.67
+Veterinary Sciences,Other Agricultural and Veterinary Sciences,0.67
 Theory of Computation,Computation Theory and Mathematics,0.67
 Reproductive Medicine,Paediatrics and Reproductive Medicine,0.67
 Religious Studies,Religion and Religious Studies,0.67
 Public Health,Public Health and Health Services,0.67
+Physical Chemistry,Physical Chemistry (Incl. Structural),0.67
+Other Human Society,Other Studies In Human Society,0.67
 Environmental Management,Environmental Science and Management,0.67
 Electrical Engineering,Electrical and Electronic Engineering,0.67
+Cognitive Sciences,Other Psychology and Cognitive Sciences,0.67
 Astronomical Sciences,Astronomical and Space Sciences,0.67
-Aboriginal and Torres Strait Islander Sciences,Aboriginal and Torres Strait Islander Education,0.67
-Aboriginal and Torres Strait Islander Sciences,Aboriginal and Torres Strait Islander Health and Wellbeing,0.57
-Aboriginal and Torres Strait Islander Education,Aboriginal and Torres Strait Islander Health and Wellbeing,0.57
-Veterinary Sciences,Other Agricultural and Veterinary Sciences,0.50
-Psychology,Other Psychology,0.50
+Performing Arts and Creative Writing,Other Studies In Creative Arts and Writing,0.60
 Psychology,Biological Psychology,0.50
 Physiology,Medical Physiology,0.50
-Physical Chemistry,Physical Chemistry (Incl. Structural),0.50
-Performing Arts and Creative Writing,Other Studies In Creative Arts and Writing,0.50
 Performing Arts,Performing Arts and Creative Writing,0.50
-Other Psychology,Other Psychology and Cognitive Sciences,0.50
-Other Physical Sciences,Other Environmental Sciences,0.50
-Other Physical Sciences,Other Biological Sciences,0.50
-Other Earth Sciences,Other Physical Sciences,0.50
-Other Earth Sciences,Other Environmental Sciences,0.50
-Other Earth Sciences,Other Chemical Sciences,0.50
-Other Earth Sciences,Other Biological Sciences,0.50
-Other Chemical Sciences,Other Physical Sciences,0.50
-Other Chemical Sciences,Other Environmental Sciences,0.50
-Other Chemical Sciences,Other Biological Sciences,0.50
-Other Biological Sciences,Other Environmental Sciences,0.50
+Other Psychology,Biological Psychology,0.50
+Other Engineering,Software Engineering,0.50
+Other Engineering,Mechanical Engineering,0.50
+Other Engineering,Materials Engineering,0.50
+Other Engineering,Maritime Engineering,0.50
+Other Engineering,Manufacturing Engineering,0.50
+Other Engineering,Interdisciplinary Engineering,0.50
+Other Engineering,Geomatic Engineering,0.50
+Other Engineering,Environmental Engineering,0.50
+Other Engineering,Engineering Design,0.50
+Other Engineering,Electrical Engineering,0.50
+Other Engineering,Communications Engineering,0.50
+Other Engineering,Chemical Engineering,0.50
+Other Engineering,Biomedical Engineering,0.50
+Other Engineering,Automotive Engineering,0.50
+Other Engineering,Aerospace Engineering,0.50
+Other Education,Education Systems,0.50
+Other Economics,Applied Economics,0.50
 Optical Physics,"Atomic, Molecular and Optical Physics",0.50
+Nuclear and Plasma Physics,"Atomic, Molecular, Nuclear, Particle and Plasma Physics",0.50
 Microbiology,Medical Microbiology,0.50
 Law,Public Law,0.50
 Law,Maori Law,0.50
@@ -38,13 +44,36 @@ Law,Law In Context,0.50
 Law,Commercial Law,0.50
 Health Services and Systems,Public Health and Health Services,0.50
 Distributed Computing,Distributed Computing and Systems Software,0.50
-Design,Engineering Design,0.50
-Data Management and Data Science,Environmental Science and Management,0.50
-Cognitive Sciences,Other Psychology and Cognitive Sciences,0.50
+Cognitive and Computational Psychology,Other Psychology and Cognitive Sciences,0.50
+Civil Engineering,Other Engineering,0.50
 Artificial Intelligence,Artificial Intelligence and Image Processing,0.50
-Aboriginal and Torres Strait Islander Sciences,"Aboriginal and Torres Strait Islander Peoples, Society and Community",0.50
-Aboriginal and Torres Strait Islander Sciences,Aboriginal and Torres Strait Islander Environmental Knowledges and Management,0.50
-Aboriginal and Torres Strait Islander Sciences,"Aboriginal and Torres Strait Islander Culture, Language and History",0.50
-Aboriginal and Torres Strait Islander Education,"Aboriginal and Torres Strait Islander Peoples, Society and Community",0.50
-Aboriginal and Torres Strait Islander Education,Aboriginal and Torres Strait Islander Environmental Knowledges and Management,0.50
-Aboriginal and Torres Strait Islander Education,"Aboriginal and Torres Strait Islander Culture, Language and History",0.50
+Artificial Intelligence and Image Processing,Machine Learning,0.90
+Artificial Intelligence,Machine Learning,0.90
+Information Systems,Data Management and Data Science,0.90
+Computer Software,Cybersecurity and Privacy,0.85
+Computer Software,Human-Centred Computing,0.85
+Computer Vision and Multimedia Computation,"Graphics, Augmented Reality and Games",0.85
+Electrical and Electronic Engineering,"Electronics, Sensors and Digital Hardware",0.85
+Human Movement and Sports Science,Sports Science and Exercise,0.95
+Transportation and Freight Services,"Transportation, Logistics and Supply Chains",0.90
+Geomatic Engineering,Geoinformatics,0.95
+Atmospheric Sciences,Climate Change Science,0.90
+Environmental Science and Management,Climate Change Impacts and Adaptation,0.85
+Environmental Science and Management,Pollution and Contamination,0.80
+Physical Geography and Environmental Geoscience,Hydrology,0.85
+"Heritage, Archive and Museum Studies",Curatorial and Related Studies,0.85
+Crop and Pasture Production,Horticultural Production,0.85
+"Agriculture, Land and Farm Management",Soil Sciences,0.75
+Genetics,Bioinformatics and Computational Biology,0.85
+Biochemistry and Cell Biology,Bioinformatics and Computational Biology,0.80
+Biochemistry and Cell Biology,Medical Biochemistry and Metabolomics,0.85
+Biological Psychology,Neurosciences,0.85
+Clinical Sciences,Cardiorespiratory Medicine and Haematology,0.85
+Clinical Sciences,Oncology and Carcinogenesis,0.85
+Paediatrics,Paediatrics and Reproductive Medicine,0.80
+Applied and Developmental Psychology,Clinical and Health Psychology,0.85
+Psychology,Social and Personality Psychology,0.85
+Cognitive Sciences,Cognitive and Computational Psychology,0.85
+Business and Management,"Strategy, Management and Organisational Behaviour",0.80
+Applied Mathematics,Numerical and Computational Mathematics,0.80
+Applied Economics,Econometrics,0.80
