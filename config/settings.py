@@ -36,6 +36,9 @@ GRANT_SUMMARIES_CSV = RAW_DATA / "grant_summaries.csv"
 ADMIN_ORGS_CSV      = DATA_ROOT / "admin_orgs.csv"
 FOR_OAX_CSV         = DATA_ROOT / "for_oax_concordance.csv"
 
+# Disambiguation thresholds (04_resolve_links.py)
+TOP_CUT = 0.7   # min proportion of group works_count for dominant OAX split-record
+
 # OpenAlex
 OAX_AUTHORS     = OPENALEX_DIR / "authors"
 OAX_AUTHORSHIPS = OPENALEX_DIR / "authorships"

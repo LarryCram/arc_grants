@@ -70,23 +70,48 @@ The Splink pipeline replaces the entire old multi-layer pipeline in `src_archive
 
 ## 04_resolve_links.py Design
 Disambiguation of ARC persons with 2+ HC OAX matches. Steps in order:
-1. **OAX same-ORCID pre-dedup** (NOT YET IMPLEMENTED): if two OAX candidates share an
-   ORCID with each other, they are the same person split across two OAX IDs. Keep the one
-   with the most works as representative; add others to `secondary_oax_ids`.
-2. **ARC–OAX ORCID match**: if exactly 1 HC candidate matches the ARC person's ORCID → resolve.
-3. **Institution overlap**: restrict to candidates with maximum overlap count (if any > 0).
-4. **Unique highest probability**: among remaining → resolve.
-5. **works_count dominance**: `max(works_count) / sum(works_count) > 0.90` → OAX split record,
-   take the dominant one. Distinguishes split records (116 vs 2) from different people (52 vs 29).
-6. **Defer**: genuine common-name collisions.
+0. **OAX same-ORCID pre-dedup**: two OAX candidates sharing an ORCID → split records;
+   keep dominant (`works_count / group_total > TOP_CUT=0.7`).
+0b. **OAX same-topic pre-dedup**: two OAX candidates sharing ≥1 specific topic name → split
+    records; keep the one with more works. ORCID-matched records are protected from removal.
+1. **ARC–OAX ORCID match**: if exactly 1 HC candidate matches the ARC person's ORCID → resolve.
+2. **Institution overlap**: restrict to candidates with maximum overlap count (if any > 0).
+2b. **Field score filter**: restrict to candidates with maximum field score (unigram+bigram overlap
+    of ARC FOR tokens vs OAX topic_names/subfield_names). Only fires if `max_fs >= 2` AND
+    `min_fs == 0` (at least one candidate has zero overlap — avoids within-field false positives).
+3. **Unique highest probability**: among remaining → resolve.
+4. **works_count dominance**: `max / sum > TOP_CUT` → OAX split record, take dominant.
+5. **Defer**: genuine common-name collisions.
+Manual overrides: `config/manual_resolutions.csv` (resolve/unlink actions applied after all steps).
 
 Output columns: `arc_id, oax_id, match_probability, resolved_by, secondary_oax_ids`
-`secondary_oax_ids`: list of all other HC candidates not chosen (split-record duplicates + alternatives).
+`secondary_oax_ids`: all other HC candidates not chosen (split-record duplicates + alternatives).
 
-## Current Linkage Results (2026-05-22)
-- Resolved: 20,517 / 22,819 (89.9%)
-- Ambiguous deferred: 1,411 (common names, evenly split works — cannot resolve without extra signal)
-- Unlinked: 891 (no HC match — not in OAX AU, or pre-Australia overseas researchers)
+## Current Linkage Results (2026-05-23)
+- Resolved: 21,449 / 22,819 (94.0%)
+  - unique_hc: 11,451 | oax_orcid_dedup: 845 | oax_topic_dedup: 2,463 | orcid: 3,790
+  - inst_overlap: 1,842 | field: 377 | probability: 3 | works_count: 673 | manual: 5
+- Ambiguous deferred: 478
+- Manual unlinked: 1
+- Unlinked (no HC match): 891
+
+## Resolution Coverage by ARC Scheme (2026-05-23)
+| Scheme | Grants | Persons | % Unmatched |
+|--------|-------:|--------:|------------:|
+| DP Discovery Projects         | 17,654 | 15,754 | 5.0% |
+| LP Linkage Projects           |  7,283 | 11,001 | 6.4% |
+| DE Early Career               |  2,876 |  2,866 | 3.3% |
+| FT Future Fellowships         |  2,199 |  2,197 | 2.5% |
+| FL Laureate Fellowships       |    277 |    277 | 3.2% |
+| FF Federation Fellowships     |    157 |    141 | 3.5% |
+| DI Discovery Indigenous       |     64 |     60 | 23.3% |
+Older grants (2002–05) have ~7–9% unmatched; post-2018 grants ~2%.
+LP Fellows (industry postdocs, role_code APD/APDI) have 12.1% unmatched.
+
+## Next Priority (start of next session)
+**Identify and verify all FF (Federation Fellows) and FL (Australian Laureate Fellows)** —
+small cohorts (141 and 277 persons), high-profile, should be near-100% matchable.
+These are role_code FF/FL in investigators_raw.parquet; is_fellowship=True.
 
 ## Splink Design Decisions
 - **`arrays_to_explode` is NOT supported** in EM training sessions

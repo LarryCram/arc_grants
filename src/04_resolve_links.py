@@ -18,6 +18,8 @@ Output: arc_oax_resolved.parquet
             All HC candidate rows for ARC persons that remain ambiguous after all steps.
 
 Resolution strategy (applied to HC matches only):
+  0. OAX same-ORCID pre-dedup: two OAX candidates sharing an ORCID are split records;
+     keep the one with more works, collapse others into secondary_oax_ids.
   1. ORCID exact match: if exactly 1 HC candidate shares the ARC person's ORCID → resolve.
   2. Institution overlap: restrict to candidates with maximum overlap (if any > 0).
   3. Unique highest match_probability among remaining candidates → resolve.
@@ -32,9 +34,11 @@ from pathlib import Path
 
 import duckdb
 import pandas as pd
+from collections import defaultdict
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from config.settings import PROCESSED_DATA, OAX_AUTHORS
+from config.settings import PROCESSED_DATA, OAX_AUTHORS, TOP_CUT
+from src.utils.names import for_name_tokens
 
 LINK_THRESHOLD = 0.9
 
@@ -50,14 +54,17 @@ def main():
 
     print("[1/4] Loading data...")
     links = con.execute(f"SELECT * FROM read_parquet('{link_path}')").fetchdf()
-    arc   = con.execute(f"SELECT cluster_id, orcids, inst_arr FROM read_parquet('{arc_path}')").fetchdf()
-    oax   = con.execute(f"SELECT unique_id, orcid, inst_ids FROM read_parquet('{oax_path}')").fetchdf()
+    arc   = con.execute(f"SELECT cluster_id, orcids, inst_arr, for_names FROM read_parquet('{arc_path}')").fetchdf()
+    oax   = con.execute(f"SELECT unique_id, orcid, inst_ids, topic_names, subfield_names FROM read_parquet('{oax_path}')").fetchdf()
 
     arc["orcid"] = arc["orcids"].apply(lambda x: x[0] if x is not None and len(x) > 0 else None)
-    arc_orcid = dict(zip(arc["cluster_id"], arc["orcid"]))
-    arc_inst  = dict(zip(arc["cluster_id"], arc["inst_arr"]))
-    oax_orcid = dict(zip(oax["unique_id"],  oax["orcid"]))
-    oax_inst  = dict(zip(oax["unique_id"],  oax["inst_ids"]))
+    arc_orcid    = dict(zip(arc["cluster_id"], arc["orcid"]))
+    arc_inst     = dict(zip(arc["cluster_id"], arc["inst_arr"]))
+    arc_for      = dict(zip(arc["cluster_id"], arc["for_names"]))
+    oax_orcid    = dict(zip(oax["unique_id"],  oax["orcid"]))
+    oax_inst     = dict(zip(oax["unique_id"],  oax["inst_ids"]))
+    oax_topics   = dict(zip(oax["unique_id"],  oax["topic_names"]))
+    oax_subfields= dict(zip(oax["unique_id"],  oax["subfield_names"]))
 
     hc = links[links["high_confidence"]].copy()
     per_arc = hc.groupby("arc_id").size()
@@ -91,6 +98,28 @@ def main():
 
     print("[3/4] Disambiguating...")
 
+    def _lst(v):
+        return list(v) if v is not None else []
+
+    def _field_score(arc_id, oax_id):
+        arc_toks, arc_bg = set(), set()
+        for fn in _lst(arc_for.get(arc_id)):
+            toks = for_name_tokens(fn)
+            arc_toks.update(toks)
+            arc_bg.update((toks[i], toks[i+1]) for i in range(len(toks) - 1))
+        if not arc_toks:
+            return 0
+        oax_toks, oax_bg = set(), set()
+        for t in _lst(oax_topics.get(oax_id)):
+            toks = for_name_tokens(t)
+            oax_toks.update(toks)
+            oax_bg.update((toks[i], toks[i+1]) for i in range(len(toks) - 1))
+        for t in _lst(oax_subfields.get(oax_id)):
+            toks = for_name_tokens(t)
+            oax_toks.update(toks)
+            oax_bg.update((toks[i], toks[i+1]) for i in range(len(toks) - 1))
+        return len(arc_toks & oax_toks) + len(arc_bg & oax_bg)
+
     def _inst_overlap(arc_id, oax_id):
         a = arc_inst.get(arc_id)
         o = oax_inst.get(oax_id)
@@ -116,6 +145,67 @@ def main():
     for arc_id, group in ambig.groupby("arc_id"):
         all_oax = set(group["oax_id"])
 
+        # Step 0: OAX same-ORCID pre-dedup — two OAX IDs sharing an ORCID are
+        # split records of the same person; keep the dominant one (>80% of group
+        # works_count). If no single record is dominant, leave the group intact.
+        orcid_to_oax_ids = defaultdict(list)
+        for oax_id in all_oax:
+            orcid = oax_orcid.get(oax_id)
+            if orcid:
+                orcid_to_oax_ids[orcid].append(oax_id)
+        split_secondaries = set()
+        for ids in orcid_to_oax_ids.values():
+            if len(ids) > 1:
+                wcs = {oid: oax_works.get(oid, 0) for oid in ids}
+                total = sum(wcs.values())
+                best = max(wcs, key=wcs.get)
+                if total > 0 and wcs[best] / total > TOP_CUT:
+                    split_secondaries.update(oid for oid in ids if oid != best)
+        if split_secondaries:
+            group = group[~group["oax_id"].isin(split_secondaries)]
+        if len(group) == 1:
+            r = group.iloc[0]
+            resolved_rows.append({
+                "arc_id": r["arc_id"], "oax_id": r["oax_id"],
+                "match_probability": r["match_probability"],
+                "resolved_by": "oax_orcid_dedup",
+                "secondary_oax_ids": list(all_oax - {r["oax_id"]}),
+            })
+            continue
+
+        # Step 0b: same-topic pre-dedup — two OAX candidates sharing ≥1 specific topic
+        # are likely split records of the same person; keep the one with more works.
+        topic_to_oax_ids = defaultdict(list)
+        for oax_id in set(group["oax_id"]):
+            for t in _lst(oax_topics.get(oax_id)):
+                topic_to_oax_ids[t].append(oax_id)
+        # Protect any OAX record that matches the ARC person's own ORCID.
+        arc_person_orcid = arc_orcid.get(arc_id)
+        orcid_protected = {
+            oid for oid in set(group["oax_id"])
+            if arc_person_orcid and oax_orcid.get(oid) == arc_person_orcid
+        }
+        topic_secondaries = set()
+        for ids in topic_to_oax_ids.values():
+            if len(ids) > 1:
+                wcs = {oid: oax_works.get(oid, 0) for oid in ids}
+                best = max(wcs, key=wcs.get)
+                topic_secondaries.update(
+                    oid for oid in ids if oid != best and oid not in orcid_protected
+                )
+        if topic_secondaries:
+            group = group[~group["oax_id"].isin(topic_secondaries)]
+            split_secondaries.update(topic_secondaries)
+        if len(group) == 1:
+            r = group.iloc[0]
+            resolved_rows.append({
+                "arc_id": r["arc_id"], "oax_id": r["oax_id"],
+                "match_probability": r["match_probability"],
+                "resolved_by": "oax_topic_dedup",
+                "secondary_oax_ids": list(all_oax - {r["oax_id"]}),
+            })
+            continue
+
         # Step 1: unique ORCID match
         orcid_matches = group[group["orcid_match"]]
         if len(orcid_matches) == 1:
@@ -136,6 +226,17 @@ def main():
             candidates = group
             by = "probability"
 
+        # Step 2b: restrict by field match (OAX topics/subfields vs ARC FOR codes)
+        field_scores = {r["oax_id"]: _field_score(arc_id, r["oax_id"])
+                        for _, r in candidates.iterrows()}
+        max_fs = max(field_scores.values())
+        min_fs = min(field_scores.values())
+        if max_fs >= 2 and min_fs == 0:
+            field_filtered = candidates[candidates["oax_id"].map(field_scores) == max_fs]
+            if len(field_filtered) < len(candidates):
+                candidates = field_filtered
+                by = "field"
+
         # Step 3: unique highest probability
         max_prob = candidates["match_probability"].max()
         best = candidates[candidates["match_probability"] == max_prob]
@@ -151,7 +252,7 @@ def main():
         # Step 4: one OAX record holds >90% of combined works → split record, take dominant
         sum_wc = best["works_count"].sum()
         max_wc = best["works_count"].max()
-        if sum_wc > 0 and max_wc / sum_wc > 0.9:
+        if sum_wc > 0 and max_wc / sum_wc > TOP_CUT:
             top = best[best["works_count"] == max_wc]
             if len(top) == 1:
                 r = top.iloc[0]
@@ -176,26 +277,69 @@ def main():
         columns=["arc_id", "oax_id", "match_probability", "inst_overlap"]
     )
 
-    print("[4/4] Saving outputs...")
     resolved = pd.concat([resolved_single, resolved_ambig], ignore_index=True)
+
+    print("[4/4] Applying manual resolutions...")
+    manual_path = Path(__file__).resolve().parents[1] / "config" / "manual_resolutions.csv"
+    manual_unlinked = pd.DataFrame(columns=["arc_id", "note"])
+    n_manual_resolve = n_manual_unlink = 0
+    if manual_path.exists():
+        manual_df = pd.read_csv(manual_path).dropna(subset=["arc_id"])
+        for _, row in manual_df.iterrows():
+            aid    = row["arc_id"]
+            action = row["action"]
+            note   = row.get("note", "")
+            if action == "resolve":
+                others = list(
+                    (set(deferred.loc[deferred["arc_id"] == aid, "oax_id"])
+                     | set(resolved.loc[resolved["arc_id"] == aid, "oax_id"]))
+                    - {row["oax_id"]}
+                )
+                deferred = deferred[deferred["arc_id"] != aid]
+                resolved  = resolved[resolved["arc_id"] != aid]
+                resolved  = pd.concat([resolved, pd.DataFrame([{
+                    "arc_id": aid, "oax_id": row["oax_id"],
+                    "match_probability": 1.0, "resolved_by": "manual",
+                    "secondary_oax_ids": others,
+                }])], ignore_index=True)
+                n_manual_resolve += 1
+            elif action == "unlink":
+                deferred = deferred[deferred["arc_id"] != aid]
+                resolved  = resolved[resolved["arc_id"] != aid]
+                manual_unlinked = pd.concat([manual_unlinked, pd.DataFrame([{
+                    "arc_id": aid, "note": note,
+                }])], ignore_index=True)
+                n_manual_unlink += 1
+            # defer_keep: no data change — recorded for reference only
+    if n_manual_resolve or n_manual_unlink:
+        print(f"  manual resolve: {n_manual_resolve}  manual unlink: {n_manual_unlink}")
+    else:
+        print("  (none)")
+
+    out_manual_unlinked = PROCESSED_DATA / "arc_manual_unlinked.parquet"
+
+    print("[5/5] Saving outputs...")
     resolved.to_parquet(out_resolved, index=False)
     deferred.to_parquet(out_ambiguous, index=False)
+    manual_unlinked.to_parquet(out_manual_unlinked, index=False)
 
     all_arc = con.execute(f"SELECT count(*) FROM read_parquet('{arc_path}')").fetchone()[0]
 
-    by_counts = resolved_ambig["resolved_by"].value_counts() if len(resolved_ambig) else pd.Series(dtype=int)
+    by_counts = resolved["resolved_by"].value_counts() if len(resolved) else pd.Series(dtype=int)
     print(f"\n  Total ARC persons:              {all_arc:,}")
-    print(f"  Resolved (1 HC match):          {len(resolved_single):,}")
-    print(f"  Resolved (disambiguated):        {len(resolved_ambig):,}")
-    for label in ["orcid", "inst_overlap", "probability", "works_count"]:
+    print(f"  Resolved (1 HC match):          {by_counts.get('unique_hc', 0):,}")
+    print(f"  Resolved (disambiguated):        {len(resolved) - by_counts.get('unique_hc', 0):,}")
+    for label in ["oax_orcid_dedup", "oax_topic_dedup", "orcid", "inst_overlap", "field", "probability", "works_count", "manual"]:
         n = by_counts.get(label, 0)
         if n:
             print(f"    of which by {label+':':16s} {n:,}")
     print(f"  Resolved total:                  {len(resolved):,}  ({100*len(resolved)/all_arc:.1f}%)")
     print(f"  Ambiguous deferred:              {deferred['arc_id'].nunique():,}")
-    print(f"  Unlinked (no HC match):          {all_arc - len(resolved) - deferred['arc_id'].nunique():,}")
+    print(f"  Manual unlinked:                 {len(manual_unlinked):,}")
+    print(f"  Unlinked (no HC match):          {all_arc - len(resolved) - deferred['arc_id'].nunique() - len(manual_unlinked):,}")
     print(f"\n  → {out_resolved}")
     print(f"  → {out_ambiguous}")
+    print(f"  → {out_manual_unlinked}")
 
 
 if __name__ == "__main__":
