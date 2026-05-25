@@ -175,6 +175,13 @@ def main():
 
         # Step 0b: same-topic pre-dedup — two OAX candidates sharing ≥1 specific topic
         # are likely split records of the same person; keep the one with more works.
+        # Limitation: this collapses the photonics-related splits of a common surname
+        # (e.g. Tucker) correctly, but leaves unrelated namesakes with different topics
+        # in the group. If those namesakes have even slight field overlap with the ARC
+        # FOR codes, step 2b's min_fs==0 guard won't fire and the case defers.
+        # A future improvement: treat a topic-sharing cluster as a confirmed OAX split
+        # when one member carries an ORCID (even if the ARC person lacks one), and
+        # use the ORCID-bearing member's identity to exclude out-of-field namesakes.
         topic_to_oax_ids = defaultdict(list)
         for oax_id in set(group["oax_id"]):
             for t in _lst(oax_topics.get(oax_id)):

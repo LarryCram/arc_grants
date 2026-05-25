@@ -20,97 +20,57 @@ import splink.comparison_level_library as cll
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import PROCESSED_DATA
+from src.utils.names import max_by_len, parse_given
 
 PREDICT_THRESHOLD = 0.5
 LINK_THRESHOLD    = 0.9
+
+
+def _make_full_name_key(df):
+    return (
+        (df["first_compound"] + "_" + df["family_name_main"])
+        .where(df["first_compound"].notna() & df["family_name_main"].notna())
+    )
 
 
 def _prep_arc(con: duckdb.DuckDBPyConnection, path: Path) -> pd.DataFrame:
     df = con.execute(f"SELECT * FROM read_parquet('{path}')").fetchdf()
     print(f"  ARC persons: {len(df)}")
 
-    def _max_by_len(lst):
-        if lst is None or len(lst) == 0:
-            return None
-        return max(lst, key=len)
+    df["family_name_main"] = df["family_names"].apply(max_by_len)
 
-    def _canonical(lst):
-        if lst is None or len(lst) == 0:
-            return None
-        full = [t for t in lst if len(t) > 1]
-        return max(full, key=len) if full else lst[0]
-
-    df["family_name_main"]     = df["family_names"].apply(_max_by_len)
-    df["first_name_canonical"] = df["first_names"].apply(_canonical)
-    df["first_initial"]        = df["first_name_canonical"].apply(
-        lambda x: x[0] if isinstance(x, str) else None
+    parsed = df["full_names"].apply(max_by_len).apply(parse_given)
+    df[["first_name", "middle_name", "first_compound", "first_initial", "middle_initial"]] = (
+        pd.DataFrame(parsed.tolist(), index=df.index)
     )
-    df["full_name_key"] = df.apply(
-        lambda r: f"{r['first_name_canonical']}_{r['family_name_main']}"
-        if (r["first_name_canonical"] is not None and r["family_name_main"] is not None)
-        else None,
-        axis=1,
-    )
+    df["full_name_key"] = _make_full_name_key(df)
     df["orcid"]    = df["orcids"].apply(lambda lst: lst[0] if lst is not None and len(lst) > 0 else None)
     df["inst_arr"] = df["inst_arr"].apply(lambda x: list(x) if x is not None else [])
 
     return df[[
-        "cluster_id", "family_name_main", "first_initial",
-        "first_name_canonical", "full_name_key", "orcid", "inst_arr",
+        "cluster_id", "family_name_main",
+        "first_name", "middle_name", "first_compound", "first_initial", "middle_initial",
+        "full_name_key", "orcid", "inst_arr",
     ]].rename(columns={"cluster_id": "unique_id"})
 
 
 def _prep_oax(con: duckdb.DuckDBPyConnection, path: Path) -> pd.DataFrame:
+    # HumanName-parsed columns are persisted by 02_prepare_oax.py — no re-parsing needed.
     df = con.execute(f"""
-        SELECT
-            unique_id,
-            orcid,
-            family_names,
-            first_initials,
-            first_name_full,
-            inst_ids
+        SELECT unique_id, orcid, family_name_main,
+               first_name, middle_name, first_compound, first_initial, middle_initial,
+               inst_ids
         FROM read_parquet('{path}')
     """).fetchdf()
     print(f"  OAX authors:  {len(df)}")
 
-    def _max_by_len(lst):
-        if lst is None or len(lst) == 0:
-            return None
-        return max(lst, key=len)
-
-    def _canonical(full_toks, initials):
-        if full_toks is not None and len(full_toks) > 0:
-            return max(full_toks, key=len)
-        if initials is not None and len(initials) > 0:
-            return initials[0]
-        return None
-
-    def _initial(initials):
-        if initials is None or len(initials) == 0:
-            return None
-        return initials[0]
-
-    df["family_name_main"]    = df["family_names"].apply(_max_by_len)
-    df["first_name_canonical"] = df.apply(
-        lambda r: _canonical(r["first_name_full"], r["first_initials"]), axis=1
-    )
-    # Derive first_initial from first_name_canonical, not first_initials[0].
-    # first_initials ordering is arbitrary (set-derived); canonical is always
-    # the longest full given name, matching how ARC computes the same field.
-    df["first_initial"] = df["first_name_canonical"].apply(
-        lambda x: x[0] if isinstance(x, str) else None
-    )
-    df["full_name_key"] = df.apply(
-        lambda r: f"{r['first_name_canonical']}_{r['family_name_main']}"
-        if (r["first_name_canonical"] is not None and r["family_name_main"] is not None)
-        else None,
-        axis=1,
-    )
+    df["full_name_key"] = _make_full_name_key(df)
     df["inst_arr"] = df["inst_ids"].apply(lambda x: list(x) if x is not None else [])
 
     return df[[
-        "unique_id", "family_name_main", "first_initial",
-        "first_name_canonical", "full_name_key", "orcid", "inst_arr",
+        "unique_id", "family_name_main",
+        "first_name", "middle_name", "first_compound", "first_initial", "middle_initial",
+        "full_name_key", "orcid", "inst_arr",
     ]]
 
 
@@ -130,32 +90,46 @@ def main():
         link_type="link_only",
         blocking_rules_to_generate_predictions=[
             block_on("family_name_main", "first_initial"),
+            # Cross-blocking: one side's middle initial matches the other's first initial,
+            # catching cases like ARC "Z Smith" vs OAX "Herb Z Smith".
+            "l.family_name_main = r.family_name_main AND l.middle_initial IS NOT NULL AND l.middle_initial = r.first_initial",
+            "l.family_name_main = r.family_name_main AND r.middle_initial IS NOT NULL AND r.middle_initial = l.first_initial",
             "l.orcid = r.orcid AND l.orcid IS NOT NULL",
         ],
         comparisons=[
             cl.CustomComparison(
-                output_column_name="first_name_canonical",
-                comparison_description="First name: exact / initial-match / full-mismatch",
+                output_column_name="given_name",
+                comparison_description="Given name: compound / first / cross / initial cascade",
                 comparison_levels=[
-                    {"sql_condition": "first_name_canonical_l IS NULL OR first_name_canonical_r IS NULL",
+                    # Null level fires first; all subsequent levels are guaranteed non-null on first_name.
+                    {"sql_condition": "first_name_l IS NULL OR first_name_r IS NULL",
                      "label_for_charts": "null", "is_null_level": True},
-                    {"sql_condition": "first_name_canonical_l = first_name_canonical_r",
-                     "label_for_charts": "Exact match",
-                     "tf_adjustment_column": "first_name_canonical",
+                    # "shi xue" = "shi xue"
+                    {"sql_condition": "first_compound_l = first_compound_r",
+                     "label_for_charts": "Compound exact"},
+                    # "shi" = "shi" — plain equality so Splink recognises the exact match level for TF.
+                    {"sql_condition": "first_name_l = first_name_r",
+                     "label_for_charts": "First exact",
+                     "tf_adjustment_column": "first_name",
                      "tf_adjustment_weight": 1.0},
+                    # first of one = middle of other (e.g. ARC "z" vs OAX middle "z" in "herb z")
                     {"sql_condition": (
-                        "(length(first_name_canonical_l) = 1"
-                        " AND length(first_name_canonical_r) > 1"
-                        " AND first_name_canonical_l = substr(first_name_canonical_r, 1, 1))"
-                        " OR"
-                        " (length(first_name_canonical_r) = 1"
-                        " AND length(first_name_canonical_l) > 1"
-                        " AND first_name_canonical_r = substr(first_name_canonical_l, 1, 1))"),
-                     "label_for_charts": "Initial matches full name"},
+                        "(first_name_l = middle_name_r AND middle_name_r IS NOT NULL)"
+                        " OR (middle_name_l = first_name_r AND middle_name_l IS NOT NULL)"),
+                     "label_for_charts": "First/middle cross"},
+                    # S.X. = S.X.
                     {"sql_condition": (
-                        "length(first_name_canonical_l) > 1"
-                        " AND length(first_name_canonical_r) > 1"
-                        " AND first_name_canonical_l != first_name_canonical_r"),
+                        "first_initial_l = first_initial_r"
+                        " AND middle_initial_l IS NOT NULL AND middle_initial_r IS NOT NULL"
+                        " AND middle_initial_l = middle_initial_r"),
+                     "label_for_charts": "Both initials"},
+                    # S. = S.
+                    {"sql_condition": "first_initial_l = first_initial_r",
+                     "label_for_charts": "First initial"},
+                    # two full names present but they disagree
+                    {"sql_condition": (
+                        "length(first_name_l) > 1 AND length(first_name_r) > 1"
+                        " AND first_name_l != first_name_r"),
                      "label_for_charts": "Full name mismatch",
                      "m_probability": 0.02},
                     {"sql_condition": "ELSE", "label_for_charts": "All other"},
@@ -189,7 +163,7 @@ def main():
                 m_probabilities=[0.85, 0.15],
                 u_probabilities=[0.0001, 0.9999],
             ),
-            cl.ArrayIntersectAtSizes("inst_arr", [1]),
+            cl.ArrayIntersectAtSizes("inst_arr", [2, 1]),
         ],
     )
 
@@ -197,12 +171,14 @@ def main():
     linker = Linker([df_arc, df_oax], settings, db_api=db_api)
 
     print("  Registering name frequency tables...")
-    for fname, col in [
-        ("oax_tf_family_name.parquet", "family_name_main"),
-        ("oax_tf_first_name.parquet",  "first_name_canonical"),
-        ("oax_tf_full_name.parquet",   "full_name_key"),
+    for fname, col, old_col in [
+        ("oax_tf_family_name.parquet", "family_name_main", None),
+        ("oax_tf_first_name.parquet",  "first_name",       "first_name_canonical"),
+        ("oax_tf_full_name.parquet",   "full_name_key",    None),
     ]:
         tf = pd.read_parquet(PROCESSED_DATA / fname)
+        if old_col:
+            tf = tf.rename(columns={old_col: col, f"tf_{old_col}": f"tf_{col}"})
         linker.table_management.register_term_frequency_lookup(tf, col)
 
     print("[2/4] Training...")

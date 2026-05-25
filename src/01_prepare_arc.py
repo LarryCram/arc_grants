@@ -593,6 +593,10 @@ def main():
     persons.to_parquet(out_path, index=False)
     print(f"  Saved {len(persons)} person records → {out_path}")
 
+    map_path = PROCESSED_DATA / "arc_grant_cluster_map.parquet"
+    df_cluster_ids[["unique_id", "cluster_id"]].to_parquet(map_path, index=False)
+    print(f"  Saved grant→cluster map → {map_path}")
+
     fnk = (
         df[["unique_id", "full_name_key"]]
         .merge(df_cluster_ids[["unique_id", "cluster_id"]], on="unique_id", how="left")

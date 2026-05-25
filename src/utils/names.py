@@ -5,6 +5,8 @@ Shared name-normalisation helpers used across all pipeline layers.
 import re
 import unicodedata
 
+from nameparser import HumanName
+
 # Exotic Unicode hyphens → ASCII hyphen
 _EXOTIC_HYPHENS = re.compile(r"[­‐‑‒–—―−－]")
 
@@ -101,6 +103,28 @@ def make_expanded_for_tokens(concordance_csv: str):
         return sorted(own)
 
     return _expanded
+
+
+def max_by_len(lst) -> str | None:
+    """Return the longest string in a list, or None if empty/null."""
+    if lst is None or len(lst) == 0:
+        return None
+    return max(lst, key=len)
+
+
+def parse_given(name_str: str) -> tuple:
+    """HumanName → (first, middle, compound, f_init, m_init), all lowercased.
+
+    compound = first + " " + middle when both present, else first.
+    Used to build Splink comparison columns for given-name matching.
+    """
+    if not name_str:
+        return None, None, None, None, None
+    hn = HumanName(name_str)
+    f  = hn.first.lower()  or None
+    m  = hn.middle.lower() or None
+    fc = (f + " " + m) if (f and m) else f
+    return f, m, fc, f[0] if f else None, m[0] if m else None
 
 
 def name_part_tokens(s: str) -> list[str]:

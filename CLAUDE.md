@@ -88,26 +88,34 @@ Manual overrides: `config/manual_resolutions.csv` (resolve/unlink actions applie
 Output columns: `arc_id, oax_id, match_probability, resolved_by, secondary_oax_ids`
 `secondary_oax_ids`: all other HC candidates not chosen (split-record duplicates + alternatives).
 
-## Current Linkage Results (2026-05-23)
-- Resolved: 21,449 / 22,819 (94.0%)
-  - unique_hc: 11,451 | oax_orcid_dedup: 845 | oax_topic_dedup: 2,463 | orcid: 3,790
-  - inst_overlap: 1,842 | field: 377 | probability: 3 | works_count: 673 | manual: 5
-- Ambiguous deferred: 478
+## Current Linkage Results (2026-05-25)
+- Resolved: 22,048 / 22,819 (96.6%)
+  - unique_hc: 8,828 | oax_orcid_dedup: 955 | oax_topic_dedup: 2,619 | orcid: 5,003
+  - inst_overlap: 3,164 | field: 861 | probability: 64 | works_count: 546 | manual: 8
+- Ambiguous deferred: 418
 - Manual unlinked: 1
-- Unlinked (no HC match): 891
+- Unlinked (no HC match): 352
 
-## Resolution Coverage by ARC Scheme (2026-05-23)
-| Scheme | Grants | Persons | % Unmatched |
-|--------|-------:|--------:|------------:|
-| DP Discovery Projects         | 17,654 | 15,754 | 5.0% |
-| LP Linkage Projects           |  7,283 | 11,001 | 6.4% |
-| DE Early Career               |  2,876 |  2,866 | 3.3% |
-| FT Future Fellowships         |  2,199 |  2,197 | 2.5% |
-| FL Laureate Fellowships       |    277 |    277 | 3.2% |
-| FF Federation Fellowships     |    157 |    141 | 3.5% |
-| DI Discovery Indigenous       |     64 |     60 | 23.3% |
-Older grants (2002–05) have ~7–9% unmatched; post-2018 grants ~2%.
-LP Fellows (industry postdocs, role_code APD/APDI) have 12.1% unmatched.
+## Fellowship Cohort Status (2026-05-25)
+- **FF** (Federation Fellows): 141/141 resolved
+- **FL** (Australian Laureate Fellows): 277/277 resolved
+- **FT** (Future Fellows): 265/277 resolved — 6 deferred (common names), 6 unlinked (overseas-based)
+
+## Important: cluster_id vs scheme membership
+Most FF/FL fellows also hold DP grants; their `cluster_id` starts with "DP" not "FF"/"FL".
+To find all clusters for a scheme, search `grant_ids` in arc_persons, or use
+`arc_grant_cluster_map.parquet` (output of 01) which maps every grantID_personName → cluster_id.
+
+## Next Priority (start of next session)
+FF and FL cohorts are complete. Consider FT deferred/unlinked cases next.
+
+## 03_link_arc_oax.py Design (updated 2026-05-25)
+- Given-name comparison uses HumanName cascade: compound (f+m) → first → cross (f=other's m) → initials
+- Blocking: `(family_name_main, first_initial)` + two middle-initial cross-blocking rules + ORCID
+- Cross-blocking catches cases like ARC "Z Smith" vs OAX "Herb Z Smith" (middle initial match)
+- HumanName on `full_names` (ARC longest) and `full_name` (OAX display_name) for consistent parsing
+- Compound match "shi xue" = "shi xue" fixes Chinese compound given names (e.g. Shi Xue Dou)
+- TF adjustment on `first_name` (hn.first) exact level only
 
 ## Next Priority (start of next session)
 **Identify and verify all FF (Federation Fellows) and FL (Australian Laureate Fellows)** —

@@ -26,7 +26,7 @@ from nameparser import HumanName
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import OAX_AUTHORS, PROCESSED_DATA
-from src.utils.names import name_part_tokens, strip_diacriticals
+from src.utils.names import max_by_len, name_part_tokens, parse_given, strip_diacriticals
 
 PROC = PROCESSED_DATA
 
@@ -189,11 +189,6 @@ def main():
     df = pd.read_parquet(out_oax)
     n = len(df)
 
-    def _max_by_len(lst):
-        if lst is None or len(lst) == 0:
-            return None
-        return max(lst, key=len)
-
     def _canonical(row):
         full = row["first_name_full"]
         inits = row["first_initials"]
@@ -203,14 +198,19 @@ def main():
             return inits[0]
         return None
 
-    df["family_name_main"]     = df["family_names"].apply(_max_by_len)
+    df["family_name_main"]     = df["family_names"].apply(max_by_len)
     df["first_name_canonical"] = df.apply(_canonical, axis=1)
-    df["full_name_key"] = df.apply(
-        lambda r: f"{r['first_name_canonical']}_{r['family_name_main']}"
-        if r["first_name_canonical"] is not None and r["family_name_main"] is not None
-        else None,
-        axis=1,
+    df["full_name_key"] = (
+        (df["first_name_canonical"] + "_" + df["family_name_main"])
+        .where(df["first_name_canonical"].notna() & df["family_name_main"].notna())
     )
+
+    # Persist HumanName-parsed given-name components so 03_link_arc_oax.py
+    # can read them directly instead of re-parsing 2.5M display_names each run.
+    df[["first_name", "middle_name", "first_compound", "first_initial", "middle_initial"]] = (
+        pd.DataFrame(df["full_name"].apply(parse_given).tolist(), index=df.index)
+    )
+    df.to_parquet(out_oax, index=False)
 
     for col, fname in [
         ("family_name_main",     "oax_tf_family_name.parquet"),
