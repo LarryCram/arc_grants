@@ -1,48 +1,67 @@
 """
-src/02_dedupe_arc.py
+src/01_prepare_arc.py
 
-Deduplicate ARC grant-level rows into person-level clusters.
-Uses Splink dedupe_only on arc_investigators_prep.parquet.
+Prepare ARC investigators for Splink, then deduplicate grant rows into person clusters.
 
-Clustering rules:
-  1. Block on first_initial + family_name_main (longest surname token).
-  2. Post-process: any cluster with 2+ distinct non-null ORCIDs is split
-     into separate ORCID-keyed sub-clusters (hard deterministic rule).
-  3. Diagnostic: report institution composition of multi-row clusters.
+Phase 1 – Prep: parse and normalise ARC name/institution/FOR fields
+    → arc_investigators_prep.parquet
 
-Output: arc_persons.parquet
-    One row per person cluster, with aggregated ORCIDs, institutions and FoR
-    codes, ready for ARC→OAX linkage in 03_link_arc_oax.py.
+Phase 2 – Dedupe: Splink dedupe_only on the prep output
+    → arc_persons.parquet  (62k grant rows → ~22,819 persons)
 """
 
 import sys
+import csv
 from pathlib import Path
 
 import duckdb
 import pandas as pd
+from nameparser import HumanName
 from splink import DuckDBAPI, Linker, SettingsCreator, block_on
 import splink.comparison_library as cl
 import splink.comparison_level_library as cll
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import csv
+from config.settings import PROCESSED_DATA, ADMIN_ORGS_CSV, GRANT_SUMMARIES_CSV
+from config.scope import KEEP_ROLES, KEEP_SCHEMES
+from src.utils.names import make_expanded_for_tokens, name_part_tokens, strip_diacriticals, for_name_tokens
 
-from config.settings import PROCESSED_DATA
-from src.utils.names import for_name_tokens
+MANUAL_SPLITS_CSV = Path(__file__).resolve().parents[1] / "config" / "manual_splits.csv"
+FOR_DIVISIONS_CSV = Path(__file__).resolve().parents[1] / "config" / "for_divisions.csv"
+FOR_ADJACENT_CSV  = Path(__file__).resolve().parents[1] / "config" / "for_adjacent_divisions.csv"
 
-ADMIN_ORGS_CSV     = PROCESSED_DATA.parent / "admin_orgs.csv"
-MANUAL_SPLITS_CSV  = Path(__file__).resolve().parents[1] / "config" / "manual_splits.csv"
-FOR_DIVISIONS_CSV  = Path(__file__).resolve().parents[1] / "config" / "for_divisions.csv"
-FOR_ADJACENT_CSV   = Path(__file__).resolve().parents[1] / "config" / "for_adjacent_divisions.csv"
+RARE_NAME_TF      = 5e-5
+CLUSTER_THRESHOLD = 0.9
 
-# Rare-name threshold: tf < this → name is unusual enough to commit as single person.
-# With ~1.1 M OAX AU authors, tf = 1/1128792 ≈ 9e-7 for a unique name.
-# tf < 5e-5 means fewer than ~56 people with that full name → treat as unique.
-RARE_NAME_TF = 5e-5
 
+# ── Phase 1 helpers ───────────────────────────────────────────────────────────
+
+def _initials(toks: list[str]) -> list[str]:
+    return [t[0] for t in toks if t]
+
+
+def arc_name_arrays(first_name: str, family_name: str) -> dict:
+    full = f"{first_name or ''} {family_name or ''}".strip()
+    hn = HumanName(full)
+
+    if not hn.last and hn.first:
+        hn.last = hn.first
+
+    f_toks = name_part_tokens(hn.first) + name_part_tokens(hn.middle)
+    fam_norm = strip_diacriticals(hn.last).lower().strip() if hn.last else ""
+
+    first_names = list(set(f_toks + _initials(f_toks)))
+    family_names = [fam_norm] if fam_norm else []
+
+    if not f_toks and fam_norm:
+        first_names.append(fam_norm[0])
+
+    return {"first_names": list(set(first_names)), "family_names": family_names}
+
+
+# ── Phase 2 helpers ───────────────────────────────────────────────────────────
 
 def _load_for_divisions() -> tuple[dict[str, str], set[frozenset]]:
-    """Return (for_name→division, set of adjacent division frozensets)."""
     div: dict[str, str] = {}
     with open(FOR_DIVISIONS_CSV, newline="") as f:
         for row in csv.DictReader(f):
@@ -53,8 +72,6 @@ def _load_for_divisions() -> tuple[dict[str, str], set[frozenset]]:
             adj.add(frozenset([row["div_a"], row["div_b"]]))
     return div, adj
 
-CLUSTER_THRESHOLD = 0.9
-
 
 def _load_all(con: duckdb.DuckDBPyConnection, path: Path) -> pd.DataFrame:
     df = con.execute(f"SELECT * FROM read_parquet('{path}')").fetchdf()
@@ -63,7 +80,6 @@ def _load_all(con: duckdb.DuckDBPyConnection, path: Path) -> pd.DataFrame:
 
 
 def _first_initial(toks) -> str | None:
-    """First character of the longest non-initial token in first_names."""
     if toks is None or len(toks) == 0:
         return None
     full = [t for t in toks if len(t) > 1]
@@ -71,7 +87,6 @@ def _first_initial(toks) -> str | None:
 
 
 def _first_name_canonical(full_toks, initials) -> str | None:
-    """Longest full given-name token, or the initial if no full name exists."""
     if full_toks is not None and len(full_toks) > 0:
         return max(full_toks, key=len)
     if initials is not None and len(initials) > 0:
@@ -118,11 +133,6 @@ def _prep(df: pd.DataFrame) -> pd.DataFrame:
 def _split_orcid_conflicts(
     df_cluster_ids: pd.DataFrame, df_original: pd.DataFrame
 ) -> pd.DataFrame:
-    """
-    Rule 2: any cluster containing 2+ distinct non-null ORCIDs is split.
-    - Rows with an ORCID → sub-cluster keyed on that ORCID.
-    - Rows without an ORCID in a conflicted cluster → singleton.
-    """
     merged = df_original[["unique_id", "orcid"]].merge(
         df_cluster_ids[["unique_id", "cluster_id"]], on="unique_id", how="left"
     )
@@ -177,7 +187,6 @@ def _aggregate_clusters(df_original: pd.DataFrame, df_cluster_ids: pd.DataFrame)
 
 
 def _load_inst_names() -> dict[str, str]:
-    """Return OAX institution_id → short organisation name."""
     lookup = {}
     if not ADMIN_ORGS_CSV.exists():
         return lookup
@@ -195,12 +204,6 @@ def _inst_label(inst_id: str, lookup: dict) -> str:
 
 
 def _division_mismatch(for_names: list, div_map: dict, adj: set) -> bool:
-    """True when FOR names span genuinely incompatible ANZSRC divisions.
-
-    Two divisions are compatible if they are the same or appear in the
-    adjacent-divisions table (commonly co-occurring in Australian research).
-    Connected-components over the compatibility graph: mismatch = 2+ components.
-    """
     divs = list({div_map.get(n, "?") for n in for_names if n and div_map.get(n)})
     if len(divs) <= 1:
         return False
@@ -224,7 +227,6 @@ def _division_mismatch(for_names: list, div_map: dict, adj: set) -> bool:
 
 
 def _is_case_a(full_names: list) -> bool:
-    """Case A: cluster has only one distinct given-name root (single-name cluster)."""
     firsts = set()
     for name in full_names:
         parts = name.strip().split()
@@ -239,13 +241,6 @@ def _is_suspicious(
     adj: set,
     tf_lookup: dict,
 ) -> bool:
-    """True only when a cluster cannot be auto-committed as a single person.
-
-    A cluster is auto-committed (not suspicious) when ANY of:
-      1. It has at least one ORCID  (ground-truth identity).
-      2. Its full_name_key is rare in OAX (tf < RARE_NAME_TF) — essentially unique.
-      3. Its FOR names all fall within compatible ANZSRC divisions.
-    """
     if row["orcids"]:
         return False
     fnk = row.get("full_name_key")
@@ -310,7 +305,6 @@ def _export_manual_splits_template(
     adj: set,
     tf_lookup: dict,
 ) -> None:
-    """Write config/manual_splits.csv — only clusters that passed all auto-commit filters."""
     multi_inst = persons[
         (persons["n_grants"] > 1)
         & (persons["inst_arr"].apply(len) > 1)
@@ -318,7 +312,6 @@ def _export_manual_splits_template(
         & persons.apply(lambda r: _is_suspicious(r, div_map, adj, tf_lookup), axis=1)
     ].sort_values("n_grants", ascending=False)
 
-    # Read any existing hand-coded decisions
     existing: dict[str, dict] = {}
     if MANUAL_SPLITS_CSV.exists():
         with open(MANUAL_SPLITS_CSV, newline="") as f:
@@ -354,11 +347,6 @@ def _export_manual_splits_template(
 def _apply_manual_splits(
     df_cluster_ids: pd.DataFrame, df_original: pd.DataFrame
 ) -> pd.DataFrame:
-    """
-    Split clusters where the user has set confirmed_different_people=True in
-    config/manual_splits.csv.  Each distinct institution becomes a sub-cluster;
-    grants with no institution become singletons.
-    """
     if not MANUAL_SPLITS_CSV.exists():
         return df_cluster_ids
 
@@ -392,11 +380,76 @@ def _apply_manual_splits(
     return pd.concat(out, ignore_index=True)
 
 
+# ── main ──────────────────────────────────────────────────────────────────────
+
 def main():
+    con = duckdb.connect()
+
+    # ── Phase 1: Prepare ARC investigators ───────────────────────────────────
+
+    print("=== Phase 1: ARC prep ===")
+    con.create_function("arc_names", arc_name_arrays,
+                        ['VARCHAR', 'VARCHAR'],
+                        'STRUCT(first_names VARCHAR[], family_names VARCHAR[])')
+
+    concordance_csv = Path(__file__).resolve().parents[1] / "config" / "for_concordance.csv"
+    expanded_for_tokens = make_expanded_for_tokens(str(concordance_csv))
+    con.create_function("for_tokens", expanded_for_tokens,
+                        ['VARCHAR'],
+                        'VARCHAR[]')
+
+    out_arc = PROCESSED_DATA / "arc_investigators_prep.parquet"
+
+    roles_sql   = ", ".join(f"'{r}'" for r in KEEP_ROLES)
+    schemes_sql = ", ".join(f"'{s}'" for s in KEEP_SCHEMES)
+
+    print(f"  Saving to {out_arc}...")
+    con.execute(f"""
+        COPY (
+            WITH arc_raw AS (
+                SELECT
+                    i.unique_id,
+                    i.grant_code as grant_id,
+                    i.first_name,
+                    i.family_name,
+                    g.admin_org as AdminOrg,
+                    i.role_code as role,
+                    i.orcid,
+                    g.primary_for_name as for_name,
+                    regexp_extract(s.primary_field_of_research, '^\\d{{4}}') as for_code
+                FROM '{PROCESSED_DATA}/investigators_raw.parquet' i
+                LEFT JOIN '{PROCESSED_DATA}/grants_flat.parquet' g
+                    ON i.grant_code = g.grant_code
+                LEFT JOIN read_csv_auto('{GRANT_SUMMARIES_CSV}') s
+                    ON i.grant_code = s.grant_id
+                WHERE i.role_code IN ({roles_sql})
+                  AND substring(i.grant_code, 1, 2) IN ({schemes_sql})
+            )
+            SELECT
+                a.unique_id,
+                CONCAT_WS(' ', a.first_name, a.family_name) AS full_name,
+                arc_names(a.first_name, a.family_name).first_names AS first_names,
+                list_filter(arc_names(a.first_name, a.family_name).first_names, x -> len(x) = 1)  AS first_initials,
+                list_filter(arc_names(a.first_name, a.family_name).first_names, x -> len(x) > 1)  AS first_name_full,
+                arc_names(a.first_name, a.family_name).family_names AS family_names,
+                a.orcid,
+                o.institution_id as institution_oax_id,
+                [a.for_name] as for_names,
+                list_filter([a.for_code], x -> x != '') as for_codes,
+                for_tokens(a.for_name) as for_name_tokens,
+                'AU' as country_code
+            FROM arc_raw a
+            INNER JOIN read_csv_auto('{ADMIN_ORGS_CSV}') o
+                ON a.AdminOrg = o.organisationName_alias
+        ) TO '{out_arc}' (FORMAT PARQUET)
+    """)
+    print("  ARC prep complete.")
+
+    # ── Phase 2: Deduplicate ARC persons ─────────────────────────────────────
+
+    print("\n=== Phase 2: ARC dedupe ===")
     arc_path = PROCESSED_DATA / "arc_investigators_prep.parquet"
     out_path  = PROCESSED_DATA / "arc_persons.parquet"
-
-    con = duckdb.connect()
 
     print("[1/5] Loading full ARC grant rows...")
     df_raw = _load_all(con, arc_path)
@@ -410,7 +463,7 @@ def main():
         unique_id_column_name="unique_id",
         link_type="dedupe_only",
         blocking_rules_to_generate_predictions=[
-            block_on("family_name_main", "first_initial"),   # Rule 1
+            block_on("family_name_main", "first_initial"),
             "l.orcid = r.orcid AND l.orcid IS NOT NULL",
         ],
         comparisons=[
@@ -482,11 +535,6 @@ def main():
                 m_probabilities=[0.85, 0.15]
             ),
             cl.ArrayIntersectAtSizes("inst_arr", [1]),
-            # 3-level FOR comparison: >=2 tokens (strong), >=1 token (weak/concordance
-            # bridge), else (different discipline → anti-match).
-            # Low m_prob on else: same person rarely spans completely unrelated fields.
-            # u_prob on else is high (random pairs usually differ in field) → negative
-            # log-odds → penalty for discipline mismatch.
             cl.ArrayIntersectAtSizes("for_name_tokens", [2, 1]).configure(
                 m_probabilities=[0.35, 0.45, 0.20]
             ),
@@ -545,7 +593,6 @@ def main():
     persons.to_parquet(out_path, index=False)
     print(f"  Saved {len(persons)} person records → {out_path}")
 
-    # Attach the most common full_name_key per cluster (from the prepped df)
     fnk = (
         df[["unique_id", "full_name_key"]]
         .merge(df_cluster_ids[["unique_id", "cluster_id"]], on="unique_id", how="left")
@@ -560,7 +607,6 @@ def main():
     )
     persons = persons.merge(fnk_mode, on="cluster_id", how="left")
 
-    # Load division mapping and OAX full-name TF for the three-layer filter
     div_map, adj = _load_for_divisions()
     tf_df = pd.read_parquet(PROCESSED_DATA / "oax_tf_full_name.parquet")
     tf_lookup = dict(zip(tf_df["full_name_key"], tf_df["tf_full_name_key"]))

@@ -41,3 +41,43 @@ COPY (
     INNER JOIN '/home/lc/m/openalex_feb26/parquet/works/*.parquet'
     USING (work_idx)
 ) TO '/home/lc/m/working/WORKING_ARC_PROJECT/processed/works_hep.parquet'
+
+-- SQL TO CONSTRUCT COUNTS OF DOMAINS PER AUTHOR. COULD USE SAME FOR FIELDS, SUBFIELDS OR TOPICS
+------------------------------------------------------------------------------------------------
+WITH unnested_counts AS (
+    -- Step 1: Compute frequencies and unnest the map entries
+    SELECT 
+        author_name, 
+        author_idx, 
+        count(DISTINCT work_idx) AS works_count,
+        unnest(map_entries(histogram(field_name))) AS entry
+    FROM '/home/lc/m/working/WORKING_ARC_PROJECT/processed/works_hep.parquet' w
+    INNER JOIN '/home/lc/m/working/WORKING_ARC_PROJECT/processed/authorships_hep.parquet' a
+    USING (work_idx)
+    GROUP BY ALL
+),
+calculated_fractions AS (
+    -- Step 2: Calculate fractions using a window function
+    SELECT 
+        author_name,
+        author_idx,
+        works_count,
+        entry.key AS field,
+        entry.value AS field_count,
+        -- Divides individual count by the total sum of counts for this specific author
+        (entry.value::DOUBLE / SUM(entry.value) OVER (PARTITION BY author_idx)) AS field_fraction
+    FROM unnested_counts
+)
+-- Step 3: Re-bundle into a structured list sorted by fraction descending
+SELECT 
+    author_name, 
+    author_idx, 
+    works_count,
+    list({
+        'field': field, 
+        'count': field_count,
+        'fraction': round(field_fraction, 4) -- Rounded to 4 decimal places for clean output
+    } ORDER BY field_fraction DESC) AS sorted_fields
+FROM calculated_fractions
+GROUP BY ALL
+ORDER BY works_count DESC;

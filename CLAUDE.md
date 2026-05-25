@@ -6,8 +6,9 @@ Link ARC Chief Investigators/Fellows (CIFs) to their OpenAlex author records for
 ## Pipeline Architecture (Splink-based)
 ```
 00_extract_arc.py       → grants_flat.parquet, investigators_raw.parquet
-01_prepare_splink.py    → arc_investigators_prep.parquet, openalex_authors_prep.parquet
-02_dedupe_arc.py        → arc_persons.parquet   (dedupe_only: 62k grant rows → 22,819 persons)
+01_prepare_arc.py       → arc_investigators_prep.parquet, arc_persons.parquet
+                           (ARC name/inst/FOR prep + Splink dedupe_only: 62k rows → 22,819 persons)
+02_prepare_oax.py       → openalex_authors_prep.parquet, oax_tf_*.parquet
 03_link_arc_oax.py      → arc_oax_links.parquet (link_only: ARC persons → OAX authors)
 04_resolve_links.py     → arc_oax_resolved.parquet, arc_ambiguous_deferred.parquet
 ```
@@ -23,7 +24,7 @@ The Splink pipeline replaces the entire old multi-layer pipeline in `src_archive
 
 ## Data Scale
 - ARC CIF rows (after role/scheme filter): 62,712
-- ARC person clusters (output of 02): 22,819  (avg 2.75 grants/person)
+- ARC person clusters (output of 01): 22,819  (avg 2.75 grants/person)
 - OAX Australian authors: 1,149,339
 - ORCID coverage in ARC CIFs: 44.5%
 
