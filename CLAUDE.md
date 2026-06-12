@@ -88,26 +88,27 @@ Manual overrides: `config/manual_resolutions.csv` (resolve/unlink actions applie
 Output columns: `arc_id, oax_id, match_probability, resolved_by, secondary_oax_ids`
 `secondary_oax_ids`: all other HC candidates not chosen (split-record duplicates + alternatives).
 
-## Current Linkage Results (2026-05-25)
+## Current Linkage Results (2026-05-25, pre-manual-additions)
 - Resolved: 22,048 / 22,819 (96.6%)
   - unique_hc: 8,828 | oax_orcid_dedup: 955 | oax_topic_dedup: 2,619 | orcid: 5,003
   - inst_overlap: 3,164 | field: 861 | probability: 64 | works_count: 546 | manual: 8
 - Ambiguous deferred: 418
 - Manual unlinked: 1
 - Unlinked (no HC match): 352
+- ~27 additional manual resolutions added since (manual_resolutions.csv now ~82 rows)
 
-## Fellowship Cohort Status (2026-05-25)
-- **FF** (Federation Fellows): 141/141 resolved
-- **FL** (Australian Laureate Fellows): 277/277 resolved
-- **FT** (Future Fellows): 265/277 resolved — 6 deferred (common names), 6 unlinked (overseas-based)
+## Fellowship Cohort Status (2026-06-12)
+- **FF** (Federation Fellows): 141/141 resolved ✓
+- **FL** (Australian Laureate Fellows): 277/277 resolved ✓
+- **FT** (Future Fellows): 277/277 resolved ✓ — 23 manual entries added; blocking failure categories catalogued: Unicode apostrophe (O'Neil→oneill), space-vs-hyphen surnames (gonzalez tokman), ø stripping (krabbenhft), ue-transliteration (rueger), given-name alias (Jenny/Yingzi), first_name_canonical token-length (xu-feng→feng), name-order reversal (Swaminathan/Vishwanathan), patronymic-vs-publication-name (Lakshminarasimha/Gubbi)
+- **APDI** (ARC Postdoctoral Industry): 80/80 resolved ✓ — 3 manual entries added
+- **CI-DORA**: 80/80 resolved ✓ — 1 manual entry (Jennifer Hocking, ORCID not in OAX)
+- **APF**: 239/240 — 1 unresolvable (art theorist turned drama director, no OAX presence)
 
 ## Important: cluster_id vs scheme membership
 Most FF/FL fellows also hold DP grants; their `cluster_id` starts with "DP" not "FF"/"FL".
 To find all clusters for a scheme, search `grant_ids` in arc_persons, or use
 `arc_grant_cluster_map.parquet` (output of 01) which maps every grantID_personName → cluster_id.
-
-## Next Priority (start of next session)
-FF and FL cohorts are complete. Consider FT deferred/unlinked cases next.
 
 ## 03_link_arc_oax.py Design (updated 2026-05-25)
 - Given-name comparison uses HumanName cascade: compound (f+m) → first → cross (f=other's m) → initials
@@ -118,9 +119,7 @@ FF and FL cohorts are complete. Consider FT deferred/unlinked cases next.
 - TF adjustment on `first_name` (hn.first) exact level only
 
 ## Next Priority (start of next session)
-**Identify and verify all FF (Federation Fellows) and FL (Australian Laureate Fellows)** —
-small cohorts (141 and 277 persons), high-profile, should be near-100% matchable.
-These are role_code FF/FL in investigators_raw.parquet; is_fellowship=True.
+Fellowship cohorts FF/FL/FT/APDI/CI-DORA/APF all addressed. Next: **DECRA** (42 unmatched: ~20 deferred + ~22 unlinked, 98.5%) and **APD** (64 unmatched: ~33 deferred + ~31 unlinked, 95.3%). Also: re-run 01_prepare_arc.py to apply Paul Young manual split, then add per-sub-cluster manual resolutions.
 
 ## Splink Design Decisions
 - **`arrays_to_explode` is NOT supported** in EM training sessions
@@ -132,5 +131,6 @@ These are role_code FF/FL in investigators_raw.parquet; is_fellowship=True.
 ## Known Issues in 02 Output
 - **Raymond Gilbert / Robert Gilbert** (n=34, no ORCID): different first names + 3 different
   fields — suspected mis-merge of 2–3 people
-- **Paul Young** (n=28, no ORCID): AI + Biochemistry + Chemical Eng at 4 institutions —
-  likely multiple people
+- **Paul Young** (n=28, no ORCID): added to `config/manual_splits.csv` (confirmed_different_people=True);
+  splits by institution into UQ virologist / USyd pharmacologist / Monash engineer / UNSW (crop) groups.
+  Re-run 01_prepare_arc.py to materialise sub-clusters, then add per-sub-cluster manual resolutions.
