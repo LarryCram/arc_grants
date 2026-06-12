@@ -32,8 +32,10 @@ PROC = PROCESSED_DATA
 
 
 def oax_name_arrays(display_name: str, alts: list[str]) -> dict:
-    first_toks: set[str] = set()
-    family_toks: set[str] = set()
+    # Use dicts (insertion-ordered) instead of sets so first_names preserves
+    # left-to-right token order (first before middle, display_name before alts).
+    first_toks: dict[str, None] = {}
+    family_toks: dict[str, None] = {}
 
     def _parse_name(n: str) -> None:
         if not n:
@@ -42,11 +44,11 @@ def oax_name_arrays(display_name: str, alts: list[str]) -> dict:
         if not hn.last and hn.first:
             hn.last = hn.first
         for ft in name_part_tokens(hn.first) + name_part_tokens(hn.middle):
-            first_toks.add(ft)
-            first_toks.add(ft[0])
+            first_toks[ft] = None
+            first_toks[ft[0]] = None
         fam_norm = strip_diacriticals(hn.last).lower().strip() if hn.last else ""
         if fam_norm:
-            family_toks.add(fam_norm)
+            family_toks[fam_norm] = None
 
     _parse_name(display_name)
 
@@ -59,7 +61,7 @@ def oax_name_arrays(display_name: str, alts: list[str]) -> dict:
     if not first_toks:
         for fam in family_toks:
             if fam:
-                first_toks.add(fam[0])
+                first_toks[fam[0]] = None
 
     return {"first_names": list(first_toks), "family_names": list(family_toks)}
 

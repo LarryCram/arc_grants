@@ -121,8 +121,8 @@ def parse_given(name_str: str) -> tuple:
     if not name_str:
         return None, None, None, None, None
     hn = HumanName(name_str)
-    f  = hn.first.lower()  or None
-    m  = hn.middle.lower() or None
+    f  = strip_diacriticals(hn.first).lower()  or None
+    m  = strip_diacriticals(hn.middle).lower() or None
     fc = (f + " " + m) if (f and m) else f
     return f, m, fc, f[0] if f else None, m[0] if m else None
 

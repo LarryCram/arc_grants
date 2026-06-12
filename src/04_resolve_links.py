@@ -297,6 +297,9 @@ def main():
             action = row["action"]
             note   = row.get("note", "")
             if action == "resolve":
+                auto_match = resolved.loc[resolved["arc_id"] == aid, "oax_id"]
+                if not auto_match.empty and auto_match.iloc[0] != row["oax_id"]:
+                    print(f"  WARN manual override: {aid} pipeline→{auto_match.iloc[0]} manual→{row['oax_id']}")
                 others = list(
                     (set(deferred.loc[deferred["arc_id"] == aid, "oax_id"])
                      | set(resolved.loc[resolved["arc_id"] == aid, "oax_id"]))
