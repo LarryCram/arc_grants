@@ -88,22 +88,23 @@ Manual overrides: `config/manual_resolutions.csv` (resolve/unlink actions applie
 Output columns: `arc_id, oax_id, match_probability, resolved_by, secondary_oax_ids`
 `secondary_oax_ids`: all other HC candidates not chosen (split-record duplicates + alternatives).
 
-## Current Linkage Results (2026-05-25, pre-manual-additions)
-- Resolved: 22,048 / 22,819 (96.6%)
-  - unique_hc: 8,828 | oax_orcid_dedup: 955 | oax_topic_dedup: 2,619 | orcid: 5,003
-  - inst_overlap: 3,164 | field: 861 | probability: 64 | works_count: 546 | manual: 8
-- Ambiguous deferred: 418
-- Manual unlinked: 1
-- Unlinked (no HC match): 352
-- ~27 additional manual resolutions added since (manual_resolutions.csv now ~82 rows)
+## Current Linkage Results (2026-06-14)
+- Resolved: 22,414 / 22,816 (98.2%)
+  - unique_hc: 8,887 | oax_orcid_dedup: 943 | oax_topic_dedup: 2,628 | orcid: 4,976
+  - inst_overlap: 3,155 | field: 859 | probability: 62 | works_count: 535 | manual: 369
+- Ambiguous deferred: 123
+- Manual unlinked: 16
+- Unlinked (no HC match): 263
+- manual_resolutions.csv: 369 resolve + 16 unlink = 385 rows
 
-## Fellowship Cohort Status (2026-06-12)
+## Fellowship Cohort Status (2026-06-13)
 - **FF** (Federation Fellows): 141/141 resolved ✓
 - **FL** (Australian Laureate Fellows): 277/277 resolved ✓
 - **FT** (Future Fellows): 277/277 resolved ✓ — 23 manual entries added; blocking failure categories catalogued: Unicode apostrophe (O'Neil→oneill), space-vs-hyphen surnames (gonzalez tokman), ø stripping (krabbenhft), ue-transliteration (rueger), given-name alias (Jenny/Yingzi), first_name_canonical token-length (xu-feng→feng), name-order reversal (Swaminathan/Vishwanathan), patronymic-vs-publication-name (Lakshminarasimha/Gubbi)
 - **APDI** (ARC Postdoctoral Industry): 80/80 resolved ✓ — 3 manual entries added
 - **CI-DORA**: 80/80 resolved ✓ — 1 manual entry (Jennifer Hocking, ORCID not in OAX)
 - **APF**: 239/240 — 1 unresolvable (art theorist turned drama director, no OAX presence)
+- **APD**: ~480/495 — 31 unlinked investigated: 18 resolved, 13 genuine unlinks; 15 manual unlink entries
 
 ## Important: cluster_id vs scheme membership
 Most FF/FL fellows also hold DP grants; their `cluster_id` starts with "DP" not "FF"/"FL".
@@ -119,7 +120,8 @@ To find all clusters for a scheme, search `grant_ids` in arc_persons, or use
 - TF adjustment on `first_name` (hn.first) exact level only
 
 ## Next Priority (start of next session)
-Fellowship cohorts FF/FL/FT/APDI/CI-DORA/APF all addressed. Next: **DECRA** (42 unmatched: ~20 deferred + ~22 unlinked, 98.5%) and **APD** (64 unmatched: ~33 deferred + ~31 unlinked, 95.3%). Also: re-run 01_prepare_arc.py to apply Paul Young manual split, then add per-sub-cluster manual resolutions.
+FF/FL/FT/APDI/CI-DORA/APF/APD/DP-CI/LP-CI all addressed. Remaining: **DECRA** deferred (in the 126 remaining); **CI** cases largely resolved. Also pending: re-run 01_prepare_arc.py to apply Paul Young manual split, then add per-sub-cluster manual resolutions. CatherineHayles (DP0879152) resolved at low confidence — review if needed.
+- 126 deferred remain — mostly genuine common-name collisions (WeiWang n=53, TuanNguyen n=36, XinZhou n=36, etc.) and low-wc cases with no field signal. These are genuinely hard to resolve without additional data (e.g., institutional affiliation confirmation).
 
 ## Splink Design Decisions
 - **`arrays_to_explode` is NOT supported** in EM training sessions
