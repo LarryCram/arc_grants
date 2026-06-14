@@ -54,17 +54,21 @@ def main():
 
     print("[1/4] Loading data...")
     links = con.execute(f"SELECT * FROM read_parquet('{link_path}')").fetchdf()
-    arc   = con.execute(f"SELECT cluster_id, orcids, inst_arr, for_names FROM read_parquet('{arc_path}')").fetchdf()
-    oax   = con.execute(f"SELECT unique_id, orcid, inst_ids, topic_names, subfield_names FROM read_parquet('{oax_path}')").fetchdf()
+    arc   = con.execute(f"SELECT cluster_id, orcids, inst_arr, for_names, first_names FROM read_parquet('{arc_path}')").fetchdf()
+    oax   = con.execute(f"SELECT unique_id, orcid, inst_ids, topic_names, subfield_names, first_name FROM read_parquet('{oax_path}')").fetchdf()
 
     arc["orcid"] = arc["orcids"].apply(lambda x: x[0] if x is not None and len(x) > 0 else None)
     arc_orcid    = dict(zip(arc["cluster_id"], arc["orcid"]))
     arc_inst     = dict(zip(arc["cluster_id"], arc["inst_arr"]))
     arc_for      = dict(zip(arc["cluster_id"], arc["for_names"]))
+    arc_firstnames = {r["cluster_id"]: [str(fn).lower().strip() for fn in (r["first_names"] if r["first_names"] is not None else [])]
+                      for _, r in arc.iterrows()}
     oax_orcid    = dict(zip(oax["unique_id"],  oax["orcid"]))
     oax_inst     = dict(zip(oax["unique_id"],  oax["inst_ids"]))
     oax_topics   = dict(zip(oax["unique_id"],  oax["topic_names"]))
     oax_subfields= dict(zip(oax["unique_id"],  oax["subfield_names"]))
+    oax_firstname= {r["unique_id"]: str(r["first_name"] or "").lower().strip()
+                    for _, r in oax.iterrows()}
 
     hc = links[links["high_confidence"]].copy()
     per_arc = hc.groupby("arc_id").size()
@@ -126,6 +130,19 @@ def main():
         if a is None or o is None or len(a) == 0 or len(o) == 0:
             return 0
         return len(set(a) & set(o))
+
+    def _names_compat(arc_id, oax_id):
+        """False only when every ARC first name AND the OAX first name are all
+        ≥4 chars but none share the same 3-char prefix — a clear character
+        mismatch (e.g. Peter vs Patricia).  Short/initial names pass through."""
+        arc_fns = arc_firstnames.get(arc_id, [])
+        o = oax_firstname.get(oax_id, "")
+        if not arc_fns or len(o) < 4:
+            return True
+        for a in arc_fns:
+            if len(a) < 4 or a[:3] == o[:3]:
+                return True   # short ARC name, or prefix matches → compatible
+        return False           # all ARC first names clearly differ from OAX
 
     ambig["inst_overlap"] = ambig.apply(
         lambda r: _inst_overlap(r["arc_id"], r["oax_id"]), axis=1
@@ -213,6 +230,26 @@ def main():
             })
             continue
 
+        # Step 0c: first-name character mismatch filter.
+        # If at least one candidate has a compatible first name, drop those that
+        # clearly don't.  "Compatible" = either name is <4 chars (initial/short),
+        # OR both names share their first 3 chars.  Only fires when the filter
+        # would actually reduce the candidate set.
+        compat = group["oax_id"].apply(lambda oid: _names_compat(arc_id, oid))
+        if compat.any() and not compat.all():
+            name_excluded = set(group.loc[~compat, "oax_id"])
+            group = group[compat]
+            split_secondaries.update(name_excluded)
+        if len(group) == 1:
+            r = group.iloc[0]
+            resolved_rows.append({
+                "arc_id": r["arc_id"], "oax_id": r["oax_id"],
+                "match_probability": r["match_probability"],
+                "resolved_by": "name_filter",
+                "secondary_oax_ids": list(all_oax - {r["oax_id"]}),
+            })
+            continue
+
         # Step 1: unique ORCID match
         orcid_matches = group[group["orcid_match"]]
         if len(orcid_matches) == 1:
@@ -284,7 +321,47 @@ def main():
         columns=["arc_id", "oax_id", "match_probability", "inst_overlap"]
     )
 
-    resolved = pd.concat([resolved_single, resolved_ambig], ignore_index=True)
+    # Sub-HC rescue: arc_ids with zero HC candidates that have at least one
+    # sub-HC pair (0.5 ≤ p < 0.9) surviving the name-compatibility filter.
+    # If exactly one candidate survives, resolve it as "name_filter".
+    SUBHC_MIN = 0.7
+    hc_arc_ids = set(hc["arc_id"])
+    sub_hc_rescue = links[
+        (~links["high_confidence"])
+        & (links["match_probability"] >= SUBHC_MIN)
+        & (~links["arc_id"].isin(hc_arc_ids))
+    ].copy()
+
+    rescue_rows = []
+    if len(sub_hc_rescue):
+        sub_ids_sql = ", ".join(f"'{i}'" for i in sub_hc_rescue["oax_id"].unique().tolist())
+        sub_wc = con.execute(f"""
+            SELECT id, works_count FROM read_parquet('{OAX_AUTHORS}/*.parquet')
+            WHERE id IN ({sub_ids_sql})
+        """).fetchdf()
+        sub_oax_works = dict(zip(sub_wc["id"], sub_wc["works_count"]))
+        sub_hc_rescue["works_count"] = sub_hc_rescue["oax_id"].map(sub_oax_works).fillna(0).astype(int)
+
+        for arc_id, grp in sub_hc_rescue.groupby("arc_id"):
+            all_sub = set(grp["oax_id"])
+            compat = grp["oax_id"].apply(lambda oid: _names_compat(arc_id, oid))
+            grp = grp[compat]
+            if len(grp) == 0:
+                continue
+            # Unique highest probability among compatible survivors
+            max_p = grp["match_probability"].max()
+            best  = grp[grp["match_probability"] == max_p]
+            if len(best) == 1:
+                r = best.iloc[0]
+                rescue_rows.append({
+                    "arc_id": r["arc_id"], "oax_id": r["oax_id"],
+                    "match_probability": r["match_probability"],
+                    "resolved_by": "name_filter",
+                    "secondary_oax_ids": list(all_sub - {r["oax_id"]}),
+                })
+
+    resolved_rescue = pd.DataFrame(rescue_rows)
+    resolved = pd.concat([resolved_single, resolved_ambig, resolved_rescue], ignore_index=True)
 
     print("[4/4] Applying manual resolutions...")
     manual_path = Path(__file__).resolve().parents[1] / "config" / "manual_resolutions.csv"
@@ -339,7 +416,7 @@ def main():
     print(f"\n  Total ARC persons:              {all_arc:,}")
     print(f"  Resolved (1 HC match):          {by_counts.get('unique_hc', 0):,}")
     print(f"  Resolved (disambiguated):        {len(resolved) - by_counts.get('unique_hc', 0):,}")
-    for label in ["oax_orcid_dedup", "oax_topic_dedup", "orcid", "inst_overlap", "field", "probability", "works_count", "manual"]:
+    for label in ["oax_orcid_dedup", "oax_topic_dedup", "orcid", "inst_overlap", "field", "probability", "works_count", "name_filter", "manual"]:
         n = by_counts.get(label, 0)
         if n:
             print(f"    of which by {label+':':16s} {n:,}")

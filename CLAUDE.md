@@ -89,13 +89,13 @@ Output columns: `arc_id, oax_id, match_probability, resolved_by, secondary_oax_i
 `secondary_oax_ids`: all other HC candidates not chosen (split-record duplicates + alternatives).
 
 ## Current Linkage Results (2026-06-14)
-- Resolved: 22,414 / 22,816 (98.2%)
-  - unique_hc: 8,887 | oax_orcid_dedup: 943 | oax_topic_dedup: 2,628 | orcid: 4,976
-  - inst_overlap: 3,155 | field: 859 | probability: 62 | works_count: 535 | manual: 369
-- Ambiguous deferred: 123
+- Resolved: 22,490 / 22,816 (98.6%)
+  - unique_hc: 8,887 | oax_orcid_dedup: 943 | oax_topic_dedup: 2,627 | orcid: 4,978
+  - inst_overlap: 3,156 | field: 858 | probability: 62 | works_count: 533 | name_filter: 24 | manual: 422
+- Ambiguous deferred: 103
 - Manual unlinked: 16
-- Unlinked (no HC match): 263
-- manual_resolutions.csv: 369 resolve + 16 unlink = 385 rows
+- Unlinked (no HC match): 207
+- manual_resolutions.csv: 422 resolve + 16 unlink = 438 rows
 
 ## Fellowship Cohort Status (2026-06-13)
 - **FF** (Federation Fellows): 141/141 resolved ✓
@@ -120,8 +120,57 @@ To find all clusters for a scheme, search `grant_ids` in arc_persons, or use
 - TF adjustment on `first_name` (hn.first) exact level only
 
 ## Next Priority (start of next session)
-FF/FL/FT/APDI/CI-DORA/APF/APD/DP-CI/LP-CI all addressed. Remaining: **DECRA** deferred (in the 126 remaining); **CI** cases largely resolved. Also pending: re-run 01_prepare_arc.py to apply Paul Young manual split, then add per-sub-cluster manual resolutions. CatherineHayles (DP0879152) resolved at low confidence — review if needed.
-- 126 deferred remain — mostly genuine common-name collisions (WeiWang n=53, TuanNguyen n=36, XinZhou n=36, etc.) and low-wc cases with no field signal. These are genuinely hard to resolve without additional data (e.g., institutional affiliation confirmation).
+**Build oeuvres dataset** — fetch OAX works for each resolved ARC person and construct per-person
+publication lists for bibliometric analysis. New script `05_build_oeuvres.py`:
+- OAX works parquet: `$OPENALEX_DIR/works/` (large; scan authorships array for oax_id matches)
+- Include `secondary_oax_ids` (split records) — they share the same real person's publications
+- Key fields per work: id, title, publication_year, type, cited_by_count, topics, authorships
+- Join result to arc_oax_resolved to get arc_id → works mapping
+- Consider: deduplicate works appearing under both primary and secondary oax_ids
+
+Remaining linkage gaps (lower priority):
+- 207 unlinked (no HC match): mix of no-OAX-presence researchers + blocking failures
+- 103 deferred (common names: WeiWang n=53, TuanNguyen n=36, XinZhou n=36, etc.)
+- Paul Young split: re-run 01_prepare_arc.py to materialise `config/manual_splits.csv` entry,
+  then add per-sub-cluster manual resolutions (UQ virologist / USyd pharmacologist / Monash engineer)
+
+## Manual Resolution Techniques (Not Yet Automated in Pipeline)
+
+### Nickname / informal-name variants
+Many Australian researchers publish under informal given names not recorded in ARC data.
+The pipeline has no lookup table for these. Common patterns seen:
+- Bill = William, Tony = Anthony, Beth = Elizabeth
+- Geoff = Geoffrey, Greg = Gregory, Cris = Christiaan
+- Tim = Timothy, Chris = Christiaan, Rob = Robert
+**Potential pipeline addition**: a nickname expansion table applied to `first_name_canonical`
+during blocking (add both canonical and common nicknames as candidate first_initials).
+
+### Full-OAX surname search for no-affiliation records
+Researchers absent from `openalex_authors_prep.parquet` (AU-filtered) because their
+`last_known_institutions` is empty in the Feb26 snapshot. Manual path: scan raw OAX authors
+parquet by family name + field topic to find the record, then add to manual_resolutions.csv.
+Cases this session: BrienNorton (A5111895832), FrederickRavenhill (A5002864862).
+The pipeline cannot rescue these automatically — they are simply not Splink candidates.
+
+### Chinese compound given-name parsing failure
+OAX `display_name` "Wing Kong Chiu" → HumanName parses `first='Wing', middle='Kong'` but the
+prep code extracts `first_name='kong'` (middle used as first) → `first_initial='k'` not `'w'` →
+wrong blocking key → no Splink candidates generated.
+**Pattern**: OAX display_names of form "GivenA GivenB Surname" where GivenA+GivenB is a Chinese
+compound given name. HumanName may vary in which part it treats as first.
+**Potential fix**: add a cross-blocking rule on middle_initial in 03_link_arc_oax.py (partially
+done already) or detect compound-given-name patterns and index both initials.
+
+### ORCID mismatch / OAX entity-disambiguation errors
+In rare cases OAX has merged two real people into one record (or reassigned an ORCID to a wrong
+record). Symptom: OAX `display_name` doesn't match the ORCID holder's actual name.
+Example: A5091677854 had display_name="Randal Douc" but ORCID 0000-0003-3910-9495 belongs to
+Arnaud Doucet. Cross-check via ORCID.org or raw `raw_author_names` list in OAX.
+
+### Sub-HC rescue (now automated)
+The name-filter step in `04_resolve_links.py` rescues arc_ids with only sub-HC candidates
+(0.7–0.9) when character-mismatch filtering leaves exactly one compatible candidate.
+`resolved_by='name_filter'` (24 cases in current run). Already in pipeline.
 
 ## Splink Design Decisions
 - **`arrays_to_explode` is NOT supported** in EM training sessions
