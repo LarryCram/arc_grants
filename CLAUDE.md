@@ -88,14 +88,14 @@ Manual overrides: `config/manual_resolutions.csv` (resolve/unlink actions applie
 Output columns: `arc_id, oax_id, match_probability, resolved_by, secondary_oax_ids`
 `secondary_oax_ids`: all other HC candidates not chosen (split-record duplicates + alternatives).
 
-## Current Linkage Results (2026-06-14)
-- Resolved: 22,490 / 22,816 (98.6%)
+## Current Linkage Results (2026-06-14, updated after Noel Meyers fix)
+- Resolved: 22,491 / 22,816 (98.6%)
   - unique_hc: 8,887 | oax_orcid_dedup: 943 | oax_topic_dedup: 2,627 | orcid: 4,978
-  - inst_overlap: 3,156 | field: 858 | probability: 62 | works_count: 533 | name_filter: 24 | manual: 422
-- Ambiguous deferred: 103
+  - inst_overlap: 3,156 | field: 858 | probability: 62 | works_count: 532 | name_filter: 24 | manual: 423
+- Ambiguous deferred: 102
 - Manual unlinked: 16
 - Unlinked (no HC match): 207
-- manual_resolutions.csv: 422 resolve + 16 unlink = 438 rows
+- manual_resolutions.csv: 423 resolve + 16 unlink = 439 rows
 
 ## Fellowship Cohort Status (2026-06-13)
 - **FF** (Federation Fellows): 141/141 resolved ✓
@@ -120,13 +120,12 @@ To find all clusters for a scheme, search `grant_ids` in arc_persons, or use
 - TF adjustment on `first_name` (hn.first) exact level only
 
 ## Next Priority (start of next session)
-**Build oeuvres dataset** — fetch OAX works for each resolved ARC person and construct per-person
-publication lists for bibliometric analysis. New script `05_build_oeuvres.py`:
-- OAX works parquet: `$OPENALEX_DIR/works/` (large; scan authorships array for oax_id matches)
-- Include `secondary_oax_ids` (split records) — they share the same real person's publications
-- Key fields per work: id, title, publication_year, type, cited_by_count, topics, authorships
-- Join result to arc_oax_resolved to get arc_id → works mapping
-- Consider: deduplicate works appearing under both primary and secondary oax_ids
+**Run full oeuvres fetch and metrics:**
+1. `python analysis/01_fetch_oeuvres.py` — full run (~15–30 min, ~22k persons)
+2. `python analysis/02_accuracy_check.py --full` → review `accuracy_flags_full.csv` + `work_flags_full.csv` in batch → add corrections to `config/manual_resolutions.csv`
+3. `python analysis/03_annual_metrics.py`
+4. `python analysis/04_au_baseline.py` + `python analysis/04b_citation_quantiles.py`
+5. `python analysis/05_explore.py`
 
 Remaining linkage gaps (lower priority):
 - 207 unlinked (no HC match): mix of no-OAX-presence researchers + blocking failures

@@ -437,3 +437,4 @@ DP0772525_ElizabethGaze,https://openalex.org/A5069310677,resolve,"CI (DP). FOR=L
 DP0451481_BogdanDreher,https://openalex.org/A5072275550,resolve,"CI (DP). FOR=Neurosciences. B. Dreher (wc=96) = Bogdan Dreher. Initials-only OAX display; sub-HC candidate at 0.782."
 LP0776838_ChristiaanSteketee,https://openalex.org/A5014540148,resolve,"LP. FOR=Social Work. Chris Steketee (wc=14,h=5) = Christiaan Steketee. Chris=Christiaan nickname variant."
 DP0453077_FrederickRavenhill,https://openalex.org/A5002864862,resolve,"CI (DP). FOR=Political Science. Frederick John Ravenhill (wc=29) = Frederick Ravenhill. Not in AU prep: empty last_known_institutions in OAX Feb26."
+LP150100558_NoelMeyers,https://openalex.org/A5072546649,resolve,"LP. FOR=Chemistry. Noel M. Meyers (wc=40,h=14,orcid=0000-0002-3845-7271). OAX record has no orcid field populated — pipeline linked to wrong record (Nelle Meyers). Correct record confirmed via ORCID.org."
