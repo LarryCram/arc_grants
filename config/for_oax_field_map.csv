@@ -1,46 +1,46 @@
-for_series,div_code,div_name,oax_domain,oax_field
-2008,01,Mathematical Sciences,Physical Sciences,Mathematics
-2008,02,Physical Sciences,Physical Sciences,Physics and Astronomy
-2008,03,Chemical Sciences,Physical Sciences,Chemistry
-2008,04,Earth Sciences,Physical Sciences,Earth and Planetary Sciences
-2008,05,Environmental Sciences,Physical Sciences,Environmental Science
-2008,06,Biological Sciences,Life Sciences,Agricultural and Biological Sciences
-2008,07,Agricultural and Veterinary Sciences,Life Sciences,Agricultural and Biological Sciences
-2008,08,Information and Computing Sciences,Physical Sciences,Computer Science
-2008,09,Engineering,Physical Sciences,Engineering
-2008,10,Technology,Physical Sciences,Engineering
-2008,11,Medical and Health Sciences,Health Sciences,Medicine
-2008,12,Built Environment and Design,Social Sciences,Arts and Humanities
-2008,13,Education,Social Sciences,Social Sciences
-2008,14,Economics,Social Sciences,"Economics, Econometrics and Finance"
-2008,15,"Commerce, Management, Tourism and Services",Social Sciences,"Business, Management and Accounting"
-2008,16,Studies in Human Society,Social Sciences,Social Sciences
-2008,17,Psychology and Cognitive Sciences,Social Sciences,Psychology
-2008,18,Law and Legal Studies,Social Sciences,Social Sciences
-2008,19,Studies in Creative Arts and Writing,Social Sciences,Arts and Humanities
-2008,20,"Language, Communication and Culture",Social Sciences,Arts and Humanities
-2008,21,History and Archaeology,Social Sciences,Arts and Humanities
-2008,22,Philosophy and Religious Studies,Social Sciences,Arts and Humanities
-2020,30,"AGRICULTURAL, VETERINARY AND FOOD SCIENCES",Life Sciences,Agricultural and Biological Sciences
-2020,31,BIOLOGICAL SCIENCES,Life Sciences,Agricultural and Biological Sciences
-2020,32,BIOMEDICAL AND CLINICAL SCIENCES,Health Sciences,Medicine
-2020,33,BUILT ENVIRONMENT AND DESIGN,Social Sciences,Arts and Humanities
-2020,34,CHEMICAL SCIENCES,Physical Sciences,Chemistry
-2020,35,"COMMERCE, MANAGEMENT, TOURISM AND SERVICES",Social Sciences,"Business, Management and Accounting"
-2020,36,CREATIVE ARTS AND WRITING,Social Sciences,Arts and Humanities
-2020,37,EARTH SCIENCES,Physical Sciences,Earth and Planetary Sciences
-2020,38,ECONOMICS,Social Sciences,"Economics, Econometrics and Finance"
-2020,39,EDUCATION,Social Sciences,Social Sciences
-2020,40,ENGINEERING,Physical Sciences,Engineering
-2020,41,ENVIRONMENTAL SCIENCES,Physical Sciences,Environmental Science
-2020,42,HEALTH SCIENCES,Health Sciences,Medicine
-2020,43,"HISTORY, HERITAGE AND ARCHAEOLOGY",Social Sciences,Arts and Humanities
-2020,44,HUMAN SOCIETY,Social Sciences,Social Sciences
-2020,45,INDIGENOUS STUDIES,Social Sciences,Social Sciences
-2020,46,INFORMATION AND COMPUTING SCIENCES,Physical Sciences,Computer Science
-2020,47,"LANGUAGE, COMMUNICATION AND CULTURE",Social Sciences,Arts and Humanities
-2020,48,LAW AND LEGAL STUDIES,Social Sciences,Social Sciences
-2020,49,MATHEMATICAL SCIENCES,Physical Sciences,Mathematics
-2020,50,PHILOSOPHY AND RELIGIOUS STUDIES,Social Sciences,Arts and Humanities
-2020,51,PHYSICAL SCIENCES,Physical Sciences,Physics and Astronomy
-2020,52,PSYCHOLOGY,Social Sciences,Psychology
+for_series,div_code,div_name,oax_domain,oax_domain_id,oax_field,oax_field_id
+2008,01,Mathematical Sciences,Physical Sciences,3,Mathematics,26
+2008,02,Physical Sciences,Physical Sciences,3,Physics and Astronomy,31
+2008,03,Chemical Sciences,Physical Sciences,3,Chemistry,16
+2008,04,Earth Sciences,Physical Sciences,3,Earth and Planetary Sciences,19
+2008,05,Environmental Sciences,Physical Sciences,3,Environmental Science,23
+2008,06,Biological Sciences,Life Sciences,1,Agricultural and Biological Sciences,11
+2008,07,Agricultural and Veterinary Sciences,Life Sciences,1,Agricultural and Biological Sciences,11
+2008,08,Information and Computing Sciences,Physical Sciences,3,Computer Science,17
+2008,09,Engineering,Physical Sciences,3,Engineering,22
+2008,10,Technology,Physical Sciences,3,Engineering,22
+2008,11,Medical and Health Sciences,Health Sciences,4,Medicine,27
+2008,12,Built Environment and Design,Social Sciences,2,Arts and Humanities,12
+2008,13,Education,Social Sciences,2,Social Sciences,33
+2008,14,Economics,Social Sciences,2,"Economics, Econometrics and Finance",20
+2008,15,"Commerce, Management, Tourism and Services",Social Sciences,2,"Business, Management and Accounting",14
+2008,16,Studies in Human Society,Social Sciences,2,Social Sciences,33
+2008,17,Psychology and Cognitive Sciences,Social Sciences,2,Psychology,32
+2008,18,Law and Legal Studies,Social Sciences,2,Social Sciences,33
+2008,19,Studies in Creative Arts and Writing,Social Sciences,2,Arts and Humanities,12
+2008,20,"Language, Communication and Culture",Social Sciences,2,Arts and Humanities,12
+2008,21,History and Archaeology,Social Sciences,2,Arts and Humanities,12
+2008,22,Philosophy and Religious Studies,Social Sciences,2,Arts and Humanities,12
+2020,30,"AGRICULTURAL, VETERINARY AND FOOD SCIENCES",Life Sciences,1,Agricultural and Biological Sciences,11
+2020,31,BIOLOGICAL SCIENCES,Life Sciences,1,Agricultural and Biological Sciences,11
+2020,32,BIOMEDICAL AND CLINICAL SCIENCES,Health Sciences,4,Medicine,27
+2020,33,BUILT ENVIRONMENT AND DESIGN,Social Sciences,2,Arts and Humanities,12
+2020,34,CHEMICAL SCIENCES,Physical Sciences,3,Chemistry,16
+2020,35,"COMMERCE, MANAGEMENT, TOURISM AND SERVICES",Social Sciences,2,"Business, Management and Accounting",14
+2020,36,CREATIVE ARTS AND WRITING,Social Sciences,2,Arts and Humanities,12
+2020,37,EARTH SCIENCES,Physical Sciences,3,Earth and Planetary Sciences,19
+2020,38,ECONOMICS,Social Sciences,2,"Economics, Econometrics and Finance",20
+2020,39,EDUCATION,Social Sciences,2,Social Sciences,33
+2020,40,ENGINEERING,Physical Sciences,3,Engineering,22
+2020,41,ENVIRONMENTAL SCIENCES,Physical Sciences,3,Environmental Science,23
+2020,42,HEALTH SCIENCES,Health Sciences,4,Medicine,27
+2020,43,"HISTORY, HERITAGE AND ARCHAEOLOGY",Social Sciences,2,Arts and Humanities,12
+2020,44,HUMAN SOCIETY,Social Sciences,2,Social Sciences,33
+2020,45,INDIGENOUS STUDIES,Social Sciences,2,Social Sciences,33
+2020,46,INFORMATION AND COMPUTING SCIENCES,Physical Sciences,3,Computer Science,17
+2020,47,"LANGUAGE, COMMUNICATION AND CULTURE",Social Sciences,2,Arts and Humanities,12
+2020,48,LAW AND LEGAL STUDIES,Social Sciences,2,Social Sciences,33
+2020,49,MATHEMATICAL SCIENCES,Physical Sciences,3,Mathematics,26
+2020,50,PHILOSOPHY AND RELIGIOUS STUDIES,Social Sciences,2,Arts and Humanities,12
+2020,51,PHYSICAL SCIENCES,Physical Sciences,3,Physics and Astronomy,31
+2020,52,PSYCHOLOGY,Social Sciences,2,Psychology,32

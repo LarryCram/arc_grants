@@ -38,7 +38,7 @@ from collections import defaultdict
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import PROCESSED_DATA, OAX_AUTHORS, TOP_CUT
-from src.utils.names import for_name_tokens
+from src.utils.lookup_for_topic import ForTopicLookup
 
 LINK_THRESHOLD = 0.9
 
@@ -54,21 +54,23 @@ def main():
 
     print("[1/4] Loading data...")
     links = con.execute(f"SELECT * FROM read_parquet('{link_path}')").fetchdf()
-    arc   = con.execute(f"SELECT cluster_id, orcids, inst_arr, for_names, first_names FROM read_parquet('{arc_path}')").fetchdf()
-    oax   = con.execute(f"SELECT unique_id, orcid, inst_ids, topic_names, subfield_names, first_name FROM read_parquet('{oax_path}')").fetchdf()
+    arc   = con.execute(f"SELECT cluster_id, orcids, inst_arr, for_codes, first_names FROM read_parquet('{arc_path}')").fetchdf()
+    oax   = con.execute(f"SELECT unique_id, orcid, inst_ids, topic_names, subfield_names, first_name, family_name_main FROM read_parquet('{oax_path}')").fetchdf()
 
     arc["orcid"] = arc["orcids"].apply(lambda x: x[0] if x is not None and len(x) > 0 else None)
-    arc_orcid    = dict(zip(arc["cluster_id"], arc["orcid"]))
-    arc_inst     = dict(zip(arc["cluster_id"], arc["inst_arr"]))
-    arc_for      = dict(zip(arc["cluster_id"], arc["for_names"]))
+    arc_orcid     = dict(zip(arc["cluster_id"], arc["orcid"]))
+    arc_inst      = dict(zip(arc["cluster_id"], arc["inst_arr"]))
+    arc_for_codes = dict(zip(arc["cluster_id"], arc["for_codes"]))
     arc_firstnames = {r["cluster_id"]: [str(fn).lower().strip() for fn in (r["first_names"] if r["first_names"] is not None else [])]
                       for _, r in arc.iterrows()}
-    oax_orcid    = dict(zip(oax["unique_id"],  oax["orcid"]))
-    oax_inst     = dict(zip(oax["unique_id"],  oax["inst_ids"]))
-    oax_topics   = dict(zip(oax["unique_id"],  oax["topic_names"]))
-    oax_subfields= dict(zip(oax["unique_id"],  oax["subfield_names"]))
-    oax_firstname= {r["unique_id"]: str(r["first_name"] or "").lower().strip()
-                    for _, r in oax.iterrows()}
+    oax_orcid     = dict(zip(oax["unique_id"],  oax["orcid"]))
+    oax_inst      = dict(zip(oax["unique_id"],  oax["inst_ids"]))
+    oax_topics    = dict(zip(oax["unique_id"],  oax["topic_names"]))
+    oax_subfields = dict(zip(oax["unique_id"],  oax["subfield_names"]))
+    oax_firstname = {r["unique_id"]: str(r["first_name"] or "").lower().strip()
+                     for _, r in oax.iterrows()}
+    oax_familyname= {r["unique_id"]: str(r["family_name_main"] or "").lower().strip()
+                     for _, r in oax.iterrows()}
 
     hc = links[links["high_confidence"]].copy()
     per_arc = hc.groupby("arc_id").size()
@@ -105,24 +107,25 @@ def main():
     def _lst(v):
         return list(v) if v is not None else []
 
+    _lu = ForTopicLookup()
+
     def _field_score(arc_id, oax_id):
-        arc_toks, arc_bg = set(), set()
-        for fn in _lst(arc_for.get(arc_id)):
-            toks = for_name_tokens(fn)
-            arc_toks.update(toks)
-            arc_bg.update((toks[i], toks[i+1]) for i in range(len(toks) - 1))
-        if not arc_toks:
+        # Derive the set of OAX subfield names implied by the ARC person's FOR codes.
+        # 2008 codes are upgraded to 2020 group codes via the conversion table;
+        # codes with no 4-digit 2020 equivalent (e.g. 1701 pre-conversion) are skipped
+        # and contribute 0 — the filter guard (max_fs >= 1 and min_fs == 0) then
+        # doesn't fire, leaving disambiguation unchanged for those persons.
+        target_subfields = set()
+        for code in _lst(arc_for_codes.get(arc_id)):
+            code20 = _lu.upgrade_for_code(code)
+            if code20:
+                sf_row = _lu.group_to_subfield(code20)
+                if sf_row:
+                    target_subfields.add(sf_row["oax_subfield_name"])
+        if not target_subfields:
             return 0
-        oax_toks, oax_bg = set(), set()
-        for t in _lst(oax_topics.get(oax_id)):
-            toks = for_name_tokens(t)
-            oax_toks.update(toks)
-            oax_bg.update((toks[i], toks[i+1]) for i in range(len(toks) - 1))
-        for t in _lst(oax_subfields.get(oax_id)):
-            toks = for_name_tokens(t)
-            oax_toks.update(toks)
-            oax_bg.update((toks[i], toks[i+1]) for i in range(len(toks) - 1))
-        return len(arc_toks & oax_toks) + len(arc_bg & oax_bg)
+        oax_sfs = set(_lst(oax_subfields.get(oax_id)))
+        return len(target_subfields & oax_sfs)
 
     def _inst_overlap(arc_id, oax_id):
         a = arc_inst.get(arc_id)
@@ -143,6 +146,20 @@ def main():
             if len(a) < 4 or a[:3] == o[:3]:
                 return True   # short ARC name, or prefix matches → compatible
         return False           # all ARC first names clearly differ from OAX
+
+    def _oax_names_compat(oax_ids):
+        """True when all OAX candidates in a group could plausibly be the same person.
+        Requires identical family_name_main AND mutually compatible first names
+        (same 3-char prefix among all full names; initials <4 chars pass through).
+        Used to guard oax_topic_dedup against collapsing genuinely different people."""
+        fams = {oax_familyname.get(oid, "") for oid in oax_ids}
+        if len(fams) != 1:
+            return False
+        full_firsts = [oax_firstname.get(oid, "") for oid in oax_ids if len(oax_firstname.get(oid, "")) >= 4]
+        if len(full_firsts) < 2:
+            return True   # at most one full first name → no conflict possible
+        prefix = full_firsts[0][:3]
+        return all(n[:3] == prefix for n in full_firsts[1:])
 
     ambig["inst_overlap"] = ambig.apply(
         lambda r: _inst_overlap(r["arc_id"], r["oax_id"]), axis=1
@@ -212,6 +229,11 @@ def main():
         topic_secondaries = set()
         for ids in topic_to_oax_ids.values():
             if len(ids) > 1:
+                # Name-compatibility guard: only treat as split records when all
+                # candidates share the same family name and compatible first names.
+                # Prevents collapsing two different people who share a research topic.
+                if not _oax_names_compat(ids):
+                    continue
                 wcs = {oid: oax_works.get(oid, 0) for oid in ids}
                 best = max(wcs, key=wcs.get)
                 topic_secondaries.update(
@@ -275,7 +297,7 @@ def main():
                         for _, r in candidates.iterrows()}
         max_fs = max(field_scores.values())
         min_fs = min(field_scores.values())
-        if max_fs >= 2 and min_fs == 0:
+        if max_fs >= 1 and min_fs == 0:
             field_filtered = candidates[candidates["oax_id"].map(field_scores) == max_fs]
             if len(field_filtered) < len(candidates):
                 candidates = field_filtered

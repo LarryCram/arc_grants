@@ -141,7 +141,7 @@ def main(sample_n=None):
     # ── 4. Join topics (best topic per work by score) ──────────────────────
     # Filter topics to only the work_idxs we care about before ranking,
     # so we don't rank topics for all 200M+ OAX works.
-    print("Joining topics...")
+    print("Joining topics...") 
     t3 = time.time()
     con.execute(f"""
     CREATE TABLE arc_best_topic AS

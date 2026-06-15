@@ -1,0 +1,158 @@
+for_2008_code,for_2020_code,desc_2008,desc_2020
+0101,4904,Pure Mathematics,Pure mathematics
+0102,4901,Applied Mathematics,Applied mathematics
+0103,4903,Numerical and Computational Mathematics,Numerical and computational mathematics
+0104,4905,Statistics,Statistics
+0105,4902,Mathematical Physics,Mathematical physics
+0199,4999,Other Mathematical Sciences,Other mathematical sciences
+0201,5101,Astronomical and Space Sciences,Astronomical sciences
+0202,5106,"Atomic, Molecular, Nuclear, Particle and Plasma Physics",Nuclear and plasma physics
+0203,5103,Classical Physics,Classical physics
+0204,5104,Condensed Matter Physics,Condensed matter physics
+0205,5102,Optical Physics,"Atomic, molecular and optical physics"
+0206,5108,Quantum Physics,Quantum physics
+0299,5199,Other Physical Sciences,Other physical sciences
+0301,3401,Analytical Chemistry,Analytical chemistry
+0302,3402,Inorganic Chemistry,Inorganic chemistry
+0303,3403,Macromolecular and Materials Chemistry,Macromolecular and materials chemistry
+0304,3404,Medicinal and Biomolecular Chemistry,Medicinal and biomolecular chemistry
+0305,3405,Organic Chemistry,Organic chemistry
+0306,3406,Physical Chemistry (incl. Structural),Physical chemistry
+0307,3407,Theoretical and Computational Chemistry,Theoretical and computational chemistry
+0399,3499,Other Chemical Sciences,Other chemical sciences
+0401,3701,Atmospheric Sciences,Atmospheric sciences
+0402,3703,Geochemistry,Geochemistry
+0403,3705,Geology,Geology
+0404,3706,Geophysics,Geophysics
+0405,3708,Oceanography,Oceanography
+0406,3709,Physical Geography and Environmental Geoscience,Physical geography and environmental geoscience
+0499,3799,Other Earth Sciences,Other earth sciences
+0501,4102,Ecological Applications,Ecological applications
+0502,4104,Environmental Science and Management,Environmental management
+0503,4106,Soil Sciences,Soil sciences
+0599,4199,Other Environmental Sciences,Other environmental sciences
+0601,3101,Biochemistry and Cell Biology,Biochemistry and cell biology
+0602,3103,Ecology,Ecology
+0603,3104,Evolutionary Biology,Evolutionary biology
+0604,3105,Genetics,Genetics
+0605,3107,Microbiology,Microbiology
+0606,3109,Physiology,Zoology
+0607,3108,Plant Biology,Plant biology
+0608,3109,Zoology,Zoology
+0699,3199,Other Biological Sciences,Other biological sciences
+0701,3002,"Agriculture, Land and Farm Management","Agriculture, land and farm management"
+0702,3003,Animal Production,Animal production
+0703,3004,Crop and Pasture Production,Crop and pasture production
+0704,3005,Fisheries Sciences,Fisheries sciences
+0705,3007,Forestry Sciences,Forestry sciences
+0706,3008,Horticultural Production,Horticultural production
+0707,3009,Veterinary Sciences,Veterinary sciences
+0799,3099,Other Agricultural and Veterinary Sciences,"Other agricultural, veterinary and food sciences"
+0801,4602,Artificial Intelligence and Image Processing,Artificial intelligence
+0802,4613,Computation Theory and Mathematics,Theory of computation
+0803,4606,Computer Software,Distributed computing and systems software
+0804,4605,Data Format,Data management and data science
+0805,4606,Distributed Computing,Distributed computing and systems software
+0806,4609,Information Systems,Information systems
+0807,4610,Library and Information Studies,Library and information studies
+0899,4699,Other Information and Computing Sciences,Other information and computing sciences
+0901,4001,Aerospace Engineering,Aerospace engineering
+0902,4002,Automotive Engineering,Automotive engineering
+0903,4003,Biomedical Engineering,Biomedical engineering
+0904,4004,Chemical Engineering,Chemical engineering
+0905,4005,Civil Engineering,Civil engineering
+0906,4007,Electrical and Electronic Engineering,"Control engineering, mechatronics and robotics"
+0907,4011,Environmental Engineering,Environmental engineering
+0908,3006,Food Sciences,Food sciences
+0909,4013,Geomatic Engineering,Geomatic engineering
+0910,4014,Manufacturing Engineering,Manufacturing engineering
+0911,4015,Maritime Engineering,Maritime engineering
+0912,4016,Materials Engineering,Materials engineering
+0913,4017,Mechanical Engineering,Mechanical engineering
+0914,4019,Resources Engineering and Extractive Metallurgy,Resources engineering and extractive metallurgy
+0915,4099,Interdisciplinary Engineering,Other engineering
+0999,4099,Other Engineering,Other engineering
+1001,3001,Agricultural Biotechnology,Agricultural biotechnology
+1002,4103,Environmental Biotechnology,Environmental biotechnology
+1003,3106,Industrial Biotechnology,Industrial biotechnology
+1004,3206,Medical Biotechnology,Medical biotechnology
+1005,4006,Communications Technologies,Communications engineering
+1006,4009,Computer Hardware,"Electronics, sensors and digital hardware"
+1007,4018,Nanotechnology,Nanotechnology
+1099,4018,Other Technology,Nanotechnology
+1101,3205,Medical Biochemistry and Metabolomics,Medical biochemistry and metabolomics
+1102,3201,Cardiovascular Medicine and Haematology,Cardiovascular medicine and haematology
+1103,3202,Clinical Sciences,Clinical sciences
+1104,4208,Complementary and Alternative Medicine,"Traditional, complementary and integrative medicine"
+1105,3203,Dentistry,Dentistry
+1106,4207,Human Movement and Sports Science,Sports science and exercise
+1107,3204,Immunology,Immunology
+1108,3207,Medical Microbiology,Medical microbiology
+1109,3209,Neurosciences,Neurosciences
+1110,4205,Nursing,Nursing
+1111,3210,Nutrition and Dietetics,Nutrition and dietetics
+1112,3211,Oncology and Carcinogenesis,Oncology and carcinogenesis
+1113,3212,Ophthalmology and Optometry,Ophthalmology and optometry
+1114,3215,Paediatrics and Reproductive Medicine,Reproductive medicine
+1115,3214,Pharmacology and Pharmaceutical Sciences,Pharmacology and pharmaceutical sciences
+1116,3208,Medical Physiology,Medical physiology
+1117,4206,Public Health and Health Services,Public health
+1199,4299,Other Medical and Health Sciences,Other health sciences
+1201,3301,Architecture,Architecture
+1202,3302,Building,Building
+1203,3303,Design Practice and Management,Design
+1204,4010,Engineering Design,Engineering practice and education
+1205,3304,Urban and Regional Planning,Urban and regional planning
+1299,3399,Other Built Environment and Design,Other built environment and design
+1301,3903,Education Systems,Education systems
+1302,3901,Curriculum and Pedagogy,Curriculum and pedagogy
+1303,3904,Specialist Studies in Education,Specialist studies in education
+1399,3999,Other Education,Other education
+1401,3803,Economic Theory,Economic theory
+1402,3801,Applied Economics,Applied economics
+1403,3802,Econometrics,Econometrics
+1499,3899,Other Economics,Other economics
+1501,3501,"Accounting, Auditing and Accountability","Accounting, auditing and accountability"
+1502,3502,"Banking, Finance and Investment","Banking, finance and investment"
+1503,3507,Business and Management,"Strategy, management and organisational behaviour"
+1504,3504,Commercial Services,Commercial services
+1505,3506,Marketing,Marketing
+1506,3508,Tourism,Tourism
+1507,3509,Transportation and Freight Services,"Transportation, logistics and supply chains"
+1599,3599,"Other Commerce, Management, Tourism and Services","Other commerce, management, tourism and services"
+1601,4401,Anthropology,Anthropology
+1602,4402,Criminology,Criminology
+1603,4403,Demography,Demography
+1604,4406,Human Geography,Human geography
+1605,4407,Policy and Administration,Policy and administration
+1606,4408,Political Science,Political science
+1607,4409,Social Work,Social work
+1608,4410,Sociology,Sociology
+1699,4499,Other studies in Human Society,Other human society
+1701,5201,Psychology,Applied and developmental psychology
+1702,5204,Cognitive Science,Cognitive and computational psychology
+1799,5299,Other Psychology and Cognitive Science,Other psychology
+1801,4899,Law,Other law and legal studies
+1802,4511,Maori Law,"Ngā tāngata, te porihanga me ngā hapori o te Māori (Māori peoples, society and community)"
+1899,4899,Other Law and Legal Studies,Other law and legal studies
+1901,3601,Art Theory and Criticism,"Art history, theory and criticism"
+1902,3605,"Film, Television and Digital Media",Screen and digital media
+1903,3602,Journalism and Professional Writing,Creative and professional writing
+1904,3602,Performing Arts and Creative Writing,Creative and professional writing
+1905,3606,Visual Arts and Crafts,Visual arts
+1999,3699,Other Studies in Creative Arts and Writing,Other creative arts and writing
+2001,4701,Communication and Media Studies,Communication and media studies
+2002,4702,Cultural Studies,Cultural studies
+2003,4703,Language Studies,Language studies
+2004,4704,Linguistics,Linguistics
+2005,4705,Literary Studies,Literary studies
+2099,4519,"Other Language, Literature and Culture","Other Indigenous data, methodologies and global Indigenous studies"
+2101,4301,Archaeology,Archaeology
+2102,4302,Curatorial and Related Studies,"Heritage, archive and museum studies"
+2103,4303,Historical Studies,Historical studies
+2199,4399,Other History and Archaeology,"Other history, heritage and archaeology"
+2201,5001,Applied Ethics,Applied ethics
+2202,5002,History and Philosophy of Specific Fields,History and philosophy of specific fields
+2203,5003,Philosophy,Philosophy
+2204,5004,Religion and Religious Studies,Religious studies
+2299,5099,Other Philosophy and Religious Studies,Other philosophy and religious studies

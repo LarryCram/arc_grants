@@ -208,6 +208,47 @@ def main(sample_n=None):
                       f"  oeuvre={row[4]}  oax={row[5]}  ratio={row[8]}"
                       f"  resolved_by={row[9]}  oax_name={row[3]}")
 
+    # ── 3b. Year-filter and title-dedup exclusion summary ─────────────────
+    section("3b. Work exclusions: year filter + title dedup")
+    excl = con.execute(f"""
+        WITH raw AS (
+            SELECT arc_id, work_idx, publication_year, type, title
+            FROM read_parquet('{oeuvres}')
+        ),
+        in_range AS (
+            SELECT * FROM raw
+            WHERE publication_year BETWEEN 1950 AND 2026
+        ),
+        title_ranked AS (
+            SELECT work_idx,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY arc_id,
+                           CASE WHEN title IS NOT NULL AND length(title) >= 20
+                                THEN lower(regexp_replace(title, '[^a-zA-Z0-9]', '', 'g'))
+                                ELSE CAST(work_idx AS VARCHAR)
+                           END
+                       ORDER BY
+                           CASE type WHEN 'article' THEN 1 WHEN 'review' THEN 2
+                                     WHEN 'book-chapter' THEN 3 WHEN 'book' THEN 4
+                                     WHEN 'preprint' THEN 5 ELSE 6 END,
+                           work_idx
+                   ) AS rn
+            FROM in_range
+        )
+        SELECT
+            COUNT(*)                          AS n_raw,
+            SUM(CASE WHEN r.publication_year BETWEEN 1950 AND 2026 THEN 1 ELSE 0 END)
+                                              AS n_in_range,
+            SUM(CASE WHEN tr.rn = 1 THEN 1 ELSE 0 END)
+                                              AS n_after_dedup
+        FROM raw r
+        LEFT JOIN title_ranked tr ON tr.work_idx = r.work_idx
+    """).fetchone()
+    print(f"  Raw oeuvre works       : {excl[0]:>10,}")
+    print(f"  After year filter      : {excl[1]:>10,}  ({excl[0]-excl[1]:,} excluded, <1950 or >2026)")
+    print(f"  After title dedup      : {excl[2]:>10,}  ({excl[1]-excl[2]:,} title duplicates collapsed)")
+    print(f"  → effective metric rows: {excl[2]:>10,}")
+
     # ── 4. Author name consistency (sample only) ───────────────────────────
     if sample_n == 10:
         section("4. Author names in oeuvres vs ARC name (sample-10)")

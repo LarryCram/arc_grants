@@ -1,0 +1,214 @@
+group_code,group_name,div_code,div_name,oax_subfield_id,oax_subfield_name,oax_field_id,oax_field_name,oax_domain_id,oax_domain_name
+3001,Agricultural biotechnology,30,"AGRICULTURAL, VETERINARY AND FOOD SCIENCES",1100,General Agricultural and Biological Sciences,11,Agricultural and Biological Sciences,1,Life Sciences
+3002,"Agriculture, land and farm management",30,"AGRICULTURAL, VETERINARY AND FOOD SCIENCES",1102,Agronomy and Crop Science,11,Agricultural and Biological Sciences,1,Life Sciences
+3003,Animal production,30,"AGRICULTURAL, VETERINARY AND FOOD SCIENCES",1103,Animal Science and Zoology,11,Agricultural and Biological Sciences,1,Life Sciences
+3004,Crop and pasture production,30,"AGRICULTURAL, VETERINARY AND FOOD SCIENCES",1102,Agronomy and Crop Science,11,Agricultural and Biological Sciences,1,Life Sciences
+3005,Fisheries sciences,30,"AGRICULTURAL, VETERINARY AND FOOD SCIENCES",1104,Aquatic Science,11,Agricultural and Biological Sciences,1,Life Sciences
+3006,Food sciences,30,"AGRICULTURAL, VETERINARY AND FOOD SCIENCES",1106,Food Science,11,Agricultural and Biological Sciences,1,Life Sciences
+3007,Forestry sciences,30,"AGRICULTURAL, VETERINARY AND FOOD SCIENCES",1107,Forestry,11,Agricultural and Biological Sciences,1,Life Sciences
+3008,Horticultural production,30,"AGRICULTURAL, VETERINARY AND FOOD SCIENCES",1108,Horticulture,11,Agricultural and Biological Sciences,1,Life Sciences
+3009,Veterinary sciences,30,"AGRICULTURAL, VETERINARY AND FOOD SCIENCES",1103,Animal Science and Zoology,11,Agricultural and Biological Sciences,1,Life Sciences
+3099,"Other agricultural, veterinary and food sciences",30,"AGRICULTURAL, VETERINARY AND FOOD SCIENCES",1100,General Agricultural and Biological Sciences,11,Agricultural and Biological Sciences,1,Life Sciences
+3101,Biochemistry and cell biology,31,BIOLOGICAL SCIENCES,1100,General Agricultural and Biological Sciences,11,Agricultural and Biological Sciences,1,Life Sciences
+3102,Bioinformatics and computational biology,31,BIOLOGICAL SCIENCES,1100,General Agricultural and Biological Sciences,11,Agricultural and Biological Sciences,1,Life Sciences
+3103,Ecology,31,BIOLOGICAL SCIENCES,1105,"Ecology, Evolution, Behavior and Systematics",11,Agricultural and Biological Sciences,1,Life Sciences
+3104,Evolutionary biology,31,BIOLOGICAL SCIENCES,1105,"Ecology, Evolution, Behavior and Systematics",11,Agricultural and Biological Sciences,1,Life Sciences
+3105,Genetics,31,BIOLOGICAL SCIENCES,1100,General Agricultural and Biological Sciences,11,Agricultural and Biological Sciences,1,Life Sciences
+3106,Industrial biotechnology,31,BIOLOGICAL SCIENCES,1100,General Agricultural and Biological Sciences,11,Agricultural and Biological Sciences,1,Life Sciences
+3107,Microbiology,31,BIOLOGICAL SCIENCES,1100,General Agricultural and Biological Sciences,11,Agricultural and Biological Sciences,1,Life Sciences
+3108,Plant biology,31,BIOLOGICAL SCIENCES,1110,Plant Science,11,Agricultural and Biological Sciences,1,Life Sciences
+3109,Zoology,31,BIOLOGICAL SCIENCES,1103,Animal Science and Zoology,11,Agricultural and Biological Sciences,1,Life Sciences
+3199,Other biological sciences,31,BIOLOGICAL SCIENCES,1100,General Agricultural and Biological Sciences,11,Agricultural and Biological Sciences,1,Life Sciences
+3201,Cardiovascular medicine and haematology,32,BIOMEDICAL AND CLINICAL SCIENCES,2705,Cardiology and Cardiovascular Medicine,27,Medicine,4,Health Sciences
+3202,Clinical sciences,32,BIOMEDICAL AND CLINICAL SCIENCES,2724,Internal Medicine,27,Medicine,4,Health Sciences
+3203,Dentistry,32,BIOMEDICAL AND CLINICAL SCIENCES,2724,Internal Medicine,27,Medicine,4,Health Sciences
+3204,Immunology,32,BIOMEDICAL AND CLINICAL SCIENCES,2723,Immunology and Allergy,27,Medicine,4,Health Sciences
+3205,Medical biochemistry and metabolomics,32,BIOMEDICAL AND CLINICAL SCIENCES,2704,Biochemistry,27,Medicine,4,Health Sciences
+3206,Medical biotechnology,32,BIOMEDICAL AND CLINICAL SCIENCES,2716,Genetics,27,Medicine,4,Health Sciences
+3207,Medical microbiology,32,BIOMEDICAL AND CLINICAL SCIENCES,2726,Microbiology,27,Medicine,4,Health Sciences
+3208,Medical physiology,32,BIOMEDICAL AND CLINICAL SCIENCES,2737,Physiology,27,Medicine,4,Health Sciences
+3209,Neurosciences,32,BIOMEDICAL AND CLINICAL SCIENCES,2728,Neurology,27,Medicine,4,Health Sciences
+3210,Nutrition and dietetics,32,BIOMEDICAL AND CLINICAL SCIENCES,2712,"Endocrinology, Diabetes and Metabolism",27,Medicine,4,Health Sciences
+3211,Oncology and carcinogenesis,32,BIOMEDICAL AND CLINICAL SCIENCES,2730,Oncology,27,Medicine,4,Health Sciences
+3212,Ophthalmology and optometry,32,BIOMEDICAL AND CLINICAL SCIENCES,2731,Ophthalmology,27,Medicine,4,Health Sciences
+3213,Paediatrics,32,BIOMEDICAL AND CLINICAL SCIENCES,2735,"Pediatrics, Perinatology and Child Health",27,Medicine,4,Health Sciences
+3214,Pharmacology and pharmaceutical sciences,32,BIOMEDICAL AND CLINICAL SCIENCES,2736,Pharmacology,27,Medicine,4,Health Sciences
+3215,Reproductive medicine,32,BIOMEDICAL AND CLINICAL SCIENCES,2743,Reproductive Medicine,27,Medicine,4,Health Sciences
+3299,Other biomedical and clinical sciences,32,BIOMEDICAL AND CLINICAL SCIENCES,2724,Internal Medicine,27,Medicine,4,Health Sciences
+3301,Architecture,33,BUILT ENVIRONMENT AND DESIGN,1200,General Arts and Humanities,12,Arts and Humanities,2,Social Sciences
+3302,Building,33,BUILT ENVIRONMENT AND DESIGN,1200,General Arts and Humanities,12,Arts and Humanities,2,Social Sciences
+3303,Design,33,BUILT ENVIRONMENT AND DESIGN,1213,Visual Arts and Performing Arts,12,Arts and Humanities,2,Social Sciences
+3304,Urban and regional planning,33,BUILT ENVIRONMENT AND DESIGN,1200,General Arts and Humanities,12,Arts and Humanities,2,Social Sciences
+3399,Other built environment and design,33,BUILT ENVIRONMENT AND DESIGN,1200,General Arts and Humanities,12,Arts and Humanities,2,Social Sciences
+3401,Analytical chemistry,34,CHEMICAL SCIENCES,1602,Analytical Chemistry,16,Chemistry,3,Physical Sciences
+3402,Inorganic chemistry,34,CHEMICAL SCIENCES,1604,Inorganic Chemistry,16,Chemistry,3,Physical Sciences
+3403,Macromolecular and materials chemistry,34,CHEMICAL SCIENCES,1605,Organic Chemistry,16,Chemistry,3,Physical Sciences
+3404,Medicinal and biomolecular chemistry,34,CHEMICAL SCIENCES,1605,Organic Chemistry,16,Chemistry,3,Physical Sciences
+3405,Organic chemistry,34,CHEMICAL SCIENCES,1605,Organic Chemistry,16,Chemistry,3,Physical Sciences
+3406,Physical chemistry,34,CHEMICAL SCIENCES,1606,Physical and Theoretical Chemistry,16,Chemistry,3,Physical Sciences
+3407,Theoretical and computational chemistry,34,CHEMICAL SCIENCES,1606,Physical and Theoretical Chemistry,16,Chemistry,3,Physical Sciences
+3499,Other chemical sciences,34,CHEMICAL SCIENCES,1606,Physical and Theoretical Chemistry,16,Chemistry,3,Physical Sciences
+3501,"Accounting, auditing and accountability",35,"COMMERCE, MANAGEMENT, TOURISM AND SERVICES",1402,Accounting,14,"Business, Management and Accounting",2,Social Sciences
+3502,"Banking, finance and investment",35,"COMMERCE, MANAGEMENT, TOURISM AND SERVICES",1403,Business and International Management,14,"Business, Management and Accounting",2,Social Sciences
+3503,Business systems in context,35,"COMMERCE, MANAGEMENT, TOURISM AND SERVICES",1403,Business and International Management,14,"Business, Management and Accounting",2,Social Sciences
+3504,Commercial services,35,"COMMERCE, MANAGEMENT, TOURISM AND SERVICES",1403,Business and International Management,14,"Business, Management and Accounting",2,Social Sciences
+3505,Human resources and industrial relations,35,"COMMERCE, MANAGEMENT, TOURISM AND SERVICES",1407,Organizational Behavior and Human Resource Management,14,"Business, Management and Accounting",2,Social Sciences
+3506,Marketing,35,"COMMERCE, MANAGEMENT, TOURISM AND SERVICES",1406,Marketing,14,"Business, Management and Accounting",2,Social Sciences
+3507,"Strategy, management and organisational behaviour",35,"COMMERCE, MANAGEMENT, TOURISM AND SERVICES",1408,Strategy and Management,14,"Business, Management and Accounting",2,Social Sciences
+3508,Tourism,35,"COMMERCE, MANAGEMENT, TOURISM AND SERVICES",1409,"Tourism, Leisure and Hospitality Management",14,"Business, Management and Accounting",2,Social Sciences
+3509,"Transportation, logistics and supply chains",35,"COMMERCE, MANAGEMENT, TOURISM AND SERVICES",1403,Business and International Management,14,"Business, Management and Accounting",2,Social Sciences
+3599,"Other commerce, management, tourism and services",35,"COMMERCE, MANAGEMENT, TOURISM AND SERVICES",1403,Business and International Management,14,"Business, Management and Accounting",2,Social Sciences
+3601,"Art history, theory and criticism",36,CREATIVE ARTS AND WRITING,1213,Visual Arts and Performing Arts,12,Arts and Humanities,2,Social Sciences
+3602,Creative and professional writing,36,CREATIVE ARTS AND WRITING,1208,Literature and Literary Theory,12,Arts and Humanities,2,Social Sciences
+3603,Music,36,CREATIVE ARTS AND WRITING,1210,Music,12,Arts and Humanities,2,Social Sciences
+3604,Performing arts,36,CREATIVE ARTS AND WRITING,1213,Visual Arts and Performing Arts,12,Arts and Humanities,2,Social Sciences
+3605,Screen and digital media,36,CREATIVE ARTS AND WRITING,1213,Visual Arts and Performing Arts,12,Arts and Humanities,2,Social Sciences
+3606,Visual arts,36,CREATIVE ARTS AND WRITING,1213,Visual Arts and Performing Arts,12,Arts and Humanities,2,Social Sciences
+3699,Other creative arts and writing,36,CREATIVE ARTS AND WRITING,1200,General Arts and Humanities,12,Arts and Humanities,2,Social Sciences
+3701,Atmospheric sciences,37,EARTH SCIENCES,1902,Atmospheric Science,19,Earth and Planetary Sciences,3,Physical Sciences
+3702,Climate change science,37,EARTH SCIENCES,1902,Atmospheric Science,19,Earth and Planetary Sciences,3,Physical Sciences
+3703,Geochemistry,37,EARTH SCIENCES,1906,Geochemistry and Petrology,19,Earth and Planetary Sciences,3,Physical Sciences
+3704,Geoinformatics,37,EARTH SCIENCES,1907,Geology,19,Earth and Planetary Sciences,3,Physical Sciences
+3705,Geology,37,EARTH SCIENCES,1907,Geology,19,Earth and Planetary Sciences,3,Physical Sciences
+3706,Geophysics,37,EARTH SCIENCES,1908,Geophysics,19,Earth and Planetary Sciences,3,Physical Sciences
+3707,Hydrology,37,EARTH SCIENCES,1904,Earth-Surface Processes,19,Earth and Planetary Sciences,3,Physical Sciences
+3708,Oceanography,37,EARTH SCIENCES,1910,Oceanography,19,Earth and Planetary Sciences,3,Physical Sciences
+3709,Physical geography and environmental geoscience,37,EARTH SCIENCES,1904,Earth-Surface Processes,19,Earth and Planetary Sciences,3,Physical Sciences
+3799,Other earth sciences,37,EARTH SCIENCES,1907,Geology,19,Earth and Planetary Sciences,3,Physical Sciences
+3801,Applied economics,38,ECONOMICS,2002,Economics and Econometrics,20,"Economics, Econometrics and Finance",2,Social Sciences
+3802,Econometrics,38,ECONOMICS,2002,Economics and Econometrics,20,"Economics, Econometrics and Finance",2,Social Sciences
+3803,Economic theory,38,ECONOMICS,2002,Economics and Econometrics,20,"Economics, Econometrics and Finance",2,Social Sciences
+3899,Other economics,38,ECONOMICS,2000,"General Economics, Econometrics and Finance",20,"Economics, Econometrics and Finance",2,Social Sciences
+3901,Curriculum and pedagogy,39,EDUCATION,3304,Education,33,Social Sciences,2,Social Sciences
+3902,"Education policy, sociology and philosophy",39,EDUCATION,3304,Education,33,Social Sciences,2,Social Sciences
+3903,Education systems,39,EDUCATION,3304,Education,33,Social Sciences,2,Social Sciences
+3904,Specialist studies in education,39,EDUCATION,3304,Education,33,Social Sciences,2,Social Sciences
+3999,Other education,39,EDUCATION,3304,Education,33,Social Sciences,2,Social Sciences
+4001,Aerospace engineering,40,ENGINEERING,2202,Aerospace Engineering,22,Engineering,3,Physical Sciences
+4002,Automotive engineering,40,ENGINEERING,2203,Automotive Engineering,22,Engineering,3,Physical Sciences
+4003,Biomedical engineering,40,ENGINEERING,2204,Biomedical Engineering,22,Engineering,3,Physical Sciences
+4004,Chemical engineering,40,ENGINEERING,2200,General Engineering,22,Engineering,3,Physical Sciences
+4005,Civil engineering,40,ENGINEERING,2205,Civil and Structural Engineering,22,Engineering,3,Physical Sciences
+4006,Communications engineering,40,ENGINEERING,2208,Electrical and Electronic Engineering,22,Engineering,3,Physical Sciences
+4007,"Control engineering, mechatronics and robotics",40,ENGINEERING,2207,Control and Systems Engineering,22,Engineering,3,Physical Sciences
+4008,Electrical engineering,40,ENGINEERING,2208,Electrical and Electronic Engineering,22,Engineering,3,Physical Sciences
+4009,"Electronics, sensors and digital hardware",40,ENGINEERING,2208,Electrical and Electronic Engineering,22,Engineering,3,Physical Sciences
+4010,Engineering practice and education,40,ENGINEERING,2200,General Engineering,22,Engineering,3,Physical Sciences
+4011,Environmental engineering,40,ENGINEERING,2200,General Engineering,22,Engineering,3,Physical Sciences
+4012,Fluid mechanics and thermal engineering,40,ENGINEERING,2210,Mechanical Engineering,22,Engineering,3,Physical Sciences
+4013,Geomatic engineering,40,ENGINEERING,2205,Civil and Structural Engineering,22,Engineering,3,Physical Sciences
+4014,Manufacturing engineering,40,ENGINEERING,2209,Industrial and Manufacturing Engineering,22,Engineering,3,Physical Sciences
+4015,Maritime engineering,40,ENGINEERING,2212,Ocean Engineering,22,Engineering,3,Physical Sciences
+4016,Materials engineering,40,ENGINEERING,2200,General Engineering,22,Engineering,3,Physical Sciences
+4017,Mechanical engineering,40,ENGINEERING,2210,Mechanical Engineering,22,Engineering,3,Physical Sciences
+4018,Nanotechnology,40,ENGINEERING,2200,General Engineering,22,Engineering,3,Physical Sciences
+4019,Resources engineering and extractive metallurgy,40,ENGINEERING,2200,General Engineering,22,Engineering,3,Physical Sciences
+4099,Other engineering,40,ENGINEERING,2200,General Engineering,22,Engineering,3,Physical Sciences
+4101,Climate change impacts and adaptation,41,ENVIRONMENTAL SCIENCES,2306,Global and Planetary Change,23,Environmental Science,3,Physical Sciences
+4102,Ecological applications,41,ENVIRONMENTAL SCIENCES,2303,Ecology,23,Environmental Science,3,Physical Sciences
+4103,Environmental biotechnology,41,ENVIRONMENTAL SCIENCES,2304,Environmental Chemistry,23,Environmental Science,3,Physical Sciences
+4104,Environmental management,41,ENVIRONMENTAL SCIENCES,2308,"Management, Monitoring, Policy and Law",23,Environmental Science,3,Physical Sciences
+4105,Pollution and contamination,41,ENVIRONMENTAL SCIENCES,2310,Pollution,23,Environmental Science,3,Physical Sciences
+4106,Soil sciences,41,ENVIRONMENTAL SCIENCES,2304,Environmental Chemistry,23,Environmental Science,3,Physical Sciences
+4199,Other environmental sciences,41,ENVIRONMENTAL SCIENCES,2303,Ecology,23,Environmental Science,3,Physical Sciences
+4201,Allied health and rehabilitation science,42,HEALTH SCIENCES,2742,Rehabilitation,27,Medicine,4,Health Sciences
+4202,Epidemiology,42,HEALTH SCIENCES,2713,Epidemiology,27,Medicine,4,Health Sciences
+4203,Health services and systems,42,HEALTH SCIENCES,2739,"Public Health, Environmental and Occupational Health",27,Medicine,4,Health Sciences
+4204,Midwifery,42,HEALTH SCIENCES,2729,Obstetrics and Gynecology,27,Medicine,4,Health Sciences
+4205,Nursing,42,HEALTH SCIENCES,2724,Internal Medicine,27,Medicine,4,Health Sciences
+4206,Public health,42,HEALTH SCIENCES,2739,"Public Health, Environmental and Occupational Health",27,Medicine,4,Health Sciences
+4207,Sports science and exercise,42,HEALTH SCIENCES,2732,Orthopedics and Sports Medicine,27,Medicine,4,Health Sciences
+4208,"Traditional, complementary and integrative medicine",42,HEALTH SCIENCES,2707,Complementary and alternative medicine,27,Medicine,4,Health Sciences
+4299,Other health sciences,42,HEALTH SCIENCES,2724,Internal Medicine,27,Medicine,4,Health Sciences
+4301,Archaeology,43,"HISTORY, HERITAGE AND ARCHAEOLOGY",1204,Archeology,12,Arts and Humanities,2,Social Sciences
+4302,"Heritage, archive and museum studies",43,"HISTORY, HERITAGE AND ARCHAEOLOGY",1209,Museology,12,Arts and Humanities,2,Social Sciences
+4303,Historical studies,43,"HISTORY, HERITAGE AND ARCHAEOLOGY",1202,History,12,Arts and Humanities,2,Social Sciences
+4399,"Other history, heritage and archaeology",43,"HISTORY, HERITAGE AND ARCHAEOLOGY",1200,General Arts and Humanities,12,Arts and Humanities,2,Social Sciences
+4401,Anthropology,44,HUMAN SOCIETY,3314,Anthropology,33,Social Sciences,2,Social Sciences
+4402,Criminology,44,HUMAN SOCIETY,3312,Sociology and Political Science,33,Social Sciences,2,Social Sciences
+4403,Demography,44,HUMAN SOCIETY,3317,Demography,33,Social Sciences,2,Social Sciences
+4404,Development studies,44,HUMAN SOCIETY,3303,Development,33,Social Sciences,2,Social Sciences
+4405,Gender studies,44,HUMAN SOCIETY,3318,Gender Studies,33,Social Sciences,2,Social Sciences
+4406,Human geography,44,HUMAN SOCIETY,3305,"Geography, Planning and Development",33,Social Sciences,2,Social Sciences
+4407,Policy and administration,44,HUMAN SOCIETY,3321,Public Administration,33,Social Sciences,2,Social Sciences
+4408,Political science,44,HUMAN SOCIETY,3320,Political Science and International Relations,33,Social Sciences,2,Social Sciences
+4409,Social work,44,HUMAN SOCIETY,3300,General Social Sciences,33,Social Sciences,2,Social Sciences
+4410,Sociology,44,HUMAN SOCIETY,3312,Sociology and Political Science,33,Social Sciences,2,Social Sciences
+4499,Other human society,44,HUMAN SOCIETY,3300,General Social Sciences,33,Social Sciences,2,Social Sciences
+4501,"Aboriginal and Torres Strait Islander culture, language and history",45,INDIGENOUS STUDIES,3316,Cultural Studies,33,Social Sciences,2,Social Sciences
+4502,Aboriginal and Torres Strait Islander education,45,INDIGENOUS STUDIES,3304,Education,33,Social Sciences,2,Social Sciences
+4503,Aboriginal and Torres Strait Islander environmental knowledges and management,45,INDIGENOUS STUDIES,3305,"Geography, Planning and Development",33,Social Sciences,2,Social Sciences
+4504,Aboriginal and Torres Strait Islander health and wellbeing,45,INDIGENOUS STUDIES,3306,Health,33,Social Sciences,2,Social Sciences
+4505,"Aboriginal and Torres Strait Islander peoples, society and community",45,INDIGENOUS STUDIES,3312,Sociology and Political Science,33,Social Sciences,2,Social Sciences
+4506,Aboriginal and Torres Strait Islander sciences,45,INDIGENOUS STUDIES,3300,General Social Sciences,33,Social Sciences,2,Social Sciences
+4507,"Te ahurea, reo me te hītori o te Māori (Māori culture, language and history)",45,INDIGENOUS STUDIES,3316,Cultural Studies,33,Social Sciences,2,Social Sciences
+4508,Mātauranga Māori (Māori education),45,INDIGENOUS STUDIES,3304,Education,33,Social Sciences,2,Social Sciences
+4509,Ngā mātauranga taiao o te Māori (Māori environmental knowledges),45,INDIGENOUS STUDIES,3305,"Geography, Planning and Development",33,Social Sciences,2,Social Sciences
+4510,Te hauora me te oranga o te Māori (Māori health and wellbeing),45,INDIGENOUS STUDIES,3306,Health,33,Social Sciences,2,Social Sciences
+4511,"Ngā tāngata, te porihanga me ngā hapori o te Māori (Māori peoples, society and community)",45,INDIGENOUS STUDIES,3312,Sociology and Political Science,33,Social Sciences,2,Social Sciences
+4512,Ngā pūtaiao Māori (Māori sciences),45,INDIGENOUS STUDIES,3300,General Social Sciences,33,Social Sciences,2,Social Sciences
+4513,"Pacific Peoples culture, language and history",45,INDIGENOUS STUDIES,3316,Cultural Studies,33,Social Sciences,2,Social Sciences
+4514,Pacific Peoples education,45,INDIGENOUS STUDIES,3304,Education,33,Social Sciences,2,Social Sciences
+4515,Pacific Peoples environmental knowledges,45,INDIGENOUS STUDIES,3305,"Geography, Planning and Development",33,Social Sciences,2,Social Sciences
+4516,Pacific Peoples health and wellbeing,45,INDIGENOUS STUDIES,3306,Health,33,Social Sciences,2,Social Sciences
+4517,Pacific Peoples sciences,45,INDIGENOUS STUDIES,3300,General Social Sciences,33,Social Sciences,2,Social Sciences
+4518,Pacific Peoples society and community,45,INDIGENOUS STUDIES,3312,Sociology and Political Science,33,Social Sciences,2,Social Sciences
+4519,"Other Indigenous data, methodologies and global Indigenous studies",45,INDIGENOUS STUDIES,3300,General Social Sciences,33,Social Sciences,2,Social Sciences
+4599,Other Indigenous studies,45,INDIGENOUS STUDIES,3300,General Social Sciences,33,Social Sciences,2,Social Sciences
+4601,Applied computing,46,INFORMATION AND COMPUTING SCIENCES,1706,Computer Science Applications,17,Computer Science,3,Physical Sciences
+4602,Artificial intelligence,46,INFORMATION AND COMPUTING SCIENCES,1702,Artificial Intelligence,17,Computer Science,3,Physical Sciences
+4603,Computer vision and multimedia computation,46,INFORMATION AND COMPUTING SCIENCES,1707,Computer Vision and Pattern Recognition,17,Computer Science,3,Physical Sciences
+4604,Cybersecurity and privacy,46,INFORMATION AND COMPUTING SCIENCES,1705,Computer Networks and Communications,17,Computer Science,3,Physical Sciences
+4605,Data management and data science,46,INFORMATION AND COMPUTING SCIENCES,1710,Information Systems,17,Computer Science,3,Physical Sciences
+4606,Distributed computing and systems software,46,INFORMATION AND COMPUTING SCIENCES,1712,Software,17,Computer Science,3,Physical Sciences
+4607,"Graphics, augmented reality and games",46,INFORMATION AND COMPUTING SCIENCES,1704,Computer Graphics and Computer-Aided Design,17,Computer Science,3,Physical Sciences
+4608,Human-centred computing,46,INFORMATION AND COMPUTING SCIENCES,1709,Human-Computer Interaction,17,Computer Science,3,Physical Sciences
+4609,Information systems,46,INFORMATION AND COMPUTING SCIENCES,1710,Information Systems,17,Computer Science,3,Physical Sciences
+4610,Library and information studies,46,INFORMATION AND COMPUTING SCIENCES,1706,Computer Science Applications,17,Computer Science,3,Physical Sciences
+4611,Machine learning,46,INFORMATION AND COMPUTING SCIENCES,1702,Artificial Intelligence,17,Computer Science,3,Physical Sciences
+4612,Software engineering,46,INFORMATION AND COMPUTING SCIENCES,1712,Software,17,Computer Science,3,Physical Sciences
+4613,Theory of computation,46,INFORMATION AND COMPUTING SCIENCES,1703,Computational Theory and Mathematics,17,Computer Science,3,Physical Sciences
+4699,Other information and computing sciences,46,INFORMATION AND COMPUTING SCIENCES,1706,Computer Science Applications,17,Computer Science,3,Physical Sciences
+4701,Communication and media studies,47,"LANGUAGE, COMMUNICATION AND CULTURE",1200,General Arts and Humanities,12,Arts and Humanities,2,Social Sciences
+4702,Cultural studies,47,"LANGUAGE, COMMUNICATION AND CULTURE",1200,General Arts and Humanities,12,Arts and Humanities,2,Social Sciences
+4703,Language studies,47,"LANGUAGE, COMMUNICATION AND CULTURE",1203,Language and Linguistics,12,Arts and Humanities,2,Social Sciences
+4704,Linguistics,47,"LANGUAGE, COMMUNICATION AND CULTURE",1203,Language and Linguistics,12,Arts and Humanities,2,Social Sciences
+4705,Literary studies,47,"LANGUAGE, COMMUNICATION AND CULTURE",1208,Literature and Literary Theory,12,Arts and Humanities,2,Social Sciences
+4799,"Other language, communication and culture",47,"LANGUAGE, COMMUNICATION AND CULTURE",1200,General Arts and Humanities,12,Arts and Humanities,2,Social Sciences
+4801,Commercial law,48,LAW AND LEGAL STUDIES,3308,Law,33,Social Sciences,2,Social Sciences
+4802,Environmental and resources law,48,LAW AND LEGAL STUDIES,3308,Law,33,Social Sciences,2,Social Sciences
+4803,International and comparative law,48,LAW AND LEGAL STUDIES,3308,Law,33,Social Sciences,2,Social Sciences
+4804,Law in context,48,LAW AND LEGAL STUDIES,3308,Law,33,Social Sciences,2,Social Sciences
+4805,Legal systems,48,LAW AND LEGAL STUDIES,3308,Law,33,Social Sciences,2,Social Sciences
+4806,Private law and civil obligations,48,LAW AND LEGAL STUDIES,3308,Law,33,Social Sciences,2,Social Sciences
+4807,Public law,48,LAW AND LEGAL STUDIES,3308,Law,33,Social Sciences,2,Social Sciences
+4899,Other law and legal studies,48,LAW AND LEGAL STUDIES,3308,Law,33,Social Sciences,2,Social Sciences
+4901,Applied mathematics,49,MATHEMATICAL SCIENCES,2604,Applied Mathematics,26,Mathematics,3,Physical Sciences
+4902,Mathematical physics,49,MATHEMATICAL SCIENCES,2610,Mathematical Physics,26,Mathematics,3,Physical Sciences
+4903,Numerical and computational mathematics,49,MATHEMATICAL SCIENCES,2605,Computational Mathematics,26,Mathematics,3,Physical Sciences
+4904,Pure mathematics,49,MATHEMATICAL SCIENCES,2602,Algebra and Number Theory,26,Mathematics,3,Physical Sciences
+4905,Statistics,49,MATHEMATICAL SCIENCES,2613,Statistics and Probability,26,Mathematics,3,Physical Sciences
+4999,Other mathematical sciences,49,MATHEMATICAL SCIENCES,2604,Applied Mathematics,26,Mathematics,3,Physical Sciences
+5001,Applied ethics,50,PHILOSOPHY AND RELIGIOUS STUDIES,1211,Philosophy,12,Arts and Humanities,2,Social Sciences
+5002,History and philosophy of specific fields,50,PHILOSOPHY AND RELIGIOUS STUDIES,1207,History and Philosophy of Science,12,Arts and Humanities,2,Social Sciences
+5003,Philosophy,50,PHILOSOPHY AND RELIGIOUS STUDIES,1211,Philosophy,12,Arts and Humanities,2,Social Sciences
+5004,Religious studies,50,PHILOSOPHY AND RELIGIOUS STUDIES,1212,Religious studies,12,Arts and Humanities,2,Social Sciences
+5005,Theology,50,PHILOSOPHY AND RELIGIOUS STUDIES,1212,Religious studies,12,Arts and Humanities,2,Social Sciences
+5099,Other philosophy and religious studies,50,PHILOSOPHY AND RELIGIOUS STUDIES,1200,General Arts and Humanities,12,Arts and Humanities,2,Social Sciences
+5101,Astronomical sciences,51,PHYSICAL SCIENCES,3103,Astronomy and Astrophysics,31,Physics and Astronomy,3,Physical Sciences
+5102,"Atomic, molecular and optical physics",51,PHYSICAL SCIENCES,3107,"Atomic and Molecular Physics, and Optics",31,Physics and Astronomy,3,Physical Sciences
+5103,Classical physics,51,PHYSICAL SCIENCES,3109,Statistical and Nonlinear Physics,31,Physics and Astronomy,3,Physical Sciences
+5104,Condensed matter physics,51,PHYSICAL SCIENCES,3104,Condensed Matter Physics,31,Physics and Astronomy,3,Physical Sciences
+5105,Medical and biological physics,51,PHYSICAL SCIENCES,3108,Radiation,31,Physics and Astronomy,3,Physical Sciences
+5106,Nuclear and plasma physics,51,PHYSICAL SCIENCES,3106,Nuclear and High Energy Physics,31,Physics and Astronomy,3,Physical Sciences
+5107,Particle and high energy physics,51,PHYSICAL SCIENCES,3106,Nuclear and High Energy Physics,31,Physics and Astronomy,3,Physical Sciences
+5108,Quantum physics,51,PHYSICAL SCIENCES,3104,Condensed Matter Physics,31,Physics and Astronomy,3,Physical Sciences
+5109,Space sciences,51,PHYSICAL SCIENCES,3103,Astronomy and Astrophysics,31,Physics and Astronomy,3,Physical Sciences
+5110,Synchrotrons and accelerators,51,PHYSICAL SCIENCES,3105,Instrumentation,31,Physics and Astronomy,3,Physical Sciences
+5199,Other physical sciences,51,PHYSICAL SCIENCES,3102,Acoustics and Ultrasonics,31,Physics and Astronomy,3,Physical Sciences
+5201,Applied and developmental psychology,52,PSYCHOLOGY,3202,Applied Psychology,32,Psychology,2,Social Sciences
+5202,Biological psychology,52,PSYCHOLOGY,3206,Neuropsychology and Physiological Psychology,32,Psychology,2,Social Sciences
+5203,Clinical and health psychology,52,PSYCHOLOGY,3203,Clinical Psychology,32,Psychology,2,Social Sciences
+5204,Cognitive and computational psychology,52,PSYCHOLOGY,3205,Experimental and Cognitive Psychology,32,Psychology,2,Social Sciences
+5205,Social and personality psychology,52,PSYCHOLOGY,3207,Social Psychology,32,Psychology,2,Social Sciences
+5299,Other psychology,52,PSYCHOLOGY,3200,General Psychology,32,Psychology,2,Social Sciences

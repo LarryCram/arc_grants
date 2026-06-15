@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import PROCESSED_DATA, ADMIN_ORGS_CSV, GRANT_SUMMARIES_CSV
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
 from src.utils.names import make_expanded_for_tokens, name_part_tokens, strip_diacriticals, for_name_tokens
+from src.utils.lookup_for_topic import ForTopicLookup
 
 MANUAL_SPLITS_CSV = Path(__file__).resolve().parents[1] / "config" / "manual_splits.csv"
 FOR_DIVISIONS_CSV = Path(__file__).resolve().parents[1] / "config" / "for_divisions.csv"
@@ -32,6 +33,30 @@ FOR_ADJACENT_CSV  = Path(__file__).resolve().parents[1] / "config" / "for_adjace
 
 RARE_NAME_TF      = 5e-5
 CLUSTER_THRESHOLD = 0.9
+
+
+# ── FOR code normalisation (2008 → 2020) ─────────────────────────────────────
+
+def upgrade_for_code(lu: ForTopicLookup, code: str | None) -> str | None:
+    """Upgrade a 2008 FOR group code to its 2020 equivalent; 2020 codes pass through.
+    Returns None for unmappable codes (SQL COALESCE keeps the original in that case).
+    """
+    if not code:
+        return None
+    return lu.upgrade_for_code(code)
+
+
+def upgrade_for_name(lu: ForTopicLookup, code: str | None, name: str | None) -> str | None:
+    """Return the official ANZSRC 2020 group name when a 2008 code is upgraded,
+    or the original name when already 2020 or no mapping exists.
+    """
+    if not code:
+        return name
+    code20 = lu.upgrade_for_code(code)
+    if code20 is None or code20 == code:
+        return name
+    sf_row = lu.group_to_subfield(code20)
+    return sf_row["group_name"] if sf_row else name
 
 
 # ── Phase 1 helpers ───────────────────────────────────────────────────────────
@@ -179,6 +204,7 @@ def _aggregate_clusters(df_original: pd.DataFrame, df_cluster_ids: pd.DataFrame)
             orcids=("orcid", distinct_nonempty),
             inst_arr=("inst_arr", union_lists),
             for_names=("for_names", union_lists),
+            for_codes=("for_codes", union_lists),
             grant_ids=("unique_id", list),
             n_grants=("unique_id", "count"),
         )
@@ -398,6 +424,16 @@ def main():
                         ['VARCHAR'],
                         'VARCHAR[]')
 
+    _lu = ForTopicLookup()
+    con.create_function("upgrade_for_code",
+                        lambda code: upgrade_for_code(_lu, code),
+                        ['VARCHAR'], 'VARCHAR',
+                        null_handling='special')
+    con.create_function("upgrade_for_name",
+                        lambda code, name: upgrade_for_name(_lu, code, name),
+                        ['VARCHAR', 'VARCHAR'], 'VARCHAR',
+                        null_handling='special')
+
     out_arc = PROCESSED_DATA / "arc_investigators_prep.parquet"
 
     roles_sql   = ", ".join(f"'{r}'" for r in KEEP_ROLES)
@@ -415,8 +451,14 @@ def main():
                     g.admin_org as AdminOrg,
                     i.role_code as role,
                     i.orcid,
-                    g.primary_for_name as for_name,
-                    regexp_extract(s.primary_field_of_research, '^\\d{{4}}') as for_code
+                    upgrade_for_name(
+                        regexp_extract(s.primary_field_of_research, '^\\d{{4}}'),
+                        g.primary_for_name
+                    ) as for_name,
+                    COALESCE(
+                        upgrade_for_code(regexp_extract(s.primary_field_of_research, '^\\d{{4}}')),
+                        regexp_extract(s.primary_field_of_research, '^\\d{{4}}')
+                    ) as for_code
                 FROM '{PROCESSED_DATA}/investigators_raw.parquet' i
                 LEFT JOIN '{PROCESSED_DATA}/grants_flat.parquet' g
                     ON i.grant_code = g.grant_code
@@ -586,6 +628,9 @@ def main():
         lambda x: [x] if (pd.notna(x) and x) else []
     )
     df_raw["for_names"] = df_raw["for_names"].apply(
+        lambda x: list(x) if x is not None else []
+    )
+    df_raw["for_codes"] = df_raw["for_codes"].apply(
         lambda x: list(x) if x is not None else []
     )
     persons = _aggregate_clusters(df_raw, df_cluster_ids)
