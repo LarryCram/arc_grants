@@ -6,6 +6,12 @@ import re
 import unicodedata
 
 from nameparser import HumanName
+from nameparser.config import CONSTANTS
+
+# Register Australian post-nominals so HumanName parses them as suffixes,
+# not as family name tokens (e.g. "Summerhayes OAM" → last="Summerhayes").
+for _pn in ("AC", "AO", "AM", "OAM"):
+    CONSTANTS.suffix_acronyms.add(_pn)
 
 # Exotic Unicode hyphens → ASCII hyphen
 _EXOTIC_HYPHENS = re.compile(r"[­‐‑‒–—―−－]")

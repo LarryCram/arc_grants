@@ -1,5 +1,10 @@
 # ARC Grants → OpenAlex Linkage Pipeline
 
+## Working Rules
+- **Read before editing**: read every line of a function before proposing a fix — do not propose until you have read everything it touches
+- **Do not guess or assume**: if something is unclear, ask the user rather than proceeding on an assumption
+- **Stop after each step**: after completing one step, stop and wait for the user to review before moving to the next
+
 ## Project Goal
 Link ARC Chief Investigators/Fellows (CIFs) to their OpenAlex author records for bibliometric analysis.
 

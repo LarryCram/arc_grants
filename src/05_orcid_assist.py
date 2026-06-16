@@ -22,17 +22,11 @@ import pandas as pd
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from config.settings import OPENALEX_EMAIL, PROCESSED_DATA
+from config.settings import PROCESSED_DATA
 from src.utils.names import for_name_tokens
+from src.utils.orcid_cache import fetch_orcid, orcid_keywords
 
-ORCID_API  = "https://pub.orcid.org/v3.0"
-HEADERS    = {"Accept": "application/json"}
-if OPENALEX_EMAIL:
-    HEADERS["User-Agent"] = f"mailto:{OPENALEX_EMAIL}"
-
-CACHE_DIR  = PROCESSED_DATA / "orcid_cache"
-RATE_SLEEP = 0.05   # ~20 req/s
-
+CACHE_DIR        = PROCESSED_DATA / "orcid_cache"
 MIN_WINNER_SCORE = 0.10
 MIN_GAP          = 0.08
 
@@ -43,27 +37,6 @@ def _lst(val) -> list:
     try:
         return list(val)
     except TypeError:
-        return []
-
-
-def fetch_orcid(orcid: str) -> dict:
-    cache_path = CACHE_DIR / f"{orcid}.json"
-    if cache_path.exists():
-        return json.loads(cache_path.read_text())
-    try:
-        r = requests.get(f"{ORCID_API}/{orcid}/record", headers=HEADERS, timeout=10)
-        data = r.json() if r.status_code == 200 else {"_error": r.status_code}
-    except Exception as e:
-        data = {"_error": str(e)}
-    cache_path.write_text(json.dumps(data))
-    time.sleep(RATE_SLEEP)
-    return data
-
-
-def orcid_keywords(rec: dict) -> list[str]:
-    try:
-        return [k["content"].lower() for k in rec["person"]["keywords"]["keyword"]]
-    except (KeyError, TypeError):
         return []
 
 
@@ -103,7 +76,7 @@ def main(test: bool = False):
     print(f"[1/3] Fetching {len(orcids_needed)} ORCID records...")
     orcid_data = {}
     for i, orcid in enumerate(sorted(orcids_needed)):
-        orcid_data[orcid] = fetch_orcid(orcid)
+        orcid_data[orcid] = fetch_orcid(orcid, CACHE_DIR)
         if (i + 1) % 50 == 0:
             print(f"  {i+1} / {len(orcids_needed)}")
     print(f"  Done.")

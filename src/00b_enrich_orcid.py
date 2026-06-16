@@ -36,12 +36,13 @@ from config.settings import PROCESSED_DATA
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
 from src.utils.names import strip_diacriticals, name_part_tokens
 from src.utils.io import setup_stdout_utf8
+from src.utils.orcid_cache import fetch_orcid, orcid_addresses
 
-ORCID_SEARCH = "https://pub.orcid.org/v3.0/search/"
-ORCID_RECORD = "https://pub.orcid.org/v3.0/{orcid}/person"
-HEADERS = {"Accept": "application/json"}
+ORCID_SEARCH   = "https://pub.orcid.org/v3.0/search/"
+HEADERS        = {"Accept": "application/json"}
+CACHE_DIR      = PROCESSED_DATA / "orcid_cache"
 RATE_LIMIT_SEC = 1.0
-TOO_COMMON = 10        # skip names with more results than this
+TOO_COMMON     = 10
 
 
 def _norm_family(s: str) -> str:
@@ -82,17 +83,12 @@ def _search_orcid(first: str, family: str) -> dict:
     if num_found == 1:
         return {"orcid": orcids[0], "confidence": "high", "num_found": 1}
 
-    # Multiple results: check each for Australian employment
+    # Multiple results: check each for Australian address via shared cache
     au_orcids = []
     for oid in orcids:
-        time.sleep(RATE_LIMIT_SEC)
         try:
-            rec = requests.get(ORCID_RECORD.format(orcid=oid), headers=HEADERS, timeout=10)
-            rec.raise_for_status()
-            # country in addresses
-            person = rec.json()
-            addresses = person.get("addresses", {}).get("address", [])
-            countries = {a.get("country", {}).get("value") for a in addresses}
+            rec = fetch_orcid(oid, CACHE_DIR)
+            countries = {a.get("country", {}).get("value") for a in orcid_addresses(rec)}
             if "AU" in countries:
                 au_orcids.append(oid)
         except Exception:
@@ -145,7 +141,7 @@ def main(dry_run: bool = False):
         print("Dry run — no API calls made.")
         return
 
-    new_rows = []
+    rows_so_far = list(cache.to_dict("records")) if len(cache) else []
     for i, row in pairs.iterrows():
         print(f"  [{i+1}/{len(pairs)}] {row.first_name} {row.family_name} ...", end=" ", flush=True)
         result = _search_orcid(row.first_name, row.family_name)
@@ -157,20 +153,17 @@ def main(dry_run: bool = False):
             "confidence":  result["confidence"],
             "num_found":   result["num_found"],
         }
-        new_rows.append(rec)
+        rows_so_far.append(rec)
         print(f"{result['confidence']}  {result['orcid'] or ''}")
+        pd.DataFrame(rows_so_far).to_parquet(cache_path, index=False)
         time.sleep(RATE_LIMIT_SEC)
 
-    # Merge with cache and save
-    all_rows = pd.concat([cache, pd.DataFrame(new_rows)], ignore_index=True) if new_rows else cache
-    all_rows.to_parquet(cache_path, index=False)
-    print(f"\nSaved {len(all_rows)} entries → {cache_path}")
+    print(f"\nSaved {len(rows_so_far)} entries → {cache_path}")
 
     # Summary
-    if new_rows:
-        df = pd.DataFrame(new_rows)
+    if rows_so_far:
         print("\nResults:")
-        print(df["confidence"].value_counts().to_string())
+        print(pd.DataFrame(rows_so_far)["confidence"].value_counts().to_string())
 
 
 if __name__ == "__main__":

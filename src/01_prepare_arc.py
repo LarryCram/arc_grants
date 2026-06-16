@@ -206,7 +206,7 @@ def _split_multi_name_clusters(
                 key = _norm_full(f"{er['first_name']} {er['family_name']}")
                 enriched_orcid[key] = er["orcid"]
 
-    merged = df_prep[["unique_id", "full_name", "for_names"]].merge(
+    merged = df_prep[["unique_id", "full_name", "for_names", "orcid"]].merge(
         df_cluster_ids[["unique_id", "cluster_id"]], on="unique_id", how="left"
     )
     merged["cluster_id"] = merged["cluster_id"].fillna(merged["unique_id"])
@@ -218,6 +218,12 @@ def _split_multi_name_clusters(
     n_splits = 0
 
     for cid, grp in merged.groupby("cluster_id"):
+        # If all records share one ORCID, name variance is data-quality noise — never split
+        cluster_orcids = grp["orcid"].dropna().unique()
+        if len(cluster_orcids) == 1:
+            out.append(grp[["unique_id", "cluster_id"]])
+            continue
+
         # Distinct normalised full name forms that have a full first name (>2 chars)
         def _first_tok(norm):
             parts = norm.split()
@@ -328,6 +334,58 @@ def _split_multi_name_clusters(
 
     print(f"  Multi-name split: {n_splits} cluster(s) split")
     return pd.concat(out, ignore_index=True)
+
+
+def _merge_by_orcid(
+    df_cluster_ids: pd.DataFrame, df_raw: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Deterministically merge clusters linked by the same ORCID.
+
+    For each ORCID that appears in 2+ Splink clusters: verify that all
+    member records share a compatible family name, then collapse those
+    clusters to a single canonical id (orcid_<orcid>).  If the same ORCID
+    spans incompatible family names the group is left unchanged and printed
+    as a data-quality warning.
+    """
+    merged = df_raw[["unique_id", "orcid", "family_names"]].merge(
+        df_cluster_ids[["unique_id", "cluster_id"]], on="unique_id", how="left"
+    )
+    merged["cluster_id"] = merged["cluster_id"].fillna(merged["unique_id"])
+    merged["family_name_main"] = merged["family_names"].apply(
+        lambda x: max(x, key=len) if (x is not None and len(x) > 0) else None
+    )
+
+    with_orcid = merged[merged["orcid"].notna()].copy()
+    orcid_span = with_orcid.groupby("orcid")["cluster_id"].nunique()
+    multi_orcids = orcid_span[orcid_span > 1].index
+
+    if len(multi_orcids) == 0:
+        print("  ORCID merge: no cross-cluster ORCIDs")
+        return df_cluster_ids
+
+    remapping: dict[str, str] = {}
+    n_merged = n_conflict = 0
+
+    for orcid in sorted(multi_orcids):
+        rows = with_orcid[with_orcid["orcid"] == orcid]
+        fam_names = set(rows["family_name_main"].dropna())
+        if len(fam_names) > 1:
+            print(f"  NOTE ORCID {orcid} spans family names {fam_names} — merging on ORCID authority")
+            n_conflict += 1
+        clusters = sorted(rows["cluster_id"].unique())
+        canonical = min(clusters)
+        for cid in clusters:
+            remapping[cid] = canonical
+        n_merged += 1
+
+    if not remapping:
+        return df_cluster_ids
+
+    out = df_cluster_ids.copy()
+    out["cluster_id"] = out["cluster_id"].map(lambda c: remapping.get(c, c))
+    print(f"  ORCID merge: {n_merged} ORCID(s) merged across clusters, {n_conflict} conflict(s) skipped")
+    return out
 
 
 def _split_orcid_conflicts(
@@ -788,6 +846,8 @@ def main():
     )
     df_cluster_ids = df_clusters.as_pandas_dataframe()
 
+    print("  Applying ORCID deterministic merge...")
+    df_cluster_ids = _merge_by_orcid(df_cluster_ids, df_raw)
     print("  Applying ORCID conflict split...")
     df_cluster_ids = _split_orcid_conflicts(df_cluster_ids, df_raw)
     print("  Applying multi-name cluster split...")
@@ -816,13 +876,7 @@ def main():
     )
     persons = _aggregate_clusters(df_raw, df_cluster_ids)
 
-    persons.to_parquet(out_path, index=False)
-    print(f"  Saved {len(persons)} person records → {out_path}")
-
-    map_path = PROCESSED_DATA / "arc_grant_cluster_map.parquet"
-    df_cluster_ids[["unique_id", "cluster_id"]].to_parquet(map_path, index=False)
-    print(f"  Saved grant→cluster map → {map_path}")
-
+    # Add full_name_key (mode per cluster) — needed by _is_suspicious for rare-name check
     fnk = (
         df[["unique_id", "full_name_key"]]
         .merge(df_cluster_ids[["unique_id", "cluster_id"]], on="unique_id", how="left")
@@ -833,13 +887,30 @@ def main():
         .groupby("cluster_id")["full_name_key"]
         .agg(lambda s: s.mode().iloc[0] if len(s) else None)
         .reset_index()
-        .rename(columns={"full_name_key": "full_name_key"})
     )
     persons = persons.merge(fnk_mode, on="cluster_id", how="left")
 
     div_map, adj = _load_for_divisions()
     tf_df = pd.read_parquet(PROCESSED_DATA / "oax_tf_full_name.parquet")
     tf_lookup = dict(zip(tf_df["full_name_key"], tf_df["tf_full_name_key"]))
+
+    # orcid_status: ORCID enrichment signal (used by 00b to target NO_ORCID RESOLVED clusters)
+    persons["orcid_status"] = persons["orcids"].apply(
+        lambda x: "HAS_ORCID" if len(x) == 1 else ("MULTI_ORCID" if len(x) > 1 else "NO_ORCID")
+    )
+    # resolution_status: is this cluster definitively one person?
+    persons["resolution_status"] = persons.apply(
+        lambda r: "UNRESOLVED" if _is_suspicious(r, div_map, adj, tf_lookup) else "RESOLVED",
+        axis=1,
+    )
+    persons.loc[persons["orcid_status"] == "MULTI_ORCID", "resolution_status"] = "UNRESOLVED"
+
+    persons.to_parquet(out_path, index=False)
+    print(f"  Saved {len(persons)} person records → {out_path}")
+
+    map_path = PROCESSED_DATA / "arc_grant_cluster_map.parquet"
+    df_cluster_ids[["unique_id", "cluster_id"]].to_parquet(map_path, index=False)
+    print(f"  Saved grant→cluster map → {map_path}")
 
     inst_lookup = _load_inst_names()
     _diagnostic_report(persons, inst_lookup, div_map, adj, tf_lookup)
