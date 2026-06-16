@@ -28,8 +28,8 @@ The Splink pipeline replaces the entire old multi-layer pipeline in `src_archive
   - **Note**: `/media/d-drive/openalex_feb26/` is a different copy — always use `.env` path
 
 ## Data Scale
-- ARC CIF rows (after role/scheme filter): 65,050
-- ARC person clusters (output of 01): 23,117  (avg 2.81 grants/person)
+- ARC CIF rows (after role/scheme filter): 65,087 (37 previously dropped by INNER JOIN on admin_org — now LEFT JOIN)
+- ARC person clusters (output of 01): 23,132
 - OAX Australian authors: 1,149,339
 - ORCID coverage in ARC CIFs: 44.5%
 

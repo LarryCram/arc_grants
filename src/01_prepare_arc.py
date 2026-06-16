@@ -29,13 +29,11 @@ from config.settings import PROCESSED_DATA, ADMIN_ORGS_CSV, GRANT_SUMMARIES_CSV
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
 from src.utils.names import make_expanded_for_tokens, name_part_tokens, strip_diacriticals, for_name_tokens
 from src.utils.lookup_for_topic import ForTopicLookup
+from src.utils.cluster_checks import load_for_divisions, is_case_a, is_suspicious
 
-MANUAL_SPLITS_CSV = Path(__file__).resolve().parents[1] / "config" / "manual_splits.csv"
-MANUAL_ORCIDS_CSV = Path(__file__).resolve().parents[1] / "config" / "manual_orcids.csv"
-FOR_DIVISIONS_CSV = Path(__file__).resolve().parents[1] / "config" / "for_divisions.csv"
-FOR_ADJACENT_CSV  = Path(__file__).resolve().parents[1] / "config" / "for_adjacent_divisions.csv"
-
-RARE_NAME_TF      = 5e-5
+MANUAL_SPLITS_CSV       = Path(__file__).resolve().parents[1] / "config" / "manual_splits.csv"
+MANUAL_ORCIDS_CSV       = Path(__file__).resolve().parents[1] / "config" / "manual_orcids.csv"
+ENRICHMENT_BLOCKLIST_CSV = Path(__file__).resolve().parents[1] / "config" / "enrichment_blocklist.csv"
 CLUSTER_THRESHOLD = 0.9
 
 
@@ -89,17 +87,6 @@ def arc_name_arrays(first_name: str, family_name: str) -> dict:
 
 
 # ── Phase 2 helpers ───────────────────────────────────────────────────────────
-
-def _load_for_divisions() -> tuple[dict[str, str], set[frozenset]]:
-    div: dict[str, str] = {}
-    with open(FOR_DIVISIONS_CSV, newline="") as f:
-        for row in csv.DictReader(f):
-            div[row["for_name"]] = row["division"]
-    adj: set[frozenset] = set()
-    with open(FOR_ADJACENT_CSV, newline="") as f:
-        for row in csv.DictReader(f):
-            adj.add(frozenset([row["div_a"], row["div_b"]]))
-    return div, adj
 
 
 def _load_all(con: duckdb.DuckDBPyConnection, path: Path) -> pd.DataFrame:
@@ -425,10 +412,11 @@ def _split_orcid_conflicts(
             out.append(grp[["unique_id", "cluster_id"]])
         else:
             sub = grp.copy()
-            sub["cluster_id"] = sub.apply(
-                lambda r: f"orcid_{r['orcid']}" if pd.notna(r["orcid"]) else r["unique_id"],
-                axis=1,
-            )
+            sub["cluster_id"] = sub["unique_id"]  # no-ORCID records become singletons
+            for orcid_val in distinct_orcids:
+                mask = sub["orcid"] == orcid_val
+                canonical = sub.loc[mask, "unique_id"].min()
+                sub.loc[mask, "cluster_id"] = canonical
             out.append(sub[["unique_id", "cluster_id"]])
             if history is not None:
                 parent_hist = history.pop(cid, [{"event": "splink_cluster"}])
@@ -493,52 +481,6 @@ def _inst_label(inst_id: str, lookup: dict) -> str:
     return lookup.get(inst_id, inst_id.split("/")[-1] if inst_id else "?")
 
 
-def _division_mismatch(for_names: list, div_map: dict, adj: set) -> bool:
-    divs = list({div_map.get(n, "?") for n in for_names if n and div_map.get(n)})
-    if len(divs) <= 1:
-        return False
-
-    parent = list(range(len(divs)))
-
-    def find(i):
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    for i in range(len(divs)):
-        for j in range(i + 1, len(divs)):
-            if divs[i] == divs[j] or frozenset([divs[i], divs[j]]) in adj:
-                ri, rj = find(i), find(j)
-                if ri != rj:
-                    parent[ri] = rj
-
-    return len({find(i) for i in range(len(divs))}) > 1
-
-
-def _is_case_a(full_names: list) -> bool:
-    firsts = set()
-    for name in full_names:
-        parts = name.strip().split()
-        if parts:
-            firsts.add(parts[0].lower())
-    return len(firsts) <= 1
-
-
-def _is_suspicious(
-    row: pd.Series,
-    div_map: dict,
-    adj: set,
-    tf_lookup: dict,
-) -> bool:
-    if row["orcids"]:
-        return False
-    fnk = row.get("full_name_key")
-    if fnk and tf_lookup.get(fnk, 1.0) < RARE_NAME_TF:
-        return False
-    if not _division_mismatch(row["for_names"], div_map, adj):
-        return False
-    return True
 
 
 def _diagnostic_report(
@@ -555,19 +497,19 @@ def _diagnostic_report(
     one_inst   = multi[multi["inst_arr"].apply(len) == 1]
     multi_inst = multi[multi["inst_arr"].apply(len) > 1]
     no_inst    = multi[multi["inst_arr"].apply(len) == 0]
-    print(f"    1 institution:   {len(one_inst):>4}  (same person, multiple grants)")
-    print(f"    2+ institutions: {len(multi_inst):>4}  (career moves or check for mis-merge)")
+    print(f"    1 institution:   {len(one_inst):>4}")
+    print(f"    2+ institutions: {len(multi_inst):>4}")
     print(f"    0 institutions:  {len(no_inst):>4}")
 
-    suspect = multi_inst[multi_inst.apply(
-        lambda r: _is_suspicious(r, div_map, adj, tf_lookup), axis=1
+    suspect = multi[multi.apply(
+        lambda r: is_suspicious(r, div_map, adj, tf_lookup), axis=1
     )]
-    case_a = suspect[suspect["full_names"].apply(_is_case_a)]
-    case_b = suspect[~suspect["full_names"].apply(_is_case_a)]
+    case_a = suspect[suspect["full_names"].apply(is_case_a)]
+    case_b = suspect[~suspect["full_names"].apply(is_case_a)]
 
-    auto_committed = len(multi_inst) - len(suspect)
-    print(f"\n  Multi-inst auto-committed (ORCID / rare name / compatible divisions): {auto_committed}")
-    print(f"  Needs review (multi-inst, common name, no ORCID, cross-division FOR): {len(suspect)}")
+    auto_committed = len(multi) - len(suspect)
+    print(f"\n  Multi-grant auto-committed (ORCID / rare name / compatible divisions): {auto_committed}")
+    print(f"  Needs review (common name, no ORCID, cross-division FOR): {len(suspect)}")
     print(f"    Case A — single name: {len(case_a)}")
     print(f"    Case B — multiple names: {len(case_b)}")
 
@@ -598,8 +540,8 @@ def _export_manual_splits_template(
     multi_inst = persons[
         (persons["n_grants"] > 1)
         & (persons["inst_arr"].apply(len) > 1)
-        & (persons["full_names"].apply(_is_case_a))
-        & persons.apply(lambda r: _is_suspicious(r, div_map, adj, tf_lookup), axis=1)
+        & (persons["full_names"].apply(is_case_a))
+        & persons.apply(lambda r: is_suspicious(r, div_map, adj, tf_lookup), axis=1)
     ].sort_values("n_grants", ascending=False)
 
     existing: dict[str, dict] = {}
@@ -680,6 +622,158 @@ def _apply_manual_splits(
     return pd.concat(out, ignore_index=True)
 
 
+def _apply_enriched_orcids(
+    persons: pd.DataFrame,
+    df_cluster_ids: pd.DataFrame,
+    cluster_history: dict,
+) -> pd.DataFrame:
+    """Promote high/au_match ORCIDs from orcid_enrichment.parquet into cluster orcids field.
+
+    Only promotes when exactly 1 distinct ORCID is found across all enriched name forms
+    in a cluster, and the cluster currently has no ORCID.
+    """
+    enrichment_path = PROCESSED_DATA / "orcid_enrichment.parquet"
+    if not enrichment_path.exists():
+        return persons
+
+    enrichment = pd.read_parquet(enrichment_path)
+    enrichment = enrichment[
+        enrichment["confidence"].isin(["high", "au_match"]) & enrichment["orcid"].notna()
+    ]
+    if len(enrichment) == 0:
+        return persons
+
+    # Load blocklist: (cluster_id, orcid) pairs that must not be promoted
+    blocklist: set[tuple[str, str]] = set()
+    if ENRICHMENT_BLOCKLIST_CSV.exists():
+        with open(ENRICHMENT_BLOCKLIST_CSV, newline="") as f:
+            for row in csv.DictReader(f):
+                cid, orcid = row["cluster_id"].strip(), row["orcid"].strip()
+                if cid and orcid:
+                    blocklist.add((cid, orcid))
+        if blocklist:
+            print(f"  Enrichment blocklist: {len(blocklist)} blocked (cluster, orcid) pair(s)")
+
+    inv = pd.read_parquet(PROCESSED_DATA / "investigators_raw.parquet")
+    inv = inv[inv["role_code"].isin(KEEP_ROLES) & inv["grant_code"].str[:2].isin(KEEP_SCHEMES)]
+
+    joined = (
+        enrichment[["first_name", "family_name", "orcid", "confidence"]]
+        .merge(inv[["unique_id", "first_name", "family_name"]], on=["first_name", "family_name"], how="inner")
+        .merge(df_cluster_ids[["unique_id", "cluster_id"]], on="unique_id", how="inner")
+    )
+
+    by_cluster = (
+        joined.groupby("cluster_id")
+        .agg(distinct_orcids=("orcid", lambda s: sorted(s.dropna().unique())),
+             confidence=("confidence", "first"))
+        .reset_index()
+    )
+    promotable = by_cluster[by_cluster["distinct_orcids"].apply(len) == 1]
+
+    out = persons.copy()
+    n_promoted = 0
+    for _, row in promotable.iterrows():
+        cid, orcid, conf = row["cluster_id"], row["distinct_orcids"][0], row["confidence"]
+        if (cid, orcid) in blocklist:
+            continue
+        mask = (out["cluster_id"] == cid) & (out["orcids"].apply(len) == 0)
+        if not mask.any():
+            continue
+        out.loc[mask, "orcids"] = out.loc[mask, "orcids"].apply(
+            lambda existing: sorted(set(list(existing) + [orcid]))
+        )
+        cluster_history.setdefault(cid, []).append({
+            "event": "enriched_orcid", "orcid": orcid, "confidence": conf,
+        })
+        n_promoted += 1
+
+    print(f"  Promoted {n_promoted} enriched ORCID(s) to clusters (high/au_match)")
+    return out
+
+
+def _merge_persons_by_orcid(persons: pd.DataFrame, cluster_history: dict) -> pd.DataFrame:
+    """Merge clusters sharing the same ORCID after enrichment/manual additions.
+
+    _merge_by_orcid handles ARC-data ORCIDs at the row level before aggregation.
+    This handles cases where enrichment assigned the same ORCID to two already-
+    aggregated clusters that never appeared together in the Splink input.
+    Skips merges where first-name initials are incompatible (signals wrong enrichment hit).
+    """
+    orcid_map: dict[str, list[str]] = {}
+    for _, row in persons[persons["orcids"].apply(len) > 0].iterrows():
+        for orcid in row["orcids"]:
+            orcid_map.setdefault(orcid, []).append(row["cluster_id"])
+
+    conflicts = {o: sorted(cids) for o, cids in orcid_map.items() if len(cids) > 1}
+    if not conflicts:
+        return persons
+
+    idx = persons.set_index("cluster_id")
+
+    remapping: dict[str, str] = {}
+    for orcid, cids in conflicts.items():
+        canonical = min(cids)
+        absorbed = [c for c in cids if c != canonical]
+        can_initials = {x for x in idx.loc[canonical, "first_names"] if len(x) == 1}
+        skip = False
+        for cid in absorbed:
+            abs_initials = {x for x in idx.loc[cid, "first_names"] if len(x) == 1}
+            if can_initials and abs_initials and not (can_initials & abs_initials):
+                print(f"  SKIP post-enrichment merge [{orcid}]: first-initial mismatch")
+                print(f"    {canonical}: initials={sorted(can_initials)}")
+                print(f"    {cid}:        initials={sorted(abs_initials)}")
+                skip = True
+                break
+        if not skip:
+            for cid in absorbed:
+                remapping[cid] = canonical
+
+    if not remapping:
+        return persons
+
+    out = persons.copy()
+    out["cluster_id"] = out["cluster_id"].map(lambda c: remapping.get(c, c))
+
+    vc = out["cluster_id"].value_counts()
+    multi = set(vc[vc > 1].index)
+
+    def _union(series_of_lists):
+        result = set()
+        for lst in series_of_lists:
+            result.update(lst)
+        return sorted(result)
+
+    unchanged = out[~out["cluster_id"].isin(multi)].copy()
+
+    merged_parts = []
+    for canonical, grp in out[out["cluster_id"].isin(multi)].groupby("cluster_id"):
+        best_idx = grp["n_grants"].idxmax()
+        merged_parts.append({
+            "cluster_id":   canonical,
+            "full_names":   _union(grp["full_names"]),
+            "first_names":  _union(grp["first_names"]),
+            "family_names": _union(grp["family_names"]),
+            "orcids":       _union(grp["orcids"]),
+            "inst_arr":     _union(grp["inst_arr"]),
+            "for_names":    _union(grp["for_names"]),
+            "for_codes":    _union(grp["for_codes"]),
+            "grant_ids":    [g for row in grp["grant_ids"] for g in row],
+            "n_grants":     int(grp["n_grants"].sum()),
+            "full_name_key": grp.loc[best_idx, "full_name_key"],
+        })
+        absorbed_here = [c for c, can in remapping.items() if can == canonical]
+        cluster_history.setdefault(canonical, []).append({
+            "event": "post_enrichment_merge",
+            "merged_from": absorbed_here,
+        })
+        for cid in absorbed_here:
+            cluster_history.pop(cid, None)
+
+    print(f"  Post-enrichment merge: absorbed {len(remapping)} cluster(s)")
+    return pd.concat([unchanged, pd.DataFrame(merged_parts)], ignore_index=True)
+
+
 def _apply_manual_orcids(persons: pd.DataFrame, cluster_history: dict) -> pd.DataFrame:
     """Inject verified ORCIDs for clusters where ARC data has none (config/manual_orcids.csv)."""
     if not MANUAL_ORCIDS_CSV.exists():
@@ -698,9 +792,7 @@ def _apply_manual_orcids(persons: pd.DataFrame, cluster_history: dict) -> pd.Dat
         if not mask.any():
             print(f"  WARNING manual_orcids: cluster {cid} not found")
             continue
-        out.loc[mask, "orcids"] = out.loc[mask, "orcids"].apply(
-            lambda existing: sorted(set(list(existing) + [orcid]))
-        )
+        out.loc[mask, "orcids"] = out.loc[mask, "orcids"].apply(lambda _: [orcid])
         cluster_history.setdefault(cid, []).append({"event": "manual_orcid", "orcid": orcid})
         print(f"  Manual ORCID: {cid} → {orcid}")
     print(f"  Applied {len(overrides)} manual ORCID override(s)")
@@ -782,7 +874,7 @@ def main():
                 for_tokens(a.for_name) as for_name_tokens,
                 'AU' as country_code
             FROM arc_raw a
-            INNER JOIN read_csv_auto('{ADMIN_ORGS_CSV}') o
+            LEFT JOIN read_csv_auto('{ADMIN_ORGS_CSV}') o
                 ON a.AdminOrg = o.organisationName_alias
         ) TO '{out_arc}' (FORMAT PARQUET)
     """)
@@ -949,7 +1041,7 @@ def main():
     )
     persons = _aggregate_clusters(df_raw, df_cluster_ids)
 
-    # Add full_name_key (mode per cluster) — needed by _is_suspicious for rare-name check
+    # Add full_name_key (mode per cluster) — needed by is_suspicious for rare-name check
     fnk = (
         df[["unique_id", "full_name_key"]]
         .merge(df_cluster_ids[["unique_id", "cluster_id"]], on="unique_id", how="left")
@@ -963,12 +1055,16 @@ def main():
     )
     persons = persons.merge(fnk_mode, on="cluster_id", how="left")
 
-    div_map, adj = _load_for_divisions()
+    div_map, adj = load_for_divisions()
     tf_df = pd.read_parquet(PROCESSED_DATA / "oax_tf_full_name.parquet")
     tf_lookup = dict(zip(tf_df["full_name_key"], tf_df["tf_full_name_key"]))
 
+    print("  Promoting enriched ORCIDs (orcid_enrichment.parquet)...")
+    persons = _apply_enriched_orcids(persons, df_cluster_ids, cluster_history)
     print("  Applying manual ORCID overrides (config/manual_orcids.csv)...")
     persons = _apply_manual_orcids(persons, cluster_history)
+    print("  Merging clusters with shared post-enrichment ORCIDs...")
+    persons = _merge_persons_by_orcid(persons, cluster_history)
 
     # orcid_status: ORCID enrichment signal (used by 00b to target NO_ORCID RESOLVED clusters)
     persons["orcid_status"] = persons["orcids"].apply(
@@ -976,7 +1072,7 @@ def main():
     )
     # resolution_status: is this cluster definitively one person?
     persons["resolution_status"] = persons.apply(
-        lambda r: "UNRESOLVED" if _is_suspicious(r, div_map, adj, tf_lookup) else "RESOLVED",
+        lambda r: "UNRESOLVED" if is_suspicious(r, div_map, adj, tf_lookup) else "RESOLVED",
         axis=1,
     )
     persons.loc[persons["orcid_status"] == "MULTI_ORCID", "resolution_status"] = "UNRESOLVED"
@@ -989,7 +1085,13 @@ def main():
     print(f"  Saved {len(persons)} person records → {out_path}")
 
     map_path = PROCESSED_DATA / "arc_grant_cluster_map.parquet"
-    df_cluster_ids[["unique_id", "cluster_id"]].to_parquet(map_path, index=False)
+    gmap = (
+        persons[["cluster_id", "grant_ids"]]
+        .explode("grant_ids")
+        .rename(columns={"grant_ids": "unique_id"})
+        [["unique_id", "cluster_id"]]
+    )
+    gmap.to_parquet(map_path, index=False)
     print(f"  Saved grant→cluster map → {map_path}")
 
     inst_lookup = _load_inst_names()
