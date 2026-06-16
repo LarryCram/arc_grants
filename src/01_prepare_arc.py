@@ -31,6 +31,7 @@ from src.utils.names import make_expanded_for_tokens, name_part_tokens, strip_di
 from src.utils.lookup_for_topic import ForTopicLookup
 
 MANUAL_SPLITS_CSV = Path(__file__).resolve().parents[1] / "config" / "manual_splits.csv"
+MANUAL_ORCIDS_CSV = Path(__file__).resolve().parents[1] / "config" / "manual_orcids.csv"
 FOR_DIVISIONS_CSV = Path(__file__).resolve().parents[1] / "config" / "for_divisions.csv"
 FOR_ADJACENT_CSV  = Path(__file__).resolve().parents[1] / "config" / "for_adjacent_divisions.csv"
 
@@ -679,6 +680,33 @@ def _apply_manual_splits(
     return pd.concat(out, ignore_index=True)
 
 
+def _apply_manual_orcids(persons: pd.DataFrame, cluster_history: dict) -> pd.DataFrame:
+    """Inject verified ORCIDs for clusters where ARC data has none (config/manual_orcids.csv)."""
+    if not MANUAL_ORCIDS_CSV.exists():
+        return persons
+    overrides: dict[str, str] = {}
+    with open(MANUAL_ORCIDS_CSV, newline="") as f:
+        for row in csv.DictReader(f):
+            cid, orcid = row["cluster_id"].strip(), row["orcid"].strip()
+            if cid and orcid:
+                overrides[cid] = orcid
+    if not overrides:
+        return persons
+    out = persons.copy()
+    for cid, orcid in overrides.items():
+        mask = out["cluster_id"] == cid
+        if not mask.any():
+            print(f"  WARNING manual_orcids: cluster {cid} not found")
+            continue
+        out.loc[mask, "orcids"] = out.loc[mask, "orcids"].apply(
+            lambda existing: sorted(set(list(existing) + [orcid]))
+        )
+        cluster_history.setdefault(cid, []).append({"event": "manual_orcid", "orcid": orcid})
+        print(f"  Manual ORCID: {cid} → {orcid}")
+    print(f"  Applied {len(overrides)} manual ORCID override(s)")
+    return out
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -938,6 +966,9 @@ def main():
     div_map, adj = _load_for_divisions()
     tf_df = pd.read_parquet(PROCESSED_DATA / "oax_tf_full_name.parquet")
     tf_lookup = dict(zip(tf_df["full_name_key"], tf_df["tf_full_name_key"]))
+
+    print("  Applying manual ORCID overrides (config/manual_orcids.csv)...")
+    persons = _apply_manual_orcids(persons, cluster_history)
 
     # orcid_status: ORCID enrichment signal (used by 00b to target NO_ORCID RESOLVED clusters)
     persons["orcid_status"] = persons["orcids"].apply(
