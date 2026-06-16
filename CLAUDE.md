@@ -120,12 +120,22 @@ To find all clusters for a scheme, search `grant_ids` in arc_persons, or use
 - TF adjustment on `first_name` (hn.first) exact level only
 
 ## Next Priority (start of next session)
-**Run full oeuvres fetch and metrics:**
-1. `python analysis/01_fetch_oeuvres.py` — full run (~15–30 min, ~22k persons)
-2. `python analysis/02_accuracy_check.py --full` → review `accuracy_flags_full.csv` + `work_flags_full.csv` in batch → add corrections to `config/manual_resolutions.csv`
-3. `python analysis/03_annual_metrics.py`
-4. `python analysis/04_au_baseline.py` + `python analysis/04b_citation_quantiles.py`
-5. `python analysis/05_explore.py`
+**Fix `_split_multi_name_clusters` false splits then re-run pipeline:**
+1. Fix FOR comparison in `_split_multi_name_clusters` (01_prepare_arc.py): use tokenised FOR
+   overlap (`for_name_tokens()`) not raw name string equality — 17 of 47 pairs are false splits
+   due to case differences ("Cultural Studies" ≠ "Cultural studies" as strings but same tokens).
+2. Re-run `00_extract_arc.py` → new investigators_raw.parquet (now unions announcement+current)
+3. Re-run `01_prepare_arc.py` → new arc_persons.parquet with multi-name splits
+4. Re-run `03_link_arc_oax.py` → new arc_oax_links.parquet
+5. Re-run `04_resolve_links.py` → check results; add manual resolution for Chun Guang Li
+   (OAX A5084461358, ORCID 0000-0002-7789-2209) once new cluster_id is known
+
+**After pipeline re-run — analysis:**
+6. `python analysis/01_fetch_oeuvres.py` — full run (~15–30 min, ~22k persons)
+7. `python analysis/02_accuracy_check.py --full` → review flags in batch
+8. `python analysis/03_annual_metrics.py`
+9. `python analysis/04_au_baseline.py` + `python analysis/04b_citation_quantiles.py`
+10. `python analysis/05_explore.py`
 
 Remaining linkage gaps (lower priority):
 - 207 unlinked (no HC match): mix of no-OAX-presence researchers + blocking failures

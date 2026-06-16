@@ -12,6 +12,8 @@ Phase 2 – Dedupe: Splink dedupe_only on the prep output
 
 import sys
 import csv
+import re
+from collections import defaultdict
 from pathlib import Path
 
 import duckdb
@@ -153,6 +155,179 @@ def _prep(df: pd.DataFrame) -> pd.DataFrame:
         "family_name_main", "first_initial",
         "orcid", "inst_arr", "for_name_tokens",
     ]]
+
+
+def _norm_full(name: str) -> str:
+    return re.sub(r'[^a-z ]', '', name.lower()).strip()
+
+
+def _split_multi_name_clusters(
+    df_cluster_ids: pd.DataFrame,
+    df_prep: pd.DataFrame,
+    orcid_enrichment: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """
+    For clusters containing 2+ genuinely distinct full name forms, use three
+    signals to detect mis-merged different people and split them:
+
+      1. Co-investigator sets  — build a defaultdict(set) keyed on normalised
+         full name; each set contains every other investigator who appeared on
+         any grant bearing that name form.  Disjoint sets = no shared network.
+
+      2. FOR field sets — union of for_names across all grants for each name
+         form.  Disjoint sets = different research areas.
+
+      3. ORCID enrichment cache — if two name forms resolve to different ORCIDs
+         the split is definitive regardless of the other signals.
+
+    Split rule:
+      - Different ORCIDs                                → definitive split
+      - Disjoint co-investigator sets AND disjoint FOR  → definitive split
+
+    Abbreviated / common name forms (first token ≤ 2 chars, e.g. "Chun Li")
+    are not used to drive splits.  After full-name forms are split into
+    sub-clusters, each abbreviated grant is assigned to the sub-cluster whose
+    FOR set overlaps most with that grant's FOR.  If no overlap → own cluster.
+    """
+    # Load raw investigators filtered to in-scope schemes and roles only
+    raw_inv_path = PROCESSED_DATA / "investigators_raw.parquet"
+    raw_inv = pd.read_parquet(raw_inv_path, columns=["grant_code", "first_name", "family_name", "role_code"])
+    raw_inv = raw_inv[
+        raw_inv["grant_code"].str[:2].isin(KEEP_SCHEMES) &
+        raw_inv["role_code"].isin(KEEP_ROLES)
+    ]
+    raw_inv["coinv_name"] = (raw_inv["first_name"] + " " + raw_inv["family_name"]).str.strip()
+
+    # Build ORCID enrichment lookup: (norm_full_name) → orcid
+    enriched_orcid: dict[str, str] = {}
+    if orcid_enrichment is not None and len(orcid_enrichment):
+        for _, er in orcid_enrichment.iterrows():
+            if pd.notna(er.get("orcid")):
+                key = _norm_full(f"{er['first_name']} {er['family_name']}")
+                enriched_orcid[key] = er["orcid"]
+
+    merged = df_prep[["unique_id", "full_name", "for_names"]].merge(
+        df_cluster_ids[["unique_id", "cluster_id"]], on="unique_id", how="left"
+    )
+    merged["cluster_id"] = merged["cluster_id"].fillna(merged["unique_id"])
+    merged["norm_name"] = merged["full_name"].apply(_norm_full)
+    # Grant code is the prefix of unique_id before the last underscore block
+    merged["grant_code"] = merged["unique_id"].apply(lambda u: u.rsplit("_", 1)[0])
+
+    out = []
+    n_splits = 0
+
+    for cid, grp in merged.groupby("cluster_id"):
+        # Distinct normalised full name forms that have a full first name (>2 chars)
+        def _first_tok(norm):
+            parts = norm.split()
+            return parts[0] if parts else ""
+
+        full_forms = {n for n in grp["norm_name"].unique() if len(_first_tok(n)) > 2}
+        abbrev_rows = grp[grp["norm_name"].apply(lambda n: len(_first_tok(n)) <= 2)]
+
+        if len(full_forms) <= 1:
+            out.append(grp[["unique_id", "cluster_id"]])
+            continue
+
+        # ── Build co-investigator and FOR sets per name form ──────────────────
+        coinv: dict[str, set] = defaultdict(set)
+        for_sets: dict[str, set] = defaultdict(set)
+
+        for norm_name in full_forms:
+            form_rows = grp[grp["norm_name"] == norm_name]
+            for _, row in form_rows.iterrows():
+                gc = row["grant_code"]
+                # co-investigators on this grant (everyone else)
+                others = raw_inv[
+                    (raw_inv["grant_code"] == gc) &
+                    (raw_inv["coinv_name"] != row["full_name"])
+                ]["coinv_name"]
+                coinv[norm_name].update(others)
+                # FOR fields for this grant row
+                fors = row["for_names"]
+                if fors is not None:
+                    for_sets[norm_name].update(fors)
+
+        # ── Check pairwise for split signals ─────────────────────────────────
+        form_list = sorted(full_forms)
+        split_pairs: set[tuple] = set()
+
+        for i, a in enumerate(form_list):
+            for b in form_list[i + 1:]:
+                oa = enriched_orcid.get(a)
+                ob = enriched_orcid.get(b)
+                different_orcid = oa and ob and oa != ob
+                disjoint_coinv  = len(coinv[a] & coinv[b]) == 0
+                disjoint_for    = len(for_sets[a] & for_sets[b]) == 0
+                if different_orcid or (disjoint_coinv and disjoint_for):
+                    split_pairs.add((a, b))
+
+        if not split_pairs:
+            out.append(grp[["unique_id", "cluster_id"]])
+            continue
+
+        # ── Assign each full-name form to a sub-cluster ───────────────────────
+        # Use union-find to group compatible name forms together
+        parent = {f: f for f in form_list}
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        # Forms NOT in split_pairs are compatible → union them
+        for i, a in enumerate(form_list):
+            for b in form_list[i + 1:]:
+                if (a, b) not in split_pairs:
+                    union(a, b)
+
+        root_to_forms: dict[str, list] = defaultdict(list)
+        for f in form_list:
+            root_to_forms[find(f)].append(f)
+
+        if len(root_to_forms) <= 1:
+            out.append(grp[["unique_id", "cluster_id"]])
+            continue
+
+        n_splits += 1
+        print(f"  Multi-name split: {cid}")
+        for root, forms in root_to_forms.items():
+            print(f"    sub-cluster: {forms}")
+
+        # Build sub-cluster FOR sets (union across forms in each sub-cluster)
+        sub_for: dict[str, set] = {}
+        for root, forms in root_to_forms.items():
+            sub_for[root] = set().union(*(for_sets[f] for f in forms))
+
+        # Assign full-name rows
+        norm_to_root = {f: find(f) for f in form_list}
+        sub = grp.copy()
+
+        def assign(row):
+            nn = row["norm_name"]
+            if nn in norm_to_root:
+                return f"{cid}_nm_{norm_to_root[nn][:8]}"
+            # Abbreviated form: assign by FOR overlap with sub-clusters
+            fors = set(row["for_names"]) if row["for_names"] is not None else set()
+            if fors:
+                scores = {root: len(fors & sf) for root, sf in sub_for.items()}
+                best_root, best_score = max(scores.items(), key=lambda x: x[1])
+                if best_score > 0:
+                    return f"{cid}_nm_{best_root[:8]}"
+            return row["unique_id"]  # no FOR overlap → own cluster
+
+        sub["cluster_id"] = sub.apply(assign, axis=1)
+        out.append(sub[["unique_id", "cluster_id"]])
+
+    print(f"  Multi-name split: {n_splits} cluster(s) split")
+    return pd.concat(out, ignore_index=True)
 
 
 def _split_orcid_conflicts(
@@ -615,6 +790,12 @@ def main():
 
     print("  Applying ORCID conflict split...")
     df_cluster_ids = _split_orcid_conflicts(df_cluster_ids, df_raw)
+    print("  Applying multi-name cluster split...")
+    orcid_enrichment = None
+    enrichment_path = PROCESSED_DATA / "orcid_enrichment.parquet"
+    if enrichment_path.exists():
+        orcid_enrichment = pd.read_parquet(enrichment_path)
+    df_cluster_ids = _split_multi_name_clusters(df_cluster_ids, df_raw, orcid_enrichment)
     print("  Applying manual splits (config/manual_splits.csv)...")
     df_cluster_ids = _apply_manual_splits(df_cluster_ids, df_raw)
 

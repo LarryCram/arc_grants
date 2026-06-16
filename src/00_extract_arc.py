@@ -59,39 +59,51 @@ def parse_row(row_json: str, row_index: int) -> dict | None:
 def extract_investigators(attrs: dict, grant_code: str) -> list[dict]:
     """
     Extract investigators from a grant's attributes dict.
-    Prefers investigators-at-announcement; falls back to investigators-current.
+    Unions investigators-at-announcement and investigators-current so that
+    name-form changes between the two (e.g. "Chun Li" → "Chun Guang Li") are
+    both captured.  Deduplication is by unique_id (grant_code + cleaned name),
+    so the same name in both sources produces one row; different name forms
+    produce two rows — both feeding into the Splink dedupe.
+    When the same unique_id appears in both sources the current-record's ORCID
+    is preferred if the announcement record has none.
     """
-    investigators = attrs.get("investigators-at-announcement", [])
-    source = "announcement"
-    if not investigators:
-        investigators = attrs.get("investigators-current", [])
-        source = "current"
+    ann  = attrs.get("investigators-at-announcement", [])
+    curr = attrs.get("investigators-current", [])
 
-    records = []
-    for inv in investigators:
-        orcid_raw = inv.get("orcidIdentifier") or ""
-        orcid_clean = orcid_raw.strip() or None
+    seen: dict[str, dict] = {}
 
-        first_name = safe_str(inv.get("firstName"))
-        family_name = safe_str(inv.get("familyName"))
-        
-        # Generate deterministic unique_id
-        clean_name = re.sub(r'[^a-zA-Z0-9]', '', f"{first_name}{family_name}")
-        unique_id = f"{grant_code}_{clean_name}"
+    def _process(inv_list, source):
+        for inv in inv_list:
+            orcid_raw  = inv.get("orcidIdentifier") or ""
+            orcid_clean = orcid_raw.strip() or None
+            first_name  = safe_str(inv.get("firstName"))
+            family_name = safe_str(inv.get("familyName"))
+            clean_name  = re.sub(r'[^a-zA-Z0-9]', '', f"{first_name}{family_name}")
+            unique_id   = f"{grant_code}_{clean_name}"
 
-        records.append({
-            "unique_id":     unique_id,
-            "grant_code":    grant_code,
-            "title":         safe_str(inv.get("title")),
-            "first_name":    first_name,
-            "family_name":   family_name,
-            "role_code":     safe_str(inv.get("roleCode")),
-            "role_name":     safe_str(inv.get("roleName")),
-            "is_fellowship": inv.get("isFellowship", False),
-            "orcid":         orcid_clean,
-            "inv_source":    source,
-        })
-    return records
+            if unique_id in seen:
+                # Same name in both sources — pick up ORCID from current if missing
+                if orcid_clean and not seen[unique_id]["orcid"]:
+                    seen[unique_id]["orcid"] = orcid_clean
+            else:
+                seen[unique_id] = {
+                    "unique_id":     unique_id,
+                    "grant_code":    grant_code,
+                    "title":         safe_str(inv.get("title")),
+                    "first_name":    first_name,
+                    "family_name":   family_name,
+                    "role_code":     safe_str(inv.get("roleCode")),
+                    "role_name":     safe_str(inv.get("roleName")),
+                    "is_fellowship": inv.get("isFellowship", False),
+                    "orcid":         orcid_clean,
+                    "inv_source":    source,
+                }
+
+    _process(ann,  "announcement")
+    _process(curr, "current")
+
+    # If neither list had entries fall back is implicit (seen will be empty)
+    return list(seen.values())
 
 
 # Removed extract_for_codes as we are now using primary_field_of_research from grant_summaries
