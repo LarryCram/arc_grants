@@ -12,6 +12,7 @@ Phase 2 – Dedupe: Splink dedupe_only on the prep output
 
 import sys
 import csv
+import json
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -165,6 +166,7 @@ def _split_multi_name_clusters(
     df_cluster_ids: pd.DataFrame,
     df_prep: pd.DataFrame,
     orcid_enrichment: pd.DataFrame | None = None,
+    history: dict | None = None,
 ) -> pd.DataFrame:
     """
     For clusters containing 2+ genuinely distinct full name forms, use three
@@ -330,6 +332,14 @@ def _split_multi_name_clusters(
             return row["unique_id"]  # no FOR overlap → own cluster
 
         sub["cluster_id"] = sub.apply(assign, axis=1)
+        if history is not None:
+            parent_hist = history.pop(cid, [{"event": "splink_cluster"}])
+            for new_cid, new_grp in sub.groupby("cluster_id"):
+                history[new_cid] = parent_hist + [{
+                    "event": "name_split",
+                    "split_from": cid,
+                    "name_forms": sorted(new_grp["norm_name"].unique().tolist()),
+                }]
         out.append(sub[["unique_id", "cluster_id"]])
 
     print(f"  Multi-name split: {n_splits} cluster(s) split")
@@ -337,7 +347,8 @@ def _split_multi_name_clusters(
 
 
 def _merge_by_orcid(
-    df_cluster_ids: pd.DataFrame, df_raw: pd.DataFrame
+    df_cluster_ids: pd.DataFrame, df_raw: pd.DataFrame,
+    history: dict | None = None,
 ) -> pd.DataFrame:
     """
     Deterministically merge clusters linked by the same ORCID.
@@ -375,8 +386,17 @@ def _merge_by_orcid(
             n_conflict += 1
         clusters = sorted(rows["cluster_id"].unique())
         canonical = min(clusters)
+        non_canonical = [c for c in clusters if c != canonical]
         for cid in clusters:
             remapping[cid] = canonical
+        if history is not None:
+            history.setdefault(canonical, [{"event": "splink_cluster"}]).append({
+                "event": "orcid_merge",
+                "merged_from": non_canonical,
+                "orcid": orcid,
+            })
+            for c in non_canonical:
+                history.pop(c, None)
         n_merged += 1
 
     if not remapping:
@@ -389,7 +409,8 @@ def _merge_by_orcid(
 
 
 def _split_orcid_conflicts(
-    df_cluster_ids: pd.DataFrame, df_original: pd.DataFrame
+    df_cluster_ids: pd.DataFrame, df_original: pd.DataFrame,
+    history: dict | None = None,
 ) -> pd.DataFrame:
     merged = df_original[["unique_id", "orcid"]].merge(
         df_cluster_ids[["unique_id", "cluster_id"]], on="unique_id", how="left"
@@ -408,6 +429,15 @@ def _split_orcid_conflicts(
                 axis=1,
             )
             out.append(sub[["unique_id", "cluster_id"]])
+            if history is not None:
+                parent_hist = history.pop(cid, [{"event": "splink_cluster"}])
+                for new_cid, new_grp in sub.groupby("cluster_id"):
+                    orcid_val = new_grp["orcid"].dropna().iloc[0] if new_grp["orcid"].notna().any() else None
+                    history[new_cid] = parent_hist + [{
+                        "event": "orcid_conflict_split",
+                        "split_from": cid,
+                        "orcid": orcid_val,
+                    }]
 
     return pd.concat(out, ignore_index=True)
 
@@ -604,7 +634,8 @@ def _export_manual_splits_template(
 
 
 def _apply_manual_splits(
-    df_cluster_ids: pd.DataFrame, df_original: pd.DataFrame
+    df_cluster_ids: pd.DataFrame, df_original: pd.DataFrame,
+    history: dict | None = None,
 ) -> pd.DataFrame:
     if not MANUAL_SPLITS_CSV.exists():
         return df_cluster_ids
@@ -634,6 +665,15 @@ def _apply_manual_splits(
         sub["cluster_id"] = sub["institution_oax_id"].apply(
             lambda inst: f"{cid}_inst_{inst}" if (pd.notna(inst) and inst) else sub["unique_id"]
         )
+        if history is not None:
+            parent_hist = history.pop(cid, [{"event": "splink_cluster"}])
+            for new_cid, new_grp in sub.groupby("cluster_id"):
+                inst = new_grp["institution_oax_id"].dropna().iloc[0] if new_grp["institution_oax_id"].notna().any() else None
+                history[new_cid] = parent_hist + [{
+                    "event": "manual_split",
+                    "split_from": cid,
+                    "institution": inst,
+                }]
         out.append(sub[["unique_id", "cluster_id"]])
 
     return pd.concat(out, ignore_index=True)
@@ -846,18 +886,23 @@ def main():
     )
     df_cluster_ids = df_clusters.as_pandas_dataframe()
 
+    cluster_history: dict[str, list] = {
+        cid: [{"event": "splink_cluster"}]
+        for cid in df_cluster_ids["cluster_id"].unique()
+    }
+
     print("  Applying ORCID deterministic merge...")
-    df_cluster_ids = _merge_by_orcid(df_cluster_ids, df_raw)
+    df_cluster_ids = _merge_by_orcid(df_cluster_ids, df_raw, cluster_history)
     print("  Applying ORCID conflict split...")
-    df_cluster_ids = _split_orcid_conflicts(df_cluster_ids, df_raw)
+    df_cluster_ids = _split_orcid_conflicts(df_cluster_ids, df_raw, cluster_history)
     print("  Applying multi-name cluster split...")
     orcid_enrichment = None
     enrichment_path = PROCESSED_DATA / "orcid_enrichment.parquet"
     if enrichment_path.exists():
         orcid_enrichment = pd.read_parquet(enrichment_path)
-    df_cluster_ids = _split_multi_name_clusters(df_cluster_ids, df_raw, orcid_enrichment)
+    df_cluster_ids = _split_multi_name_clusters(df_cluster_ids, df_raw, orcid_enrichment, cluster_history)
     print("  Applying manual splits (config/manual_splits.csv)...")
-    df_cluster_ids = _apply_manual_splits(df_cluster_ids, df_raw)
+    df_cluster_ids = _apply_manual_splits(df_cluster_ids, df_raw, cluster_history)
 
     n_clusters = df_cluster_ids["cluster_id"].nunique()
     n_records  = len(df_cluster_ids)
@@ -904,6 +949,10 @@ def main():
         axis=1,
     )
     persons.loc[persons["orcid_status"] == "MULTI_ORCID", "resolution_status"] = "UNRESOLVED"
+
+    persons["cluster_history"] = persons["cluster_id"].map(
+        lambda cid: json.dumps(cluster_history.get(cid, [{"event": "splink_cluster"}]))
+    )
 
     persons.to_parquet(out_path, index=False)
     print(f"  Saved {len(persons)} person records → {out_path}")
