@@ -28,8 +28,8 @@ The Splink pipeline replaces the entire old multi-layer pipeline in `src_archive
   - **Note**: `/media/d-drive/openalex_feb26/` is a different copy — always use `.env` path
 
 ## Data Scale
-- ARC CIF rows (after role/scheme filter): 62,712
-- ARC person clusters (output of 01): 22,819  (avg 2.75 grants/person)
+- ARC CIF rows (after role/scheme filter): 65,050
+- ARC person clusters (output of 01): 23,117  (avg 2.81 grants/person)
 - OAX Australian authors: 1,149,339
 - ORCID coverage in ARC CIFs: 44.5%
 
@@ -124,29 +124,48 @@ To find all clusters for a scheme, search `grant_ids` in arc_persons, or use
 - Compound match "shi xue" = "shi xue" fixes Chinese compound given names (e.g. Shi Xue Dou)
 - TF adjustment on `first_name` (hn.first) exact level only
 
+## 01_prepare_arc.py Design (current, 2026-06-16)
+Post-Splink steps in order:
+1. `_merge_by_orcid`: collapse clusters sharing same ORCID → canonical = `min(cluster_ids)`
+2. `_split_orcid_conflicts`: split any cluster with 2+ distinct ORCIDs
+3. `_split_multi_name_clusters`: split on disjoint coinvestigator+FOR signals; skips clusters
+   where all records share one ORCID (single-ORCID clusters are authoritative)
+4. `_apply_manual_splits`: apply `config/manual_splits.csv` confirmed splits
+5. `_apply_manual_orcids`: inject verified ORCIDs from `config/manual_orcids.csv`
+
+Output columns in `arc_persons.parquet`:
+- `orcid_status`: `HAS_ORCID` | `NO_ORCID` | `MULTI_ORCID`
+- `resolution_status`: `RESOLVED` | `UNRESOLVED` (driven by `_is_suspicious`)
+- `cluster_history`: JSON list of events — `splink_cluster`, `orcid_merge`, `orcid_conflict_split`,
+  `name_split`, `manual_split`, `manual_orcid`
+
+**config/manual_orcids.csv** — verified ORCIDs for clusters where ARC data has none.
+Current entries (all 5 previously UNRESOLVED clusters):
+- DP0451043_SusanOConnor → 0000-0001-9381-078X (archaeologist, ANU/UWA)
+- DP0343994_TerenceONeill → 0000-0001-6485-6965 (statistics/finance, ANU→Bond→UQ)
+- DP0452137_JefferyMalpas → 0000-0003-4378-8937 (philosopher of place, UTas→Monash)
+- DP110100881_TheodorusSloots → 0000-0003-1643-1908 (virologist, UQ/USyd)
+- DP170102529_PhilipBland → 0000-0002-4681-7898 (planetary scientist, Curtin)
+- DP0209045_FrankPate → 0000-0002-0238-0217 (F. Donald Pate, bioarchaeologist, Flinders)
+
 ## Next Priority (start of next session)
-**Fix `_split_multi_name_clusters` false splits then re-run pipeline:**
-1. Fix FOR comparison in `_split_multi_name_clusters` (01_prepare_arc.py): use tokenised FOR
-   overlap (`for_name_tokens()`) not raw name string equality — 17 of 47 pairs are false splits
-   due to case differences ("Cultural Studies" ≠ "Cultural studies" as strings but same tokens).
-2. Re-run `00_extract_arc.py` → new investigators_raw.parquet (now unions announcement+current)
-3. Re-run `01_prepare_arc.py` → new arc_persons.parquet with multi-name splits
-4. Re-run `03_link_arc_oax.py` → new arc_oax_links.parquet
-5. Re-run `04_resolve_links.py` → check results; add manual resolution for Chun Guang Li
-   (OAX A5084461358, ORCID 0000-0002-7789-2209) once new cluster_id is known
+1. Re-run `01_prepare_arc.py` → all 5 previously UNRESOLVED clusters now RESOLVED via manual_orcids
+2. `00b_enrich_orcid.py` is running (targeting `resolution_status==RESOLVED, orcid_status==NO_ORCID`)
+   — refactor 00b to use arc_persons directly rather than investigators_raw grouping (TODO)
+3. Re-run `03_link_arc_oax.py` → new arc_oax_links.parquet
+4. Re-run `04_resolve_links.py` → check results
 
 **After pipeline re-run — analysis:**
-6. `python analysis/01_fetch_oeuvres.py` — full run (~15–30 min, ~22k persons)
-7. `python analysis/02_accuracy_check.py --full` → review flags in batch
-8. `python analysis/03_annual_metrics.py`
-9. `python analysis/04_au_baseline.py` + `python analysis/04b_citation_quantiles.py`
-10. `python analysis/05_explore.py`
+5. `python analysis/01_fetch_oeuvres.py` — full run (~15–30 min, ~23k persons)
+6. `python analysis/02_accuracy_check.py --full`
+7. `python analysis/03_annual_metrics.py`
+8. `python analysis/04_au_baseline.py` + `python analysis/04b_citation_quantiles.py`
+9. `python analysis/05_explore.py`
 
-Remaining linkage gaps (lower priority):
-- 207 unlinked (no HC match): mix of no-OAX-presence researchers + blocking failures
-- 103 deferred (common names: WeiWang n=53, TuanNguyen n=36, XinZhou n=36, etc.)
-- Paul Young split: re-run 01_prepare_arc.py to materialise `config/manual_splits.csv` entry,
-  then add per-sub-cluster manual resolutions (UQ virologist / USyd pharmacologist / Monash engineer)
+**Pending code TODOs:**
+- Stabilise cluster_ids: replace `_nm_` and `_inst_` suffix encoding with `min(unique_id)`
+- Refactor cluster to dataclass with stable opaque id and explicit provenance fields
+- Refactor 00b to target arc_persons (resolution_status==RESOLVED, orcid_status==NO_ORCID)
 
 ## Manual Resolution Techniques (Not Yet Automated in Pipeline)
 
