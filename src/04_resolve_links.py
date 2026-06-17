@@ -54,8 +54,12 @@ def main():
 
     print("[1/4] Loading data...")
     links = con.execute(f"SELECT * FROM read_parquet('{link_path}')").fetchdf()
-    arc   = con.execute(f"SELECT cluster_id, orcids, inst_arr, for_codes, first_names FROM read_parquet('{arc_path}')").fetchdf()
+    arc   = con.execute(f"SELECT cluster_id, orcids, inst_arr, for_codes, first_names, grant_ids FROM read_parquet('{arc_path}')").fetchdf()
     oax   = con.execute(f"SELECT unique_id, orcid, inst_ids, topic_names, subfield_names, first_name, family_name_main FROM read_parquet('{oax_path}')").fetchdf()
+
+    grants_flat_path = PROCESSED_DATA / "grants_flat.parquet"
+    gf = con.execute(f"SELECT grant_code, n_eligible_orgs FROM read_parquet('{grants_flat_path}')").fetchdf()
+    grant_n_orgs = dict(zip(gf["grant_code"], gf["n_eligible_orgs"]))
 
     arc["orcid"] = arc["orcids"].apply(lambda x: x[0] if x is not None and len(x) > 0 else None)
     arc_orcid     = dict(zip(arc["cluster_id"], arc["orcid"]))
@@ -63,6 +67,21 @@ def main():
     arc_for_codes = dict(zip(arc["cluster_id"], arc["for_codes"]))
     arc_firstnames = {r["cluster_id"]: [str(fn).lower().strip() for fn in (r["first_names"] if r["first_names"] is not None else [])]
                       for _, r in arc.iterrows()}
+
+    # Precompute: does every grant contributing to this cluster have n_eligible_orgs == 1?
+    # When true, inst_arr is definitively the person's own institution(s) and
+    # non-overlap with an OAX candidate is strong evidence against that candidate.
+    def _grant_codes(grant_ids):
+        if grant_ids is None or len(grant_ids) == 0:
+            return []
+        return [g.split("_")[0] for g in grant_ids]
+
+    arc_all_single_org = {
+        r["cluster_id"]: all(
+            grant_n_orgs.get(c, 999) == 1 for c in _grant_codes(r["grant_ids"])
+        )
+        for _, r in arc.iterrows()
+    }
     oax_orcid     = dict(zip(oax["unique_id"],  oax["orcid"]))
     oax_inst      = dict(zip(oax["unique_id"],  oax["inst_ids"]))
     oax_topics    = dict(zip(oax["unique_id"],  oax["topic_names"]))
@@ -283,6 +302,26 @@ def main():
             })
             continue
 
+        # Step 1b: single-org institution gate
+        # All contributing ARC grants have n_eligible_orgs == 1 → the ARC inst_arr
+        # is the person's definitive institution. Exclude candidates with no overlap
+        # when at least one candidate does overlap.
+        if arc_all_single_org.get(arc_id, False):
+            max_ov_gate = group["inst_overlap"].max()
+            if max_ov_gate > 0:
+                gated_out = set(group.loc[group["inst_overlap"] == 0, "oax_id"])
+                if gated_out:
+                    group = group[group["inst_overlap"] > 0]
+                    split_secondaries.update(gated_out)
+            if len(group) == 1:
+                r = group.iloc[0]
+                resolved_rows.append({
+                    "arc_id": r["arc_id"], "oax_id": r["oax_id"],
+                    "match_probability": r["match_probability"], "resolved_by": "inst_gate",
+                    "secondary_oax_ids": list(all_oax - {r["oax_id"]}),
+                })
+                continue
+
         # Step 2: restrict to max institution overlap
         max_ov = group["inst_overlap"].max()
         if max_ov > 0:
@@ -438,7 +477,7 @@ def main():
     print(f"\n  Total ARC persons:              {all_arc:,}")
     print(f"  Resolved (1 HC match):          {by_counts.get('unique_hc', 0):,}")
     print(f"  Resolved (disambiguated):        {len(resolved) - by_counts.get('unique_hc', 0):,}")
-    for label in ["oax_orcid_dedup", "oax_topic_dedup", "orcid", "inst_overlap", "field", "probability", "works_count", "name_filter", "manual"]:
+    for label in ["oax_orcid_dedup", "oax_topic_dedup", "orcid", "inst_gate", "inst_overlap", "field", "probability", "works_count", "name_filter", "manual"]:
         n = by_counts.get(label, 0)
         if n:
             print(f"    of which by {label+':':16s} {n:,}")

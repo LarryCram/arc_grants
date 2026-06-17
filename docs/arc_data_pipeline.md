@@ -36,7 +36,11 @@ Diacritics are stripped by NFD normalisation followed by ASCII filtering. A sepa
 
 ### FOR Code Normalisation
 
-Each grant carries between one and three Field of Research (FOR) codes. Codes from the 2008 ANZSRC series are upgraded to 2020 equivalents using a concordance table, so that all clusters carry consistent ANZSRC 2020 codes. Field names are tokenised with domain stopwords removed; a concordance of 49 near-synonym FOR pairs (Jaccard ≥ 0.5) allows token expansion at comparison time.
+Each grant carries between one and three Field of Research (FOR) codes drawn from the ANZSRC classification. The FOR hierarchy has three levels: a 2-digit division (~22 divisions), a 4-digit group (~254 groups), and a 6-digit field (not used in this project). Grants awarded before the 2020 edition was introduced carry 2008 codes; grants since then carry 2020 codes. The two editions are structurally equivalent at the division and group levels but differ in their numeric codes, making direct cross-edition numeric comparison invalid.
+
+A pre-built concordance table (`config/for_2008_to_2020.csv`) maps 2008 division and group codes to their 2020 equivalents. This upgrade is applied during Phase 1 via DuckDB UDFs (`upgrade_for_code`, `upgrade_for_name`), so all downstream data carries uniform ANZSRC 2020 codes.
+
+Critically, ANZSRC FOR divisions and groups map bidirectionally and 1:1 to the OpenAlex/Scopus topic hierarchy used to classify research outputs: FOR divisions correspond to the 27 OAX fields (equivalent to Scopus subject categories), and FOR groups correspond to the 254 OAX subfields (equivalent to Scopus minor subjects). This structural alignment means that ARC FOR codes could in principle be compared directly to OAX topic codes by numeric mapping. The current pipeline instead tokenises the FOR group names and matches on token overlap — a practical approximation that avoids the need to resolve the full OAX topic hierarchy at this stage. A concordance of 49 near-synonym FOR name pairs (Jaccard ≥ 0.5) provides limited token expansion to bridge minor naming differences between grant records.
 
 The output is `arc_investigators_prep.parquet` (65,087 rows), with blocking key columns `family_name_main` and `first_initial` ready for Splink.
 
