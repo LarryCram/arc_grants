@@ -25,16 +25,20 @@ import splink.comparison_library as cl
 import splink.comparison_level_library as cll
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from config.settings import PROCESSED_DATA, ADMIN_ORGS_CSV, GRANT_SUMMARIES_CSV
+from config.settings import PROCESSED_DATA, ADMIN_ORGS_CSV, GRANT_SUMMARIES_CSV, DISKCACHE_DIR
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
 from src.utils.names import make_expanded_for_tokens, name_part_tokens, strip_diacriticals, for_name_tokens
-from src.utils.lookup_for_topic import ForTopicLookup
-from src.utils.cluster_checks import load_for_divisions, is_case_a, is_suspicious
 
-MANUAL_SPLITS_CSV       = Path(__file__).resolve().parents[1] / "config" / "manual_splits.csv"
-MANUAL_ORCIDS_CSV       = Path(__file__).resolve().parents[1] / "config" / "manual_orcids.csv"
+import diskcache
+from src.utils.lookup_for_topic import ForTopicLookup
+from src.utils.cluster_checks import load_for_divisions, division_mismatch, is_case_a, is_suspicious, first_names_compatible
+
+MANUAL_SPLITS_CSV        = Path(__file__).resolve().parents[1] / "config" / "manual_splits.csv"
+MANUAL_ORCIDS_CSV        = Path(__file__).resolve().parents[1] / "config" / "manual_orcids.csv"
+MANUAL_MERGES_CSV        = Path(__file__).resolve().parents[1] / "config" / "manual_merges.csv"
 ENRICHMENT_BLOCKLIST_CSV = Path(__file__).resolve().parents[1] / "config" / "enrichment_blocklist.csv"
 CLUSTER_THRESHOLD = 0.9
+RARE_NAME_TF      = 2e-6   # OAX full_name_key TF below this → rare name (tier 2 vs 3)
 
 
 # ── FOR code normalisation (2008 → 2020) ─────────────────────────────────────
@@ -306,20 +310,29 @@ def _split_multi_name_clusters(
         norm_to_root = {f: find(f) for f in form_list}
         sub = grp.copy()
 
-        def assign(row):
+        def get_root(row):
             nn = row["norm_name"]
             if nn in norm_to_root:
-                return f"{cid}_nm_{norm_to_root[nn][:8]}"
+                return norm_to_root[nn]
             # Abbreviated form: assign by FOR overlap with sub-clusters
             fors = set(row["for_names"]) if row["for_names"] is not None else set()
             if fors:
                 scores = {root: len(fors & sf) for root, sf in sub_for.items()}
                 best_root, best_score = max(scores.items(), key=lambda x: x[1])
                 if best_score > 0:
-                    return f"{cid}_nm_{best_root[:8]}"
-            return row["unique_id"]  # no FOR overlap → own cluster
+                    return best_root
+            return None  # no FOR overlap → singleton
 
-        sub["cluster_id"] = sub.apply(assign, axis=1)
+        sub["_root_key"] = sub.apply(get_root, axis=1)
+        root_canonical: dict[str, str] = {
+            root: root_grp["unique_id"].min()
+            for root, root_grp in sub[sub["_root_key"].notna()].groupby("_root_key")
+        }
+        sub["cluster_id"] = sub.apply(
+            lambda r: root_canonical[r["_root_key"]] if r["_root_key"] is not None else r["unique_id"],
+            axis=1,
+        )
+        sub = sub.drop(columns=["_root_key"])
         if history is not None:
             parent_hist = history.pop(cid, [{"event": "splink_cluster"}])
             for new_cid, new_grp in sub.groupby("cluster_id"):
@@ -483,6 +496,297 @@ def _inst_label(inst_id: str, lookup: dict) -> str:
 
 
 
+def _apply_manual_merges(persons: pd.DataFrame, cluster_history: dict) -> pd.DataFrame:
+    """Merge cluster pairs listed in config/manual_merges.csv.
+
+    Applied unconditionally — no initial-compatibility check.
+    cluster_keep survives; cluster_drop is absorbed into it.
+    """
+    if not MANUAL_MERGES_CSV.exists():
+        return persons
+
+    merges: list[tuple[str, str]] = []
+    with open(MANUAL_MERGES_CSV, newline="") as f:
+        for row in csv.DictReader(f):
+            keep = row["cluster_keep"].strip()
+            drop = row["cluster_drop"].strip()
+            if keep and drop:
+                merges.append((keep, drop))
+
+    if not merges:
+        return persons
+
+    remapping = {drop: keep for keep, drop in merges}
+
+    def _union(series_of_lists):
+        result = set()
+        for lst in series_of_lists:
+            result.update(lst)
+        return sorted(result)
+
+    out = persons.copy()
+    out["cluster_id"] = out["cluster_id"].map(lambda c: remapping.get(c, c))
+
+    vc = out["cluster_id"].value_counts()
+    multi = set(vc[vc > 1].index)
+
+    unchanged = out[~out["cluster_id"].isin(multi)].copy()
+    merged_parts = []
+
+    for canonical, grp in out[out["cluster_id"].isin(multi)].groupby("cluster_id"):
+        best_idx = grp["n_grants"].idxmax()
+        absorbed = [drop for drop, keep in remapping.items() if keep == canonical]
+        merged_parts.append({
+            "cluster_id":    canonical,
+            "full_names":    _union(grp["full_names"]),
+            "first_names":   _union(grp["first_names"]),
+            "family_names":  _union(grp["family_names"]),
+            "orcids":        _union(grp["orcids"]),
+            "inst_arr":      _union(grp["inst_arr"]),
+            "for_names":     _union(grp["for_names"]),
+            "for_codes":     _union(grp["for_codes"]),
+            "grant_ids":     [g for row in grp["grant_ids"] for g in row],
+            "n_grants":      int(grp["n_grants"].sum()),
+            "full_name_key": grp.loc[best_idx, "full_name_key"],
+        })
+        cluster_history.setdefault(canonical, []).append({
+            "event": "manual_merge",
+            "merged_from": absorbed,
+        })
+        for cid in absorbed:
+            cluster_history.pop(cid, None)
+
+    print(f"  Manual merges: {len(merges)} pair(s)")
+    return pd.concat([unchanged, pd.DataFrame(merged_parts)], ignore_index=True)
+
+
+def _merge_same_grant_coinvestigators(
+    persons: pd.DataFrame,
+    cluster_history: dict,
+) -> pd.DataFrame:
+    """Auto-merge same-blocking-key clusters on the same single-org grant.
+
+    If a grant's only eligible organisations are one university (n_eligible_orgs == 1),
+    two clusters sharing the same (family_name_main, first_initial) on that grant
+    are the same person — they are literally co-investigators at the same institution
+    on the same project.
+
+    Skips pairs where the clusters already carry distinct non-empty ORCIDs.
+    """
+    grants = pd.read_parquet(PROCESSED_DATA / "grants_flat.parquet")
+    if "n_eligible_orgs" not in grants.columns:
+        print("  Same-grant auto-merges: skipped (n_eligible_orgs not in grants_flat — re-run 00)")
+        return persons
+
+    single_org = set(grants.loc[grants["n_eligible_orgs"] == 1, "grant_code"])
+
+    # Blocking key per cluster from current persons state
+    out = persons.copy()
+    out["_fam"] = out["family_names"].apply(lambda x: max(x, key=len) if x else None)
+    out["_ini"] = out["first_names"].apply(_first_initial)
+
+    # grant_ids column stores unique_ids like "DP0208022_WilliamSmyth";
+    # grant_code = first "_"-separated token
+    exploded = (
+        out[["cluster_id", "_fam", "_ini", "orcids", "grant_ids"]]
+        .explode("grant_ids")
+        .rename(columns={"grant_ids": "unique_id"})
+        .dropna(subset=["unique_id", "_fam", "_ini"])
+    )
+    exploded["grant_code"] = exploded["unique_id"].str.split("_").str[0]
+    exploded = exploded[exploded["grant_code"].isin(single_org)]
+
+    out = out.drop(columns=["_fam", "_ini"])
+
+    if exploded.empty:
+        print("  Same-grant auto-merges: 0 (no single-org grants with same-name clusters)")
+        return out
+
+    groups = (
+        exploded.groupby(["grant_code", "_fam", "_ini"])["cluster_id"]
+        .agg(lambda s: sorted(s.unique()))
+        .reset_index()
+        .rename(columns={"cluster_id": "clusters"})
+    )
+    groups = groups[groups["clusters"].apply(len) >= 2]
+
+    if groups.empty:
+        print("  Same-grant auto-merges: 0")
+        return out
+
+    orcid_idx = persons.set_index("cluster_id")["orcids"].to_dict()
+
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        root = x
+        while parent.get(root, root) != root:
+            root = parent[root]
+        while x != root:
+            parent[x], x = root, parent.get(x, x)
+        return root
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            return
+        keep, drop = (ra, rb) if ra < rb else (rb, ra)
+        parent[drop] = keep
+
+    n_skipped = 0
+    for _, row in groups.iterrows():
+        clusters = row["clusters"]
+        non_empty = [set(orcid_idx.get(c, [])) for c in clusters if orcid_idx.get(c)]
+        if len(non_empty) >= 2:
+            union_all = set.union(*non_empty)
+            shared    = set.intersection(*non_empty)
+            if len(union_all) > len(shared):
+                n_skipped += 1
+                continue
+        for c in clusters[1:]:
+            union(clusters[0], c)
+
+    all_ids  = {c for row in groups["clusters"] for c in row}
+    remapping = {c: find(c) for c in all_ids if find(c) != c}
+
+    if not remapping:
+        print(f"  Same-grant auto-merges: 0 ({n_skipped} skipped — ORCID conflict)")
+        return out
+
+    def _union_lists(series_of_lists):
+        result = set()
+        for lst in series_of_lists:
+            result.update(lst)
+        return sorted(result)
+
+    out["cluster_id"] = out["cluster_id"].map(lambda c: remapping.get(c, c))
+    vc    = out["cluster_id"].value_counts()
+    multi = set(vc[vc > 1].index)
+
+    unchanged    = out[~out["cluster_id"].isin(multi)].copy()
+    merged_parts = []
+
+    for canonical, grp in out[out["cluster_id"].isin(multi)].groupby("cluster_id"):
+        best_idx = grp["n_grants"].idxmax()
+        absorbed = [drop for drop, keep in remapping.items() if keep == canonical]
+        merged_parts.append({
+            "cluster_id":    canonical,
+            "full_names":    _union_lists(grp["full_names"]),
+            "first_names":   _union_lists(grp["first_names"]),
+            "family_names":  _union_lists(grp["family_names"]),
+            "orcids":        _union_lists(grp["orcids"]),
+            "inst_arr":      _union_lists(grp["inst_arr"]),
+            "for_names":     _union_lists(grp["for_names"]),
+            "for_codes":     _union_lists(grp["for_codes"]),
+            "grant_ids":     [g for r in grp["grant_ids"] for g in r],
+            "n_grants":      int(grp["n_grants"].sum()),
+            "full_name_key": grp.loc[best_idx, "full_name_key"],
+        })
+        cluster_history.setdefault(canonical, []).append({
+            "event":       "same_grant_merge",
+            "merged_from": absorbed,
+        })
+        for cid in absorbed:
+            cluster_history.pop(cid, None)
+
+    n = len(remapping)
+    skip_note = f" ({n_skipped} skipped — ORCID conflict)" if n_skipped else ""
+    print(f"  Same-grant auto-merges: {n} absorbed → {len(merged_parts)} canonical(s){skip_note}")
+    return pd.concat([unchanged, pd.DataFrame(merged_parts)], ignore_index=True)
+
+
+def _compute_reliability_tier(persons: pd.DataFrame, tf_lookup: dict) -> pd.DataFrame:
+    """Add reliability_tier column classifying each cluster's identity confidence.
+
+    1a  HAS_ORCID, source = ARC data
+    1b  HAS_ORCID, source = ORCID enrichment (00b)
+    1c  HAS_ORCID, source = manual_orcids.csv
+    2   NO_ORCID, multi-grant, rare name  (tf < RARE_NAME_TF)
+    3   NO_ORCID, multi-grant, common name
+    4   NO_ORCID, singleton, no gap_candidates (isolated)
+    4u  NO_ORCID, singleton, has gap_candidates (unresolved collision)
+    """
+    def _tier(row):
+        if row["orcid_status"] in ("HAS_ORCID", "MULTI_ORCID"):
+            hist = row["cluster_history"]
+            if isinstance(hist, str):
+                hist = json.loads(hist)
+            events = {e.get("event") for e in (hist or [])}
+            if "manual_orcid" in events:
+                return "1c"
+            if "enriched_orcid" in events:
+                return "1b"
+            return "1a"
+        # NO_ORCID
+        if row["n_grants"] >= 2:
+            fnk = row.get("full_name_key")
+            tf = tf_lookup.get(fnk, 1.0) if fnk else 1.0
+            return "2" if tf < RARE_NAME_TF else "3"
+        # singleton
+        cands = row.get("gap_candidates")
+        return "4u" if (cands is not None and len(cands) > 0) else "4"
+
+    out = persons.copy()
+    out["reliability_tier"] = out.apply(_tier, axis=1)
+    counts = out["reliability_tier"].value_counts().sort_index()
+    print(f"  Reliability tiers: {dict(counts)}")
+    return out
+
+
+def _compute_gap_candidates(
+    persons: pd.DataFrame, div_map: dict, adj: set
+) -> pd.DataFrame:
+    """For each cluster, record gap_candidates: other cluster_ids sharing
+    (family_name_main, first_initial) that cannot be ruled out as the same person.
+
+    Incompatibility tests (any one → keep separate):
+      - name:    first_names sets are mutually incompatible (cascade: full name / initial)
+      - FOR:     combined for_names span disconnected major divisions
+      - ORCID:   both have ORCIDs and they are disjoint
+    """
+    def _fnm(family_names):
+        return max(family_names, key=len) if family_names else None
+
+    p = persons[["cluster_id", "first_names", "family_names", "for_names", "orcids"]].copy()
+    p["_fnm"] = p["family_names"].apply(_fnm)
+    p = p.dropna(subset=["_fnm"])
+
+    idx = p.set_index("cluster_id")
+    gap: dict[str, list[str]] = {cid: [] for cid in persons["cluster_id"]}
+    n_compat = n_incompat = 0
+
+    for fnm, grp in p.groupby("_fnm"):
+        if len(grp) < 2:
+            continue
+        cids = list(grp["cluster_id"])
+        for i, c1 in enumerate(cids):
+            for c2 in cids[i + 1:]:
+                r1, r2 = idx.loc[c1], idx.loc[c2]
+                fn1, fn2 = list(r1["first_names"]), list(r2["first_names"])
+                name_incompat = (
+                    not first_names_compatible(fn1, fn2) or
+                    not first_names_compatible(fn2, fn1)
+                )
+                div_incompat = division_mismatch(
+                    list(r1["for_names"]) + list(r2["for_names"]), div_map, adj
+                )
+                orcid_incompat = (
+                    len(r1["orcids"]) > 0 and len(r2["orcids"]) > 0
+                    and not set(r1["orcids"]) & set(r2["orcids"])
+                )
+                if name_incompat or div_incompat or orcid_incompat:
+                    n_incompat += 1
+                else:
+                    gap[c1].append(c2)
+                    gap[c2].append(c1)
+                    n_compat += 1
+
+    print(f"  Gap 1: {n_compat} compatible pairs, {n_incompat} incompatible pairs")
+    out = persons.copy()
+    out["gap_candidates"] = out["cluster_id"].map(gap)
+    return out
+
+
 def _diagnostic_report(
     persons: pd.DataFrame,
     inst_lookup: dict,
@@ -605,8 +909,16 @@ def _apply_manual_splits(
             out.append(grp[["unique_id", "cluster_id"]])
             continue
         sub = grp.copy()
-        sub["cluster_id"] = sub["institution_oax_id"].apply(
-            lambda inst: f"{cid}_inst_{inst}" if (pd.notna(inst) and inst) else sub["unique_id"]
+        inst_canonical: dict[str, str] = {
+            inst_key: inst_grp["unique_id"].min()
+            for inst_key, inst_grp in sub.groupby("institution_oax_id", dropna=True)
+            if inst_key
+        }
+        sub["cluster_id"] = sub.apply(
+            lambda r: inst_canonical.get(r["institution_oax_id"], r["unique_id"])
+            if (pd.notna(r["institution_oax_id"]) and r["institution_oax_id"])
+            else r["unique_id"],
+            axis=1,
         )
         if history is not None:
             parent_hist = history.pop(cid, [{"event": "splink_cluster"}])
@@ -796,6 +1108,134 @@ def _apply_manual_orcids(persons: pd.DataFrame, cluster_history: dict) -> pd.Dat
         cluster_history.setdefault(cid, []).append({"event": "manual_orcid", "orcid": orcid})
         print(f"  Manual ORCID: {cid} → {orcid}")
     print(f"  Applied {len(overrides)} manual ORCID override(s)")
+    return out
+
+
+def _promote_low_by_for(
+    persons: pd.DataFrame,
+    df_cluster_ids: pd.DataFrame,
+    cluster_history: dict,
+) -> pd.DataFrame:
+    """Promote low-confidence enrichment entries when FOR matching uniquely picks one AU candidate.
+
+    For each no-ORCID cluster whose name appears in `low` enrichment rows, compares each
+    AU candidate's ORCID-derived ERA FOR (from for_cache) against the cluster's ARC for_names.
+    Promotes the single candidate with the highest non-zero token overlap.
+    """
+    enrichment_path = PROCESSED_DATA / "orcid_enrichment.parquet"
+    if not enrichment_path.exists():
+        return persons
+
+    enrichment = pd.read_parquet(enrichment_path)
+    enrichment = enrichment[
+        (enrichment["confidence"] == "low")
+        & enrichment["au_candidates"].notna()
+        & (enrichment["au_candidates"] != "[]")
+    ]
+    if len(enrichment) == 0:
+        return persons
+
+    inv = pd.read_parquet(PROCESSED_DATA / "investigators_raw.parquet")
+    inv = inv[inv["role_code"].isin(KEEP_ROLES) & inv["grant_code"].str[:2].isin(KEEP_SCHEMES)]
+
+    joined = (
+        enrichment[["first_name", "family_name", "au_candidates"]]
+        .merge(inv[["unique_id", "first_name", "family_name"]], on=["first_name", "family_name"], how="inner")
+        .merge(df_cluster_ids[["unique_id", "cluster_id"]], on="unique_id", how="inner")
+    )
+
+    def _union_candidates(series):
+        seen: set[str] = set()
+        result = []
+        for raw in series:
+            for c in (json.loads(raw) if isinstance(raw, str) else raw):
+                oid = c["orcid"]
+                if oid and oid not in seen:
+                    seen.add(oid)
+                    result.append(c)
+        return result
+
+    by_cluster = (
+        joined.groupby("cluster_id")
+        .agg(candidates=("au_candidates", _union_candidates))
+        .reset_index()
+    )
+
+    persons_no_orcid = set(persons.loc[persons["orcids"].apply(len) == 0, "cluster_id"])
+    by_cluster = by_cluster[by_cluster["cluster_id"].isin(persons_no_orcid)]
+
+    arc_for_toks = persons.set_index("cluster_id")["for_names"].apply(
+        lambda names: {tok for name in (names or []) for tok in for_name_tokens(name)}
+    )
+
+    out = persons.copy()
+    n_promoted = 0
+
+    with diskcache.Cache(str(DISKCACHE_DIR / "orcid_for")) as for_cache:
+        for _, row in by_cluster.iterrows():
+            cid = row["cluster_id"]
+            candidates = row["candidates"]
+            if len(candidates) < 2:
+                continue
+            arc_toks = arc_for_toks.get(cid, set())
+            if not arc_toks:
+                continue
+
+            scores = []
+            for c in candidates:
+                oid = c["orcid"]
+                orcid_for = for_cache.get(oid, [])
+                orcid_toks = {tok for e in orcid_for for tok in for_name_tokens(e["name"])}
+                scores.append((oid, len(arc_toks & orcid_toks)))
+
+            max_score = max(s for _, s in scores)
+            if max_score == 0:
+                continue
+            winners = [oid for oid, s in scores if s == max_score]
+            if len(winners) != 1:
+                continue
+
+            winner = winners[0]
+            mask = (out["cluster_id"] == cid) & (out["orcids"].apply(len) == 0)
+            if not mask.any():
+                continue
+            out.loc[mask, "orcids"] = out.loc[mask, "orcids"].apply(
+                lambda existing: sorted(set(list(existing) + [winner]))
+            )
+            cluster_history.setdefault(cid, []).append({
+                "event": "enriched_orcid", "orcid": winner,
+                "confidence": "low_for_disambiguated", "for_score": max_score,
+            })
+            n_promoted += 1
+
+    print(f"  Promoted {n_promoted} low-confidence ORCID(s) via ERA FOR matching")
+    return out
+
+
+def _enrich_orcid_for(persons: pd.DataFrame) -> pd.DataFrame:
+    """Add orcid_for_codes column — ERA FOR codes derived from each cluster's ORCID works.
+
+    Reads for_cache (populated by 00b_enrich_orcid.py). Merges codes across all ORCIDs
+    in a cluster, summing counts. Clusters with no ORCID or no cached works get [].
+    """
+    with diskcache.Cache(str(DISKCACHE_DIR / "orcid_for")) as for_cache:
+        def _get_for(orcids):
+            merged: dict[str, dict] = {}
+            for oid in (orcids or []):
+                if not oid:
+                    continue
+                for entry in for_cache.get(oid, []):
+                    code = entry["code"]
+                    if code not in merged:
+                        merged[code] = {"code": code, "name": entry["name"], "count": 0}
+                    merged[code]["count"] += entry["count"]
+            return sorted(merged.values(), key=lambda x: -x["count"])
+
+        out = persons.copy()
+        out["orcid_for_codes"] = out["orcids"].apply(_get_for)
+
+    n_with_for = (out["orcid_for_codes"].apply(len) > 0).sum()
+    print(f"  orcid_for_codes: {n_with_for} clusters with ≥1 ERA FOR code")
     return out
 
 
@@ -1061,10 +1501,16 @@ def main():
 
     print("  Promoting enriched ORCIDs (orcid_enrichment.parquet)...")
     persons = _apply_enriched_orcids(persons, df_cluster_ids, cluster_history)
+    print("  Promoting low-confidence ORCIDs via ERA FOR matching...")
+    persons = _promote_low_by_for(persons, df_cluster_ids, cluster_history)
     print("  Applying manual ORCID overrides (config/manual_orcids.csv)...")
     persons = _apply_manual_orcids(persons, cluster_history)
     print("  Merging clusters with shared post-enrichment ORCIDs...")
     persons = _merge_persons_by_orcid(persons, cluster_history)
+    print("  Applying manual merges (config/manual_merges.csv)...")
+    persons = _apply_manual_merges(persons, cluster_history)
+    print("  Auto-merging same-name clusters on single-org grants...")
+    persons = _merge_same_grant_coinvestigators(persons, cluster_history)
 
     # orcid_status: ORCID enrichment signal (used by 00b to target NO_ORCID RESOLVED clusters)
     persons["orcid_status"] = persons["orcids"].apply(
@@ -1080,6 +1526,15 @@ def main():
     persons["cluster_history"] = persons["cluster_id"].map(
         lambda cid: json.dumps(cluster_history.get(cid, [{"event": "splink_cluster"}]))
     )
+
+    print("  Enriching clusters with ERA FOR codes from ORCID works...")
+    persons = _enrich_orcid_for(persons)
+
+    print("  Computing Gap 1 candidates (same blocking key, no incompatibility)...")
+    persons = _compute_gap_candidates(persons, div_map, adj)
+
+    print("  Computing reliability tiers...")
+    persons = _compute_reliability_tier(persons, tf_lookup)
 
     persons.to_parquet(out_path, index=False)
     print(f"  Saved {len(persons)} person records → {out_path}")

@@ -26,6 +26,7 @@ OPENALEX_DIR = Path(_required["OPENALEX_DIR"])
 # Data subdirectories
 RAW_DATA       = DATA_ROOT / "raw"
 PROCESSED_DATA = DATA_ROOT / "processed"
+DISKCACHE_DIR  = DATA_ROOT / "diskcache"
 
 # Output subdirectories
 PROFILES_OUT = OUTPUT_ROOT / "profiles"

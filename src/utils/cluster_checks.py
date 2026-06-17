@@ -58,6 +58,26 @@ def is_case_a(full_names: list) -> bool:
     return len(firsts) <= 1
 
 
+def first_names_compatible(names_s: list, names_t: list) -> bool:
+    """True if at least one token in T is compatible with some token in S.
+
+    Cascade (per token in T):
+      - full name: exact match in S's full names, OR initial matches S's initials
+      - initial:   matches S's initials (derived from S's full names + S's bare initials)
+    Applied symmetrically by caller: incompatible if either direction returns False.
+    """
+    s_full  = {n for n in names_s if len(n) > 1}
+    s_inits = {n for n in names_s if len(n) == 1} | {n[0] for n in s_full}
+    for t in names_t:
+        if len(t) > 1:
+            if t in s_full or t[0] in s_inits:
+                return True
+        else:
+            if t in s_inits:
+                return True
+    return False
+
+
 def is_suspicious(
     row: pd.Series,
     div_map: dict,

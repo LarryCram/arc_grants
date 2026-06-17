@@ -111,6 +111,10 @@ def extract_investigators(attrs: dict, grant_code: str) -> list[dict]:
 
 def extract_grant_flat(attrs: dict, grant_code: str) -> dict:
     """Extract flat grant-level fields."""
+    orgs = attrs.get("organisations-at-announcement", []) or []
+    eligible_roles = {"Administering Organisation", "Other Eligible Organisation"}
+    eligible_names = {o["organisationName"] for o in orgs
+                      if o.get("roleName") in eligible_roles and o.get("organisationName")}
     return {
         "grant_code":           grant_code,
         "scheme_name":          safe_str(attrs.get("scheme-name")),
@@ -122,6 +126,7 @@ def extract_grant_flat(attrs: dict, grant_code: str) -> dict:
         "admin_org":            safe_str(attrs.get("administering-organisation") or
                                          attrs.get("announcement-administering-organisation")),
         "grant_summary":        safe_str(attrs.get("grant-summary")),
+        "n_eligible_orgs":      len(eligible_names),
     }
 
 
