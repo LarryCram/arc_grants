@@ -152,22 +152,22 @@ Output columns in `arc_persons.parquet`:
 **config/manual_merges.csv** — 11 entries (same-grant nickname pairs + cross-grant confirmed same-person)
 **config/enrichment_blocklist.csv** — 2 entries: LP0220171_JNichols, DP0452211_RobertMarks
 
+## Analysis Pipeline Status (2026-06-18)
+- `analysis/01_fetch_oeuvres.py` ✓ — 4,236,839 rows, 22,599 persons
+- `analysis/02_accuracy_check.py --full` ✓ — 0 over/under-coverage flags; 105 shared author_idx (B3 cross-grant, not errors); 11,604 year flags + 41,835 domain outliers written to work_flags_full.csv
+- `analysis/03_annual_metrics.py` ✓ — annual_metrics 544,627 rows/22,586 persons; collab_metrics 4,915,067 rows/22,250 persons
+- `analysis/06_analyse_fellowships.py` — plot 2 updated: median of active publishers (not mean+zeros); DECRA bug fixed (role_code `DECRA` not `DE`); award_year >= 2015 filter added to trajectory plot
+
 ## Next Priority (start of next session)
-1. Run `04_resolve_links.py` → arc_oax_resolved.parquet (03 just completed, 2026-06-17)
-2. `python analysis/01_fetch_oeuvres.py` — full run (~15–30 min, ~23k persons)
-3. `python analysis/02_accuracy_check.py --full`
-4. `python analysis/03_annual_metrics.py`
-5. `python analysis/04_au_baseline.py` + `python analysis/04b_citation_quantiles.py`
-6. `python analysis/05_explore.py`
+Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
 
 **Pending code TODOs:**
 - 03 Splink inst comparison: when all ARC grants are single-org (`all_single_org` bool in arc_persons), give strong negative weight to inst_arr mismatch (requires conditioning Splink comparison level weights on this flag)
 - 6-digit FOR → OAX topic field score: (1) obtain ABS ANZSRC 2008→2020 6-digit concordance table; (2) build 2020 6-digit → OAX topic lexical map (token overlap, Jaccard threshold — longer strings make false positives unlikely); (3) wire into `_field_score` in 04 and Splink comparison in 03. Replaces current 4-digit→subfield path with finer-grained signal. Prereq: `for_2008_to_2020_fields.csv`
-- Stabilise cluster_ids: replace `_nm_` and `_inst_` suffix encoding with `min(unique_id)`
 - Refactor cluster to dataclass with stable opaque id and explicit provenance fields
 - Refactor 00b to target arc_persons (resolution_status==RESOLVED, orcid_status==NO_ORCID)
 - Cross-grant B3 rule: same blocking key + shared co-i + same admin_org → auto-merge (catches Jun Li)
-- Complete 00b run: 11,566 ARC-ORCID records still need fetching for full for_cache coverage
+- Complete 00b run: 7,084 ARC-ORCID records still need fetching (running 2026-06-18; was 11,566)
 - Strengthen reliability_tier: add ARC for_names vs orcid_for_codes agreement signal for HAS_ORCID clusters
 
 ## Manual Resolution Techniques (Not Yet Automated in Pipeline)
