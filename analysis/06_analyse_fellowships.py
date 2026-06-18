@@ -2,7 +2,8 @@
 Fellowship bibliometric analysis.
 
 Plot 1: Distribution of academic ages (2025 − first_pub_year) by fellowship role_code.
-Plot 2: Mean annual publications vs Δyear (publication_year − award_year) by role_code.
+Plot 2: Median annual publications vs Δyear (publication_year − award_year) by role_code,
+         among fellows who published in each year (inactive fellows excluded).
 
 Reads oeuvres (sample or full) — no OAX scan needed.
 Output: PNG plots in ANALYSIS_OUT.
@@ -40,7 +41,7 @@ ROLES = {
     "FF": "Federation Fellow",
     "FL": "Laureate Fellow",
     "FT": "Future Fellow",
-    "DE": "DECRA",
+    "DECRA": "DECRA",
     "APF": "APF",
     "APD": "ARC Postdoctoral",
     "APDI": "ARC Postdoc Industry",
@@ -149,38 +150,33 @@ def plot_academic_age(con, out_dir, label):
 
 
 def plot_pub_trajectory(con, out_dir, label):
-    """Mean publications per year vs Δ(year − award_year), per role_code."""
+    """Median publications per year vs Δ(year − award_year), per role_code.
 
-    # Build career spine: for each fellow, all years from first_pub to 2025
-    # Left join to actual pubs; zeros for inactive years within career span.
+    Only persons who published in a given year contribute to that year's median.
+    Inactive persons (zero pubs that year) are excluded from numerator and denominator.
+    """
+
     rows = con.execute("""
-        WITH spine AS (
-            SELECT f.arc_id, f.role_code, f.award_year,
-                   gs.yr,
-                   gs.yr - f.award_year AS delta_year
-            FROM fellows f
-            JOIN first_pubs fp ON fp.arc_id = f.arc_id
-            CROSS JOIN (SELECT generate_series AS yr FROM generate_series(1950, 2025)) gs
-            WHERE gs.yr >= fp.first_pub_year
-              AND gs.yr <= 2025
-        )
-        SELECT role_code, delta_year,
-               AVG(COALESCE(ap.n_pubs, 0)) AS mean_pubs,
-               COUNT(DISTINCT spine.arc_id) AS n_fellows
-        FROM spine
-        LEFT JOIN annual_pubs ap
-               ON ap.arc_id = spine.arc_id AND ap.publication_year = spine.yr
-        WHERE delta_year BETWEEN -10 AND 15
-        GROUP BY role_code, delta_year
-        HAVING COUNT(DISTINCT spine.arc_id) >= 2
-        ORDER BY role_code, delta_year
+        SELECT f.role_code,
+               ap.publication_year - f.award_year AS delta_year,
+               MEDIAN(ap.n_pubs)                  AS median_pubs,
+               COUNT(DISTINCT f.arc_id)            AS n_fellows
+        FROM fellows f
+        JOIN first_pubs fp ON fp.arc_id = f.arc_id
+        JOIN annual_pubs ap ON ap.arc_id = f.arc_id
+        WHERE ap.publication_year - f.award_year BETWEEN -10 AND 15
+          AND ap.publication_year >= fp.first_pub_year
+          AND f.award_year >= 2015
+        GROUP BY f.role_code, delta_year
+        HAVING COUNT(DISTINCT f.arc_id) >= 2
+        ORDER BY f.role_code, delta_year
     """).fetchall()
 
     by_role = {}
-    for role, delta, mean_pubs, n in rows:
-        by_role.setdefault(role, {"delta": [], "mean": [], "n": []})
+    for role, delta, median_pubs, n in rows:
+        by_role.setdefault(role, {"delta": [], "median": [], "n": []})
         by_role[role]["delta"].append(delta)
-        by_role[role]["mean"].append(mean_pubs)
+        by_role[role]["median"].append(median_pubs)
         by_role[role]["n"].append(n)
 
     roles = sorted(by_role)
@@ -191,14 +187,14 @@ def plot_pub_trajectory(con, out_dir, label):
     fig, ax = plt.subplots(figsize=(9, 5))
     for role, color in zip(roles, COLORS):
         d = by_role[role]
-        ax.plot(d["delta"], d["mean"], label=f"{ROLES.get(role, role)} (n≥{min(d['n'])})",
+        ax.plot(d["delta"], d["median"], label=f"{ROLES.get(role, role)} (n≥{min(d['n'])})",
                 color=color, linewidth=2, marker="o", markersize=3)
 
     ax.axvline(0, color="grey", linestyle="--", linewidth=1, alpha=0.6)
     ax.text(0.3, ax.get_ylim()[1] * 0.98, "award\nyear", fontsize=8,
             color="grey", va="top")
     ax.set_xlabel("Years relative to fellowship award year (Δ)")
-    ax.set_ylabel("Mean publications per year")
+    ax.set_ylabel("Median publications per year (active publishers)")
     ax.set_title("Publication productivity around fellowship award year")
     ax.legend(fontsize=9, loc="upper left")
     ax.xaxis.set_major_locator(mticker.MultipleLocator(2))

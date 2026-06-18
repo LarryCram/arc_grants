@@ -1,3 +1,4 @@
 cluster_id,orcid,reason
 LP0220171_JNichols,0000-0002-3553-8009,J Nichols (Forestry 2002-2007) is not Susan Nichols (Environmental mgmt 2016); different initials and institutions
 DP0452211_RobertMarks,0000-0002-0510-1789,ORCID belongs to Peter Robert Marks (USyd English); Robert is his middle name — wrong enrichment match
+DP200103243_JillianBanfield,0000-0003-0406-9542,ORCID is a different irrelevant Jillian Banfield; correct entity is A5045720453 (ORCID 0000-0001-8203-8771 UC Berkeley env microbiologist)
