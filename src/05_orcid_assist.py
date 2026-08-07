@@ -4,7 +4,7 @@ src/05_orcid_assist.py
 Batch-fetches ORCID public API records for OAX candidates in the deferred set.
 Scores each candidate against the ARC person's FOR field tokens via ORCID keywords.
 Outputs high-confidence suggestions to a staging CSV for human review before
-promoting to config/manual_resolutions.csv.
+promoting to data_persisted/manual_resolutions.csv.
 
 Caches all HTTP responses under PROCESSED_DATA/orcid_cache/ so re-runs are cheap.
 

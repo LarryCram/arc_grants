@@ -210,7 +210,6 @@ __marimo__/
 .env
 .venv
 output/
-data/
 
 # LaTeX
 docs/*.aux

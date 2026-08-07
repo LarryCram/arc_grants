@@ -22,6 +22,16 @@ The Splink pipeline replaces the entire old multi-layer pipeline in `src_archive
 
 ## Key Paths
 - Config: `config/settings.py`
+- **`data_persisted/`** (repo root, git-tracked): every file that represents costly manual
+  work or a hard-to-reacquire external source — hand-curated matching/override CSVs
+  (`manual_resolutions.csv`, `manual_splits.csv`, `manual_splits_hand_counts.csv`,
+  `manual_orcids.csv`, `manual_merges.csv`, `enrichment_blocklist.csv`, `for_concordance.csv`,
+  `for_divisions.csv`, `for_adjacent_divisions.csv`) plus the ANZSRC/Scopus/OpenAlex/ERA source
+  `.xlsx` reference files. Previously split across `config/*.csv` (some git-tracked but
+  unlabelled as precious) and `data/*.xlsx` (entirely gitignored, i.e. genuinely unrecoverable
+  from a fresh clone) — consolidated 2026-08-07 so nothing irreplaceable can silently fall
+  outside version control again. `config/` itself now holds only code (`settings.py`,
+  `scope.py`, `scoring.py`).
 - Data root: `/home/lc/m/working/WORKING_ARC_PROJECT/`
 - Processed data: `/home/lc/m/working/WORKING_ARC_PROJECT/processed/`
 - OAX authors parquet: set via `OPENALEX_DIR` env var in `.env` → `/home/lc/m/openalex_feb26/parquet/`
@@ -54,11 +64,32 @@ The Splink pipeline replaces the entire old multi-layer pipeline in `src_archive
   unordered `first_names` list (set-derived, arbitrary order).
 
 ## FOR Code Handling
-- Two ANZSRC series (2008 and 2020) use different numeric codes and slightly different names
-- **Do NOT compare numeric codes** across series — they don't harmonise
-- `for_name_tokens()` in `src/utils/names.py`: tokenises FOR names, strips stopwords
-- `make_expanded_for_tokens()`: loads `config/for_concordance.csv` (49 J≥0.5 pairs) and
-  unions each name's tokens with its canonical form's tokens — bridges near-synonym names
+- Two ANZSRC series (2008 and 2020) use different numeric codes and slightly different names.
+  **As of 2026-08-07, cross-series and FOR↔OpenAlex harmonisation is delegated to the
+  external `research_classification` package** (`pip install
+  git+https://github.com/LarryCram/ResearchClassification.git`), via `src/utils/for_resolve.py`
+  — an audited, confidence-scored resolver. This replaces the old, now-deleted
+  `src/utils/lookup_for_topic.py` hand-built concordance (fed by
+  `config/build_for_oax_field_map.py`'s ~370 hand-typed rows).
+  - `for_resolve.upgrade_for_code(code)` / `upgrade_for_name(code, name)`: 2008→2020 group
+    upgrade, 2020 passthrough — same signatures/semantics as the old wrappers.
+  - `for_resolve.oax_subfield_name(code)`: FOR2008-or-FOR2020 group code → OAX subfield
+    label in one `resolve()` call (used by `04_resolve_links.py`'s `_field_score`).
+  - `for_resolve.oax_to_for2020(oax_code)`: reverse direction (OAX → FOR2020), reaching
+    FOR2020 **field** (6-digit) precision from an OAX topic-level input — finer than the
+    ARC→OAX direction ever provides. Not wired into any pipeline step yet; added for future
+    ECR/DECRA analysis work.
+  - **Do NOT confuse this with `resolve(FOR, "OAX_TOPIC")`** — the package explicitly
+    refuses that direction (`ValueError`) since OpenAlex's 4,516 topics are far finer than
+    anything honestly derivable from a FOR division; the finest reachable *from* a FOR-family
+    input is `OAX_SUBFIELD`. ARC's own `for_code` is 4-digit only anyway (regex
+    `^\d{4}` in `01_prepare_arc.py`), so a 6-digit FOR→topic path was never actionable
+    against this project's actual data.
+- `for_name_tokens()` in `src/utils/names.py`: tokenises FOR names, strips stopwords —
+  unrelated to `research_classification` (that package only does exact code/label lookups;
+  this handles ARC-internal free-text FOR-name fuzzy bridging for Splink blocking).
+- `make_expanded_for_tokens()`: loads `data_persisted/for_concordance.csv` (49 J≥0.5 pairs)
+  and unions each name's tokens with its canonical form's tokens — bridges near-synonym names
 
 ## 03_link_arc_oax.py Design
 - Splink `link_only`: arc_persons → openalex_authors_prep
@@ -77,13 +108,16 @@ Disambiguation of ARC persons with 2+ HC OAX matches. Steps in order:
     records; keep the one with more works. ORCID-matched records are protected from removal.
 1. **ARC–OAX ORCID match**: if exactly 1 HC candidate matches the ARC person's ORCID → resolve.
 2. **Institution overlap**: restrict to candidates with maximum overlap count (if any > 0).
-2b. **Field score filter**: restrict to candidates with maximum field score (unigram+bigram overlap
-    of ARC FOR tokens vs OAX topic_names/subfield_names). Only fires if `max_fs >= 2` AND
-    `min_fs == 0` (at least one candidate has zero overlap — avoids within-field false positives).
+2b. **Field score filter**: restrict to candidates with maximum field score (`_field_score` —
+    a plain set-intersection count between the OAX subfield names implied by the ARC person's
+    FOR codes, via `for_resolve.oax_subfield_name()`, and the OAX candidate's own
+    `subfield_names`; not token n-gram overlap, despite what this doc used to say). Only fires
+    if `max_fs >= 2` AND `min_fs == 0` (at least one candidate has zero overlap — avoids
+    within-field false positives).
 3. **Unique highest probability**: among remaining → resolve.
 4. **works_count dominance**: `max / sum > TOP_CUT` → OAX split record, take dominant.
 5. **Defer**: genuine common-name collisions.
-Manual overrides: `config/manual_resolutions.csv` (resolve/unlink actions applied after all steps).
+Manual overrides: `data_persisted/manual_resolutions.csv` (resolve/unlink actions applied after all steps).
 
 Output columns: `arc_id, oax_id, match_probability, resolved_by, secondary_oax_ids`
 `secondary_oax_ids`: all other HC candidates not chosen (split-record duplicates + alternatives).
@@ -97,6 +131,38 @@ Output columns: `arc_id, oax_id, match_probability, resolved_by, secondary_oax_i
 - Unlinked (no HC match): 262
 - manual_resolutions.csv: 424 resolve + 16 unlink = 440 rows
 - Key change vs previous: orcid +1,616; inst_overlap −1,310 (direct payoff from ORCID enrichment)
+- **This baseline assumes ORCID enrichment is complete** (`orcid_enrichment.parquet` present) —
+  see the 2026-08-07 verification note below for what happens without it.
+
+### 2026-08-07 verification run (00→01→03→04 full rerun, validating the `research_classification` FOR-code refactor)
+Full pipeline rerun from scratch to confirm the FOR-code harmonisation migration (see "FOR Code
+Handling") didn't regress linkage quality. Two pre-existing, unrelated gaps surfaced and are
+noted here so they aren't mistaken for refactor-caused regressions:
+- `orcid_enrichment.parquet` **does not exist in this environment** — `00b_enrich_orcid.py`
+  (a slow, ORCID-API-bound job) has never been run to completion and saved here. Its promotion
+  step (`_apply_enriched_orcids`) skips gracefully when missing, so this run's ORCID coverage
+  reflects raw ARC data + manual overrides only, not the enriched 73.1% baseline above.
+- `grants_flat.parquet`/`investigators_raw.parquet` on disk were themselves stale (missing
+  `n_eligible_orgs`, 62,747 vs 65,087 rows) — `00_extract_arc.py` was rerun first to fix this.
+
+Results (23,065 persons; -2.2pp ORCID coverage vs baseline is the enrichment gap above, not a
+regression):
+- Resolved: 22,668 / 23,065 (98.3%) — **up** from 98.0% baseline despite the missing enrichment
+  - oax_orcid_dedup: 939 | oax_topic_dedup: 2,375 | orcid: 5,108 (↓ from 6,594 — enrichment gap)
+  - inst_gate: 907 (new bucket, unrelated to this refactor) | inst_overlap: 2,070
+  - **field: 1,204 (↑ from 679 — the bucket this refactor directly touches)** | probability: 50
+  - works_count: 431 | name_filter: 29 | manual: 426
+- Ambiguous deferred: 172 | Manual unlinked: 16 | Unlinked (no HC match): 209
+- **`field` bucket spot-checked** (8 random samples): every case shows a semantically correct
+  ARC-FOR ↔ OAX-subfield match (e.g. Organic chemistry↔Organic Chemistry, Geology↔Geology,
+  Philosophy↔Philosophy) with independently high Splink match_probability (0.979–1.0) —
+  `research_classification`'s fuller, audited coverage is rescuing genuine matches the old
+  ~370-row hand-typed CSV missed, not introducing false positives.
+- **Conclusion: FOR-code refactor validated, no regression.** The overall resolution rate
+  *improved* (98.0%→98.3%) despite running with less ORCID enrichment than the documented
+  baseline, which is strong evidence the field-score change is a net positive. Full apples-to-apples
+  comparison against the 2026-06-17 baseline requires re-running `00b_enrich_orcid.py` first
+  (separate, large, out of scope for this verification).
 
 ## Fellowship Cohort Status (2026-06-13)
 - **FF** (Federation Fellows): 141/141 resolved ✓
@@ -125,12 +191,12 @@ Post-Splink steps in order:
 1. `_merge_by_orcid`: collapse clusters sharing same ORCID → canonical = `min(cluster_ids)`
 2. `_split_orcid_conflicts`: split any cluster with 2+ distinct ORCIDs
 3. `_split_multi_name_clusters`: split on disjoint coinvestigator+FOR signals; skips single-ORCID clusters
-4. `_apply_manual_splits`: apply `config/manual_splits.csv` confirmed splits
+4. `_apply_manual_splits`: apply `data_persisted/manual_splits.csv` confirmed splits
 5. `_apply_enriched_orcids`: promote high/au_match ORCIDs from `orcid_enrichment.parquet`; checks `enrichment_blocklist.csv`
 6. `_promote_low_by_for`: promote low-confidence enrichment candidates via ERA FOR token overlap
-7. `_apply_manual_orcids`: inject verified ORCIDs from `config/manual_orcids.csv`
+7. `_apply_manual_orcids`: inject verified ORCIDs from `data_persisted/manual_orcids.csv`
 8. `_merge_persons_by_orcid`: post-enrichment dedup — merge clusters sharing same ORCID; skips first-initial mismatch
-9. `_apply_manual_merges`: apply `config/manual_merges.csv` confirmed same-person pairs
+9. `_apply_manual_merges`: apply `data_persisted/manual_merges.csv` confirmed same-person pairs
 10. `_merge_same_grant_coinvestigators`: **NEW** — same blocking key on same single-org grant → auto-merge;
     uses `grants_flat.n_eligible_orgs`; ORCID-conflict guard; 61 absorbed in current run
 
@@ -143,14 +209,14 @@ Output columns in `arc_persons.parquet`:
 - `cluster_history`: JSON list of events — `splink_cluster`, `orcid_merge`, `orcid_conflict_split`,
   `name_split`, `manual_split`, `enriched_orcid`, `manual_orcid`, `same_grant_merge`, `manual_merge`
 
-**config/manual_orcids.csv** — 12 entries (verified ORCIDs for clusters missing one):
+**data_persisted/manual_orcids.csv** — 12 entries (verified ORCIDs for clusters missing one):
 - DP0451043_SusanOConnor, DP0343994_TerenceONeill, DP0452137_JefferyMalpas,
   DP110100881_TheodorusSloots, DP170102529_PhilipBland, DP0209045_FrankPate,
   DP130101651_LanfengDong, DP0774201_StephenBell, DP110100091_MichaelAdams,
   DP0556160_MichaelHooker, DE220100417_JathanSadowski, DE200100121_BenScheele
 
-**config/manual_merges.csv** — 11 entries (same-grant nickname pairs + cross-grant confirmed same-person)
-**config/enrichment_blocklist.csv** — 2 entries: LP0220171_JNichols, DP0452211_RobertMarks
+**data_persisted/manual_merges.csv** — 11 entries (same-grant nickname pairs + cross-grant confirmed same-person)
+**data_persisted/enrichment_blocklist.csv** — 2 entries: LP0220171_JNichols, DP0452211_RobertMarks
 
 ## Analysis Pipeline Status (2026-06-18)
 - `analysis/01_fetch_oeuvres.py` ✓ — 4,236,839 rows, 22,599 persons
@@ -163,7 +229,11 @@ Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
 
 **Pending code TODOs:**
 - 03 Splink inst comparison: when all ARC grants are single-org (`all_single_org` bool in arc_persons), give strong negative weight to inst_arr mismatch (requires conditioning Splink comparison level weights on this flag)
-- 6-digit FOR → OAX topic field score: (1) obtain ABS ANZSRC 2008→2020 6-digit concordance table; (2) build 2020 6-digit → OAX topic lexical map (token overlap, Jaccard threshold — longer strings make false positives unlikely); (3) wire into `_field_score` in 04 and Splink comparison in 03. Replaces current 4-digit→subfield path with finer-grained signal. Prereq: `for_2008_to_2020_fields.csv`
+- ~~6-digit FOR → OAX topic field score~~ — **dropped, not applicable**: `research_classification`
+  explicitly refuses FOR-family → `OAX_TOPIC` (raises `ValueError`; the finest reachable from a
+  FOR input is `OAX_SUBFIELD`, which `_field_score` already uses via `for_resolve.oax_subfield_name()`).
+  Also moot against actual data — ARC's own `for_code` is 4-digit only (`^\d{4}` regex in
+  `01_prepare_arc.py`), so no 6-digit FOR code exists here to resolve from.
 - Refactor cluster to dataclass with stable opaque id and explicit provenance fields
 - Refactor 00b to target arc_persons (resolution_status==RESOLVED, orcid_status==NO_ORCID)
 - Cross-grant B3 rule: same blocking key + shared co-i + same admin_org → auto-merge (catches Jun Li)
@@ -218,6 +288,6 @@ The name-filter step in `04_resolve_links.py` rescues arc_ids with only sub-HC c
 ## Known Issues in 02 Output
 - **Raymond Gilbert / Robert Gilbert** (n=34, no ORCID): different first names + 3 different
   fields — suspected mis-merge of 2–3 people
-- **Paul Young** (n=28, no ORCID): added to `config/manual_splits.csv` (confirmed_different_people=True);
+- **Paul Young** (n=28, no ORCID): added to `data_persisted/manual_splits.csv` (confirmed_different_people=True);
   splits by institution into UQ virologist / USyd pharmacologist / Monash engineer / UNSW (crop) groups.
   Re-run 01_prepare_arc.py to materialise sub-clusters, then add per-sub-cluster manual resolutions.

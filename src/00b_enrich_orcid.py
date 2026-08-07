@@ -49,7 +49,7 @@ from src.utils.io import setup_stdout_utf8
 from src.utils.orcid_cache import orcid_addresses, orcid_external_ids, orcid_works_count
 from src.utils.era_journals import load_era_lookup, orcid_for_codes
 
-PROJECT_DATA = Path(__file__).resolve().parents[1] / "data"
+PROJECT_DATA = Path(__file__).resolve().parents[1] / "data_persisted"
 
 ORCID_API          = "https://pub.orcid.org/v3.0"
 ORCID_SEARCH       = f"{ORCID_API}/search/"

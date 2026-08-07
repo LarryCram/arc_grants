@@ -85,54 +85,68 @@ def _record_with_country(country: str | None) -> dict:
     return {"person": {"addresses": {"address": addresses}}}
 
 
+def _fresh_caches():
+    """_search_orcid now requires record_cache/search_cache/for_cache/era_lookup args
+    (diskcache.Cache in production) -- plain dicts satisfy the same
+    __contains__/__getitem__/__setitem__ interface these tests need, without touching disk.
+    """
+    return {}, {}, {}, {}
+
+
 class TestSearchOrcid:
     def test_not_found(self):
+        record_cache, search_cache, for_cache, era_lookup = _fresh_caches()
         with patch("requests.get", return_value=_make_search_response(0, [])):
-            result = _search_orcid("Zzz", "Qqq")
+            result = _search_orcid("Zzz", "Qqq", record_cache, search_cache, for_cache, era_lookup)
         assert result["confidence"] == "not_found"
         assert result["orcid"] is None
 
     def test_single_result(self):
+        record_cache, search_cache, for_cache, era_lookup = _fresh_caches()
         with patch("requests.get", return_value=_make_search_response(1, ["0000-0001-0001-0001"])):
-            result = _search_orcid("John", "Smith")
+            result = _search_orcid("John", "Smith", record_cache, search_cache, for_cache, era_lookup)
         assert result["confidence"] == "high"
         assert result["orcid"] == "0000-0001-0001-0001"
         assert result["num_found"] == 1
 
     def test_too_common(self):
+        record_cache, search_cache, for_cache, era_lookup = _fresh_caches()
         orcids = [f"0000-000{i}-0001-0001" for i in range(11)]
         with patch("requests.get", return_value=_make_search_response(11, orcids)):
-            result = _search_orcid("John", "Smith")
+            result = _search_orcid("John", "Smith", record_cache, search_cache, for_cache, era_lookup)
         assert result["confidence"] == "too_common"
         assert result["orcid"] is None
 
     def test_multiple_one_au(self):
+        record_cache, search_cache, for_cache, era_lookup = _fresh_caches()
         orcids = ["0000-0001-0001-0001", "0000-0002-0002-0002"]
         records = {"0000-0001-0001-0001": _record_with_country("AU"),
                    "0000-0002-0002-0002": _record_with_country("US")}
         with patch("requests.get", return_value=_make_search_response(2, orcids)), \
-             patch.object(_mod, "fetch_orcid", side_effect=lambda o, d: records[o]):
-            result = _search_orcid("Jane", "Doe")
+             patch.object(_mod, "fetch_record", side_effect=lambda o, rc, fc, el: records[o]):
+            result = _search_orcid("Jane", "Doe", record_cache, search_cache, for_cache, era_lookup)
         assert result["confidence"] == "au_match"
         assert result["orcid"] == "0000-0001-0001-0001"
 
     def test_multiple_no_au(self):
+        record_cache, search_cache, for_cache, era_lookup = _fresh_caches()
         orcids = ["0000-0001-0001-0001", "0000-0002-0002-0002"]
         records = {"0000-0001-0001-0001": _record_with_country("US"),
                    "0000-0002-0002-0002": _record_with_country("GB")}
         with patch("requests.get", return_value=_make_search_response(2, orcids)), \
-             patch.object(_mod, "fetch_orcid", side_effect=lambda o, d: records[o]):
-            result = _search_orcid("Jane", "Doe")
+             patch.object(_mod, "fetch_record", side_effect=lambda o, rc, fc, el: records[o]):
+            result = _search_orcid("Jane", "Doe", record_cache, search_cache, for_cache, era_lookup)
         assert result["confidence"] == "low"
         assert result["orcid"] is None
 
     def test_multiple_two_au(self):
+        record_cache, search_cache, for_cache, era_lookup = _fresh_caches()
         orcids = ["0000-0001-0001-0001", "0000-0002-0002-0002"]
         records = {"0000-0001-0001-0001": _record_with_country("AU"),
                    "0000-0002-0002-0002": _record_with_country("AU")}
         with patch("requests.get", return_value=_make_search_response(2, orcids)), \
-             patch.object(_mod, "fetch_orcid", side_effect=lambda o, d: records[o]):
-            result = _search_orcid("Jane", "Doe")
+             patch.object(_mod, "fetch_record", side_effect=lambda o, rc, fc, el: records[o]):
+            result = _search_orcid("Jane", "Doe", record_cache, search_cache, for_cache, era_lookup)
         assert result["confidence"] == "low"
         assert result["orcid"] is None
 

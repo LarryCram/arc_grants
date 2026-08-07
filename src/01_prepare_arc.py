@@ -30,39 +30,15 @@ from config.scope import KEEP_ROLES, KEEP_SCHEMES
 from src.utils.names import make_expanded_for_tokens, name_part_tokens, strip_diacriticals, for_name_tokens
 
 import diskcache
-from src.utils.lookup_for_topic import ForTopicLookup
+from src.utils.for_resolve import upgrade_for_code, upgrade_for_name
 from src.utils.cluster_checks import load_for_divisions, division_mismatch, is_case_a, is_suspicious, first_names_compatible
 
-MANUAL_SPLITS_CSV        = Path(__file__).resolve().parents[1] / "config" / "manual_splits.csv"
-MANUAL_ORCIDS_CSV        = Path(__file__).resolve().parents[1] / "config" / "manual_orcids.csv"
-MANUAL_MERGES_CSV        = Path(__file__).resolve().parents[1] / "config" / "manual_merges.csv"
-ENRICHMENT_BLOCKLIST_CSV = Path(__file__).resolve().parents[1] / "config" / "enrichment_blocklist.csv"
+MANUAL_SPLITS_CSV        = Path(__file__).resolve().parents[1] / "data_persisted" / "manual_splits.csv"
+MANUAL_ORCIDS_CSV        = Path(__file__).resolve().parents[1] / "data_persisted" / "manual_orcids.csv"
+MANUAL_MERGES_CSV        = Path(__file__).resolve().parents[1] / "data_persisted" / "manual_merges.csv"
+ENRICHMENT_BLOCKLIST_CSV = Path(__file__).resolve().parents[1] / "data_persisted" / "enrichment_blocklist.csv"
 CLUSTER_THRESHOLD = 0.9
 RARE_NAME_TF      = 2e-6   # OAX full_name_key TF below this → rare name (tier 2 vs 3)
-
-
-# ── FOR code normalisation (2008 → 2020) ─────────────────────────────────────
-
-def upgrade_for_code(lu: ForTopicLookup, code: str | None) -> str | None:
-    """Upgrade a 2008 FOR group code to its 2020 equivalent; 2020 codes pass through.
-    Returns None for unmappable codes (SQL COALESCE keeps the original in that case).
-    """
-    if not code:
-        return None
-    return lu.upgrade_for_code(code)
-
-
-def upgrade_for_name(lu: ForTopicLookup, code: str | None, name: str | None) -> str | None:
-    """Return the official ANZSRC 2020 group name when a 2008 code is upgraded,
-    or the original name when already 2020 or no mapping exists.
-    """
-    if not code:
-        return name
-    code20 = lu.upgrade_for_code(code)
-    if code20 is None or code20 == code:
-        return name
-    sf_row = lu.group_to_subfield(code20)
-    return sf_row["group_name"] if sf_row else name
 
 
 # ── Phase 1 helpers ───────────────────────────────────────────────────────────
@@ -497,7 +473,7 @@ def _inst_label(inst_id: str, lookup: dict) -> str:
 
 
 def _apply_manual_merges(persons: pd.DataFrame, cluster_history: dict) -> pd.DataFrame:
-    """Merge cluster pairs listed in config/manual_merges.csv.
+    """Merge cluster pairs listed in data_persisted/manual_merges.csv.
 
     Applied unconditionally — no initial-compatibility check.
     cluster_keep survives; cluster_drop is absorbed into it.
@@ -1087,7 +1063,7 @@ def _merge_persons_by_orcid(persons: pd.DataFrame, cluster_history: dict) -> pd.
 
 
 def _apply_manual_orcids(persons: pd.DataFrame, cluster_history: dict) -> pd.DataFrame:
-    """Inject verified ORCIDs for clusters where ARC data has none (config/manual_orcids.csv)."""
+    """Inject verified ORCIDs for clusters where ARC data has none (data_persisted/manual_orcids.csv)."""
     if not MANUAL_ORCIDS_CSV.exists():
         return persons
     overrides: dict[str, str] = {}
@@ -1251,19 +1227,16 @@ def main():
                         ['VARCHAR', 'VARCHAR'],
                         'STRUCT(first_names VARCHAR[], family_names VARCHAR[])')
 
-    concordance_csv = Path(__file__).resolve().parents[1] / "config" / "for_concordance.csv"
+    concordance_csv = Path(__file__).resolve().parents[1] / "data_persisted" / "for_concordance.csv"
     expanded_for_tokens = make_expanded_for_tokens(str(concordance_csv))
     con.create_function("for_tokens", expanded_for_tokens,
                         ['VARCHAR'],
                         'VARCHAR[]')
 
-    _lu = ForTopicLookup()
-    con.create_function("upgrade_for_code",
-                        lambda code: upgrade_for_code(_lu, code),
+    con.create_function("upgrade_for_code", upgrade_for_code,
                         ['VARCHAR'], 'VARCHAR',
                         null_handling='special')
-    con.create_function("upgrade_for_name",
-                        lambda code, name: upgrade_for_name(_lu, code, name),
+    con.create_function("upgrade_for_name", upgrade_for_name,
                         ['VARCHAR', 'VARCHAR'], 'VARCHAR',
                         null_handling='special')
 
@@ -1461,7 +1434,7 @@ def main():
     if enrichment_path.exists():
         orcid_enrichment = pd.read_parquet(enrichment_path)
     df_cluster_ids = _split_multi_name_clusters(df_cluster_ids, df_raw, orcid_enrichment, cluster_history)
-    print("  Applying manual splits (config/manual_splits.csv)...")
+    print("  Applying manual splits (data_persisted/manual_splits.csv)...")
     df_cluster_ids = _apply_manual_splits(df_cluster_ids, df_raw, cluster_history)
 
     n_clusters = df_cluster_ids["cluster_id"].nunique()
@@ -1503,11 +1476,11 @@ def main():
     persons = _apply_enriched_orcids(persons, df_cluster_ids, cluster_history)
     print("  Promoting low-confidence ORCIDs via ERA FOR matching...")
     persons = _promote_low_by_for(persons, df_cluster_ids, cluster_history)
-    print("  Applying manual ORCID overrides (config/manual_orcids.csv)...")
+    print("  Applying manual ORCID overrides (data_persisted/manual_orcids.csv)...")
     persons = _apply_manual_orcids(persons, cluster_history)
     print("  Merging clusters with shared post-enrichment ORCIDs...")
     persons = _merge_persons_by_orcid(persons, cluster_history)
-    print("  Applying manual merges (config/manual_merges.csv)...")
+    print("  Applying manual merges (data_persisted/manual_merges.csv)...")
     persons = _apply_manual_merges(persons, cluster_history)
     print("  Auto-merging same-name clusters on single-org grants...")
     persons = _merge_same_grant_coinvestigators(persons, cluster_history)

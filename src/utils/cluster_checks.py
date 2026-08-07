@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pandas as pd
 
-_CONFIG = Path(__file__).resolve().parents[2] / "config"
-FOR_DIVISIONS_CSV = _CONFIG / "for_divisions.csv"
-FOR_ADJACENT_CSV  = _CONFIG / "for_adjacent_divisions.csv"
+_DATA_PERSISTED = Path(__file__).resolve().parents[2] / "data_persisted"
+FOR_DIVISIONS_CSV = _DATA_PERSISTED / "for_divisions.csv"
+FOR_ADJACENT_CSV  = _DATA_PERSISTED / "for_adjacent_divisions.csv"
 
 RARE_NAME_TF = 5e-5
 

@@ -38,7 +38,7 @@ from collections import defaultdict
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import PROCESSED_DATA, OAX_AUTHORS, TOP_CUT
-from src.utils.lookup_for_topic import ForTopicLookup
+from src.utils.for_resolve import oax_subfield_name
 
 LINK_THRESHOLD = 0.9
 
@@ -126,21 +126,16 @@ def main():
     def _lst(v):
         return list(v) if v is not None else []
 
-    _lu = ForTopicLookup()
-
     def _field_score(arc_id, oax_id):
         # Derive the set of OAX subfield names implied by the ARC person's FOR codes.
-        # 2008 codes are upgraded to 2020 group codes via the conversion table;
-        # codes with no 4-digit 2020 equivalent (e.g. 1701 pre-conversion) are skipped
-        # and contribute 0 — the filter guard (max_fs >= 1 and min_fs == 0) then
-        # doesn't fire, leaving disambiguation unchanged for those persons.
+        # Codes with no OAX subfield mapping (e.g. 1701 pre-conversion) are skipped and
+        # contribute 0 — the filter guard (max_fs >= 1 and min_fs == 0) then doesn't fire,
+        # leaving disambiguation unchanged for those persons.
         target_subfields = set()
         for code in _lst(arc_for_codes.get(arc_id)):
-            code20 = _lu.upgrade_for_code(code)
-            if code20:
-                sf_row = _lu.group_to_subfield(code20)
-                if sf_row:
-                    target_subfields.add(sf_row["oax_subfield_name"])
+            sf_name = oax_subfield_name(code)
+            if sf_name:
+                target_subfields.add(sf_name)
         if not target_subfields:
             return 0
         oax_sfs = set(_lst(oax_subfields.get(oax_id)))
@@ -425,7 +420,7 @@ def main():
     resolved = pd.concat([resolved_single, resolved_ambig, resolved_rescue], ignore_index=True)
 
     print("[4/4] Applying manual resolutions...")
-    manual_path = Path(__file__).resolve().parents[1] / "config" / "manual_resolutions.csv"
+    manual_path = Path(__file__).resolve().parents[1] / "data_persisted" / "manual_resolutions.csv"
     manual_unlinked = pd.DataFrame(columns=["arc_id", "note"])
     n_manual_resolve = n_manual_unlink = 0
     if manual_path.exists():

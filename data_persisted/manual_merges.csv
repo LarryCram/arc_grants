@@ -1,0 +1,12 @@
+cluster_keep,cluster_drop,reason
+DP0208022_WilliamSmyth,DP0208022_JohnSmyth,data entry error — one person on grant; John is a mistaken entry for William John Smyth
+DP0211483_NormanDancer,DP0211483_EdwardDancer,Norman = professional name used on all publications; Edward is legal first name only
+DP0208497_GeoffreyShaw,DP0208497_GeoffShaw,same person same grant — Geoff is nickname for Geoffrey; jaccard=0.857 with 12 shared co-investigators
+DP0345542_JeffreyRichardson,DP0345542_JeffRichardson,same person same grant — Jeff is nickname for Jeffrey; jaccard=0.8 with 8 shared co-investigators
+DP0211559_HaroldHatchStokes,DP0211559_HatchStokes,same person same grant — Hatch Stokes uses middle name; jaccard=0.778 with 7 shared co-investigators
+DP0877562_ChangbinYu,DP0877562_BradYu,same person same grant — Changbin(Brad) Yu at ANU; Brad is English name; both correctly got ORCID 0000-0002-6510-8974
+DP130101651_LanfengDong,DP180103426_LanfengDong,same person different grants — Lan-Feng Dong cell biologist; ORCID 0000-0002-9857-6352; jaccard=1.0 shared=1 co-investigator
+DP0774201_StephenBell,DP1093035_StephenBell,same person different grants — Stephen Bell UQ political economy; ORCID 0000-0001-8409-4419; jaccard=1.0 shared=1 co-investigator; confirmed via OAX A5002378301
+DP110100091_MichaelAdams,DP150103356_MichaelAdams,same person different grants — Michael Adams BPM/information systems; ORCID 0000-0001-6918-4213; moved QUT→UMelb; jaccard=0.833 shared=5 co-investigators
+LP0454897_JenniferHammond,LP0454897_JennyHammond,same person same grant — Jenny is nickname for Jennifer; jaccard=0.667 with 4 shared co-investigators
+DP0557023_RobertMcQueen,DP0557023_RobMcQueen,same person same grant — Rob is nickname for Robert; jaccard=0.667 with 4 shared co-investigators
