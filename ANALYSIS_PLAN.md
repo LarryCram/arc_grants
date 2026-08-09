@@ -20,11 +20,15 @@ small derived parquets.
 | Source | Format | Key columns |
 |--------|--------|-------------|
 | `processed/arc_oax_resolved.parquet` | flat | arc_id, oax_id (URL), secondary_oax_ids[] |
-| `$OPENALEX_DIR/authorships/` | ~1980 partitioned parquets | work_idx, author_idx (BIGINT), institution_name, ror, country_code |
-| `$OPENALEX_DIR/works/` | ~1981 partitioned parquets | work_idx, title, publication_year, cited_by_count, type, doi |
-| `$OPENALEX_DIR/topics/` | ~1978 partitioned parquets | work_idx, topic_idx, score, subfield_name, field_name, domain_name |
+| `$OPENALEX_COMPACT_DIR/authorships/` | partitioned parquets | work_idx, author_idx (BIGINT), author_name, institution_idx, institution_name, ror, country_code |
+| `$OPENALEX_COMPACT_DIR/works/` | partitioned parquets | work_idx, title, publication_year, cited_by_count, type, doi |
+| `$OPENALEX_COMPACT_DIR/work_topics/` | partitioned parquets | work_idx, topic_idx, score, subfield_name, field_name, domain_name |
 | `processed/openalex_authors_prep.parquet` | flat | unique_id (URL), works_count, topic_names |
-| `$OPENALEX_DIR/references/` | ~1981 partitioned parquets | work_idx, cited_work_idx — needed for year-by-year citation accumulation (future step, very large) |
+| `$OPENALEX_COMPACT_DIR/references/` | partitioned parquets | work_idx, cited_work_idx — needed for year-by-year citation accumulation (future step, very large) |
+
+(Path layout migrated Feb26→Jul26 snapshot 2026-08-08 — `OPENALEX_DIR` now holds dimension
+tables like `authors/`, `OPENALEX_COMPACT_DIR` holds these fact tables. See `CLAUDE.md`'s
+"OpenAlex Snapshot Migration".)
 
 **ID mapping**: `oax_id = 'https://openalex.org/A5027429235'` →
 `author_idx = CAST(regexp_replace(oax_id, 'https://openalex.org/A', '') AS BIGINT) = 5027429235`
@@ -194,7 +198,8 @@ python analysis/05_explore.py
    within field × publication year). Requires `citation_quantiles.parquet` from
    `04b_citation_quantiles.py`.
 
-2. **Citation year problem**: `cited_by_count` is a Feb-2026 snapshot total, not
+2. **Citation year problem**: `cited_by_count` is a snapshot total as of whichever OpenAlex
+   extract is current (see `CLAUDE.md`'s "OpenAlex Snapshot Migration" for which one), not
    citations received by year Y. Year-by-year citation flows require the `references`
    parquet (very large join — future step). Current workaround: snapshot citations used
    for H-index and totals, clearly flagged.

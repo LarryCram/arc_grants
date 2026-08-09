@@ -1,6 +1,10 @@
 # Cluster-Based Disambiguation Pipeline — Design
 
-**Status: draft — working document**
+**Status: superseded (historical draft).** The pipeline actually built (Splink-based
+`00_extract_arc.py` → `01_prepare_arc.py` → `02_prepare_oax.py` → `03_link_arc_oax.py` →
+`04_resolve_links.py`, documented in `CLAUDE.md`) diverged from this draft's proposed
+layer/script structure. Kept as a record of the early design thinking, not as current
+architecture — see `CLAUDE.md` for what's actually implemented.
 
 ---
 
