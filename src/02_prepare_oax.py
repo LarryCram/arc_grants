@@ -140,7 +140,7 @@ def main():
             FROM sorted_fields sf
             LEFT JOIN inst_agg ia USING (author_idx)
             JOIN read_parquet('{OAX_AUTHORS}/*.parquet') au
-              ON au.id[23:]::BIGINT = sf.author_idx
+              ON au.author_idx = sf.author_idx
         ) TO '{out_hep}' (FORMAT PARQUET)
     """)
     n_hep = con.execute(f"SELECT count(*) FROM '{out_hep}'").fetchone()[0]

@@ -18,16 +18,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import duckdb
-from config.settings import PROCESSED_DATA, OPENALEX_DIR, OUTPUT_ROOT
+from config.settings import PROCESSED_DATA, OPENALEX_COMPACT_DIR, OUTPUT_ROOT
 
 ANALYSIS_OUT = OUTPUT_ROOT / "analysis"
 ANALYSIS_OUT.mkdir(parents=True, exist_ok=True)
 
 RESOLVED   = str(PROCESSED_DATA / "arc_oax_resolved.parquet")
 SAMPLES    = str(ANALYSIS_OUT / "samples.parquet")
-AUTH_GLOB  = str(OPENALEX_DIR / "authorships" / "*.parquet")
-WORK_GLOB  = str(OPENALEX_DIR / "works" / "*.parquet")
-TOPIC_GLOB = str(OPENALEX_DIR / "topics" / "*.parquet")
+AUTH_GLOB  = str(OPENALEX_COMPACT_DIR / "authorships" / "*.parquet")
+WORK_GLOB  = str(OPENALEX_COMPACT_DIR / "works" / "*.parquet")
+TOPIC_GLOB = str(OPENALEX_COMPACT_DIR / "work_topics" / "*.parquet")
 OUT        = str(ANALYSIS_OUT / "oeuvres.parquet")
 
 

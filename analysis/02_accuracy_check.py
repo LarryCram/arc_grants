@@ -27,7 +27,7 @@ ANALYSIS_OUT  = OUTPUT_ROOT / "analysis"
 RESOLVED      = str(PROCESSED_DATA / "arc_oax_resolved.parquet")
 PERSONS       = str(PROCESSED_DATA / "arc_persons.parquet")
 GRANTS_FLAT   = str(PROCESSED_DATA / "grants_flat.parquet")
-AUTHORS_GLOB  = str(OPENALEX_DIR / "authors" / "partition_*.parquet")
+AUTHORS_GLOB  = str(OPENALEX_DIR / "authors" / "*.parquet")
 SAMPLES       = str(ANALYSIS_OUT / "samples.parquet")
 
 
@@ -132,10 +132,10 @@ def main(sample_n=None):
     # Flags saved to CSV for batch review → corrections go to manual_resolutions.csv
     recon = con.execute(f"""
         WITH oax_global AS (
-            SELECT id AS oax_id,
-                   works_count            AS oax_works_count,
-                   summary_stats.h_index  AS oax_h_index,
-                   display_name           AS oax_display_name
+            SELECT ids.openalex AS oax_id,
+                   works_count  AS oax_works_count,
+                   h_index      AS oax_h_index,
+                   display_name AS oax_display_name
             FROM read_parquet('{AUTHORS_GLOB}')
         ),
         oeuvre_counts AS (

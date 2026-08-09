@@ -10,7 +10,7 @@ WITH authorships_hep AS (
 )
 
 SELECT DISTINCT work_idx
-FROM '/home/lc/m/openalex_feb26/parquet/authorships/*.parquet' p
+FROM '/home/lc/m/openalex_jul26/parquet_converted/compact/authorships/*.parquet' p
 INNER JOIN authorships_hep
 USING (institution_idx)
 ) TO '/home/lc/m/working/WORKING_ARC_PROJECT/processed/works_intermediate_hep.parquet';
@@ -20,7 +20,7 @@ USING (institution_idx)
 COPY (
 SELECT *
   FROM '/home/lc/m/working/WORKING_ARC_PROJECT/processed/works_intermediate_hep.parquet'
-  INNER JOIN '/home/lc/m/openalex_feb26/parquet/authorships/*.parquet'
+  INNER JOIN '/home/lc/m/openalex_jul26/parquet_converted/compact/authorships/*.parquet'
   USING (work_idx)
   WHERE institution_idx IS NOT NULL
   ) TO '/home/lc/m/working/WORKING_ARC_PROJECT/processed/authorships_hep.parquet';
@@ -32,13 +32,13 @@ COPY (
     topics AS
       (SELECT *
          FROM '/home/lc/m/working/WORKING_ARC_PROJECT/processed/works_intermediate_hep.parquet'
-         JOIN '/home/lc/m/openalex_feb26/parquet/topics/*.parquet'
+         JOIN '/home/lc/m/openalex_jul26/parquet_converted/compact/work_topics/*.parquet'
          USING (work_idx)
       )
     
   SELECT t.*, "type", source_id, authors_count, institutions_distinct_count, cited_by_count
     FROM topics t
-    INNER JOIN '/home/lc/m/openalex_feb26/parquet/works/*.parquet'
+    INNER JOIN '/home/lc/m/openalex_jul26/parquet_converted/compact/works/*.parquet'
     USING (work_idx)
 ) TO '/home/lc/m/working/WORKING_ARC_PROJECT/processed/works_hep.parquet'
 

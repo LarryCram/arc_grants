@@ -164,6 +164,52 @@ regression):
   comparison against the 2026-06-17 baseline requires re-running `00b_enrich_orcid.py` first
   (separate, large, out of scope for this verification).
 
+### 2026-08-08 follow-up: `00b_enrich_orcid.py` full run — partial (ORCID daily quota hit)
+Ran `00b_enrich_orcid.py` from a cold cache (`DISKCACHE_DIR` was genuinely empty — no prior
+progress existed in this environment despite the "7,084 still need fetching" note above, which
+referred to a different session/machine's state). Result: **ORCID's public API has a hard daily
+anonymous-usage quota** (`429 Too Many Requests — exceeded the daily quota for anonymous usage`;
+their own error message points to registering a Public API client for a higher limit). The
+`/record` fetch phase (for people who already have an ARC ORCID) completed essentially cleanly —
+10,413 unique ORCIDs cached, only 3 errors. The name-*search* phase (for people with no ARC
+ORCID) only got **41.5%** through before every subsequent call started failing: 4,979/11,989
+succeeded, the remaining 7,010 cached as `confidence='error'`.
+- **Gotcha for next time**: failed searches are cached under the same key a successful search
+  would use, so a naive re-run will **not** retry them — `_search_orcid`'s cache-check only asks
+  "was this key attempted," not "did it succeed." Before resuming, evict `confidence='error'`
+  entries from the `orcid_searches` diskcache store (`DISKCACHE_DIR/orcid_searches`) first.
+- Re-ran `01→03→04` on this partial enrichment anyway (user decision — a real improvement over
+  no enrichment, not worth blocking on a multi-hour wait for the quota to reset): ORCID coverage
+  49.3%→**64.0%** (14,755/23,060), resolved 22,682/23,060 (**98.4%**, up again from 98.3%).
+  `field` bucket: 890 (moved from 1,204 as more candidates now resolve earlier via `orcid`/
+  `oax_orcid_dedup` before reaching the field-score step — expected interaction, not a concern).
+- **To reach the full 73.1%-ORCID-coverage baseline**: evict the error-cached entries, wait for
+  ORCID's daily quota to reset, re-run `00b_enrich_orcid.py` to finish the remaining ~7,010
+  searches, then re-run `01→03→04` once more.
+
+## Early-Career Fellowship Cohort Review (2026-08-08)
+Corrected the role-code scope for "early career fellowship" analysis (e.g. the ECR/DECRA
+"prompt paper" study) and manually reviewed every unlinked case in scope at the time.
+- **Scope correction**: `config/scope.py` had 3 wrong role-code labels, sourced from ARC's own
+  `role_name` field (not guessed) — **APF = "Australian Professorial Fellowship" (senior, NOT
+  postdoctoral)**, ARFI = "Australian Research Fellowship (**Indigenous**)" not "Industry", IRF =
+  "Indigenous Research(er) Fellowship" not "Industry Research Fellowship". Comments fixed;
+  `KEEP_ROLES` membership unchanged (all three were already included, just mislabeled).
+- **True early-career fellowship cohort = DECRA + APD + APDI only** (APF excluded — it's senior).
+  4,247 persons, 4,228 linked to OpenAlex (99.6%). APF (240 persons, 239 linked, 99.6%) is a
+  separate, senior cohort — do not include in ECR-focused analysis.
+- **27-person unlinked-cohort manual review** (before the scope correction, so included 1 APF
+  case — Peter Saunders, correctly excluded now rather than resolved): resulted in 20 new
+  `data_persisted/manual_resolutions.csv` entries (5 resolve, 15 unlink) + 2 new
+  `data_persisted/manual_merges.csv` entries (Veronica Lauck/McBain — announcement→current name
+  change, confirmed via `inv_source`; Ya-Feng Yang/Yafeng Yang — hyphenation false split, the
+  no-hyphen twin already had the correct ORCID). Notable patterns: several "resolve" targets are
+  explicitly flagged as OAX-side contaminated entities (OpenAlex merging 2+ real people under one
+  author id — e.g. Peter O'Sullivan, Jung-Ho Yun) resolved or rejected on a case-by-case basis
+  after checking institution/topic corroboration, not resolved_by score alone. See
+  `manual_resolutions.csv` notes dated 2026-08-08 for full reasoning per case.
+- Re-ran `01→03→04` after these changes: 23,049 persons, resolved 22,679 (98.4%).
+
 ## Fellowship Cohort Status (2026-06-13)
 - **FF** (Federation Fellows): 141/141 resolved ✓
 - **FL** (Australian Laureate Fellows): 277/277 resolved ✓

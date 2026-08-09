@@ -25,11 +25,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import duckdb
-from config.settings import PROCESSED_DATA, OPENALEX_DIR, OUTPUT_ROOT
+from config.settings import PROCESSED_DATA, OPENALEX_COMPACT_DIR, OUTPUT_ROOT
 
 ANALYSIS_OUT   = OUTPUT_ROOT / "analysis"
 PERSONS        = str(PROCESSED_DATA / "arc_persons.parquet")
-AUTH_GLOB      = str(OPENALEX_DIR / "authorships" / "*.parquet")
+AUTH_GLOB      = str(OPENALEX_COMPACT_DIR / "authorships" / "*.parquet")
 QUANTILES      = str(ANALYSIS_OUT / "citation_quantiles.parquet")
 OUT_ANNUAL     = str(ANALYSIS_OUT / "annual_metrics.parquet")
 OUT_COLLAB     = str(ANALYSIS_OUT / "collab_metrics.parquet")

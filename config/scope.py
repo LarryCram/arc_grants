@@ -13,14 +13,26 @@ KEEP_ROLES = frozenset({
     "FT",       # Future Fellow
     "FL",       # Laureate Fellow
     "FF",       # Federation Fellow
-    "APD",      # Australian Postdoctoral Fellowship
-    "APF",      # Australian Postdoctoral Fellowship (variant)
+    "APD",      # Australian Postdoctoral Fellowship (early career)
+    "APF",      # Australian Professorial Fellowship — SENIOR, not postdoctoral;
+                #   corrected 2026-08-08, was mislabeled "Postdoctoral Fellowship (variant)"
     "ARF",      # Australian Research Fellowship
     "QEII",     # QEII Fellow
-    "APDI",     # Australian Postdoctoral Industry Fellowship
-    "ARFI",     # Australian Research Fellowship Industry
+    "APDI",     # Australian Postdoctoral Fellowship (Industry) (early career)
+    "ARFI",     # Australian Research Fellowship (Indigenous) — corrected 2026-08-08,
+                #   was mislabeled "Australian Research Fellowship Industry"
     "DAATSIA",  # DAATSIA Fellowship
-    "IRF",      # Industry Research Fellowship
+    "IRF",      # Indigenous Research(er) Fellowship — corrected 2026-08-08,
+                #   was mislabeled "Industry Research Fellowship"
+})
+
+# Early-career fellowship cohort (analysis/07_analyse_ecr_fellowships.py, analysis/01_fetch_oeuvres.py --ecr).
+# APF is deliberately excluded despite the similar code -- confirmed via ARC's own role_name
+# field 2026-08-08 that APF is "Australian Professorial Fellowship" (senior), not postdoctoral.
+ECR_ROLES = frozenset({
+    "DECRA",    # Discovery Early Career Researcher Award
+    "APD",      # Australian Postdoctoral Fellowship
+    "APDI",     # Australian Postdoctoral Fellowship (Industry)
 })
 
 # Grant scheme codes to retain (first two characters of grant_code).

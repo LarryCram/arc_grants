@@ -97,13 +97,16 @@ def main():
     # Fetch works_count for all HC candidate OAX IDs
     print("[2/4] Fetching OAX works_count...")
     hc_oax_ids = hc["oax_id"].unique().tolist()
-    ids_sql = ", ".join(f"'{i}'" for i in hc_oax_ids)
+    idxs_sql = ", ".join(i.replace("https://openalex.org/A", "") for i in hc_oax_ids)
     wc_df = con.execute(f"""
-        SELECT id, works_count
+        SELECT author_idx, works_count
         FROM read_parquet('{OAX_AUTHORS}/*.parquet')
-        WHERE id IN ({ids_sql})
+        WHERE author_idx IN ({idxs_sql})
     """).fetchdf()
-    oax_works = dict(zip(wc_df["id"], wc_df["works_count"]))
+    oax_works = {
+        f"https://openalex.org/A{idx}": wc
+        for idx, wc in zip(wc_df["author_idx"], wc_df["works_count"])
+    }
     print(f"  Retrieved works_count for {len(oax_works):,} / {len(hc_oax_ids):,} OAX IDs")
 
     # Persons with exactly 1 HC match — already resolved
@@ -390,12 +393,17 @@ def main():
 
     rescue_rows = []
     if len(sub_hc_rescue):
-        sub_ids_sql = ", ".join(f"'{i}'" for i in sub_hc_rescue["oax_id"].unique().tolist())
+        sub_idxs_sql = ", ".join(
+            i.replace("https://openalex.org/A", "") for i in sub_hc_rescue["oax_id"].unique().tolist()
+        )
         sub_wc = con.execute(f"""
-            SELECT id, works_count FROM read_parquet('{OAX_AUTHORS}/*.parquet')
-            WHERE id IN ({sub_ids_sql})
+            SELECT author_idx, works_count FROM read_parquet('{OAX_AUTHORS}/*.parquet')
+            WHERE author_idx IN ({sub_idxs_sql})
         """).fetchdf()
-        sub_oax_works = dict(zip(sub_wc["id"], sub_wc["works_count"]))
+        sub_oax_works = {
+            f"https://openalex.org/A{idx}": wc
+            for idx, wc in zip(sub_wc["author_idx"], sub_wc["works_count"])
+        }
         sub_hc_rescue["works_count"] = sub_hc_rescue["oax_id"].map(sub_oax_works).fillna(0).astype(int)
 
         for arc_id, grp in sub_hc_rescue.groupby("arc_id"):

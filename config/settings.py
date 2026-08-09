@@ -40,9 +40,11 @@ FOR_OAX_CSV         = DATA_ROOT / "for_oax_concordance.csv"
 # Disambiguation thresholds (04_resolve_links.py)
 TOP_CUT = 0.7   # min proportion of group works_count for dominant OAX split-record
 
-# OpenAlex
-OAX_AUTHORS     = OPENALEX_DIR / "authors"
-OAX_AUTHORSHIPS = OPENALEX_DIR / "authorships"
+# OpenAlex (Jul26 snapshot: dimension tables — authors, institutions, etc. — live directly
+# under OPENALEX_DIR; big fact tables — works, authorships, work_topics, etc. — live one
+# level down under OPENALEX_COMPACT_DIR)
+OAX_AUTHORS          = OPENALEX_DIR / "authors"
+OPENALEX_COMPACT_DIR = OPENALEX_DIR / "compact"
 
 # OpenAlex API (required since March 2026)
 OPENALEX_EMAIL   = os.getenv("OPENALEX_EMAIL", "")

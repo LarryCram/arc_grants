@@ -18,13 +18,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import duckdb
-from config.settings import OPENALEX_DIR, OUTPUT_ROOT
+from config.settings import OPENALEX_COMPACT_DIR, OUTPUT_ROOT
 
 ANALYSIS_OUT  = OUTPUT_ROOT / "analysis"
 ANALYSIS_OUT.mkdir(parents=True, exist_ok=True)
 
-WORK_GLOB  = str(OPENALEX_DIR / "works" / "*.parquet")
-TOPIC_GLOB = str(OPENALEX_DIR / "topics" / "*.parquet")
+WORK_GLOB  = str(OPENALEX_COMPACT_DIR / "works" / "*.parquet")
+TOPIC_GLOB = str(OPENALEX_COMPACT_DIR / "work_topics" / "*.parquet")
 OUT        = str(ANALYSIS_OUT / "citation_quantiles.parquet")
 
 
