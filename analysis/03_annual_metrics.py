@@ -8,7 +8,8 @@ Outputs:
   collab_metrics.parquet  — arc_id × year × country/institution co-author counts
 
 H-index note: computed cumulatively for works published up to and including each year,
-using Feb-2026 snapshot citation counts. This gives the "H-index as of year Y based on
+using the current OpenAlex snapshot's citation counts (see CLAUDE.md's "OpenAlex Snapshot
+Migration" section for which snapshot). This gives the "H-index as of year Y based on
 snapshot citations" — not the true historical H-index which would require year-by-year
 citation data from the references parquet.
 

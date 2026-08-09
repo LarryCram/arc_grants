@@ -34,8 +34,11 @@ The Splink pipeline replaces the entire old multi-layer pipeline in `src_archive
   `scope.py`, `scoring.py`).
 - Data root: `/home/lc/m/working/WORKING_ARC_PROJECT/`
 - Processed data: `/home/lc/m/working/WORKING_ARC_PROJECT/processed/`
-- OAX authors parquet: set via `OPENALEX_DIR` env var in `.env` → `/home/lc/m/openalex_feb26/parquet/`
-  - **Note**: `/media/d-drive/openalex_feb26/` is a different copy — always use `.env` path
+- OpenAlex data: set via `OPENALEX_DIR` env var in `.env` → `/home/lc/m/openalex_jul26/parquet_converted/`
+  (migrated from the old Feb26 snapshot 2026-08-08 — see "OpenAlex Snapshot Migration" below).
+  `OPENALEX_DIR` itself holds dimension tables (`authors/`, `institutions.parquet`, etc.);
+  `OPENALEX_COMPACT_DIR` (`OPENALEX_DIR / "compact"`) holds the big fact tables (`works/`,
+  `authorships/`, `work_topics/`, etc.) — a two-tier split that didn't exist in the old snapshot.
 
 ## Data Scale
 - ARC CIF rows (after role/scheme filter): 65,087 (37 previously dropped by INNER JOIN on admin_org — now LEFT JOIN)
@@ -187,6 +190,65 @@ succeeded, the remaining 7,010 cached as `confidence='error'`.
   ORCID's daily quota to reset, re-run `00b_enrich_orcid.py` to finish the remaining ~7,010
   searches, then re-run `01→03→04` once more.
 
+## OpenAlex Snapshot Migration (2026-08-08)
+Migrated the OpenAlex data source from an old "Feb26" extract (built from OpenAlex's now
+discontinued gzipped-JSON dumps) to a "Jul26" extract of OpenAlex's own native parquet
+snapshot — a one-time source swap, not a recurring update mechanism. Full detail in git history
+(commit "Migrate to Jul26 OpenAlex snapshot..."); summary here for anyone picking this up later.
+
+**Layout change**: Jul26 splits fact tables from dimension tables — `compact/` holds the big
+scan-heavy tables (`works/`, `authorships/`, `work_topics/`, `references/`, `work_abstracts/`,
+`work_sdgs/`); the parent level holds dimension/lookup tables (`authors/`, `institutions.parquet`,
+`sources.parquet`, etc.). `config/settings.py` now has `OPENALEX_DIR` (parent level) and
+`OPENALEX_COMPACT_DIR` (`OPENALEX_DIR / "compact"`) to match.
+
+**Extract reshaped to match Feb26's schema**, rather than rewriting downstream query logic —
+since the extraction/conversion process is under the user's own control, three adjustments were
+requested and confirmed present (verified against real rows, 0 nulls) before any pipeline code
+changed:
+1. `authorships` keeps `author_name` and gained `institution_name` (both denormalized inline,
+   as Feb26 had them — Jul26's native shape dropped both).
+2. `work_topics` denormalized from Jul26's native nested `LIST<STRUCT(topic_idx, score)>` (no
+   names) back to Feb26's flat one-row-per-(work,topic) shape with `subfield_idx/name,
+   field_idx/name, domain_idx/name` inline.
+3. `works` needed no change — already compatible.
+
+**Explicitly not changed**: `authors.author_idx` (integer) stays the primary key, not reverted
+to a string `id` column — deliberate design on the new snapshot for speed/compactness. Code that
+used to join ARC-side `oax_id` (a `"https://openalex.org/A<digits>"` string, used throughout
+`arc_oax_resolved.parquet`/`manual_resolutions.csv`/anywhere a human reads or pastes an OpenAlex
+URL) against the old `authors.id` string column now converts to `author_idx` first and filters on
+that native column — `src/02_prepare_oax.py` (`au.author_idx = sf.author_idx`) and
+`src/04_resolve_links.py` (two `works_count` lookups). **The string form is correct and
+necessary at the human-facing/output boundary (`oax_id` in `arc_oax_resolved.parquet` etc.) —
+only internal joins against the raw `authors` table needed to switch to `author_idx`.**
+
+**Performance gotcha, caught during verification**: the first attempt at the `04_resolve_links.py`
+fix filtered on the nested `ids.openalex` struct field (still holds the string form) instead of
+converting to `author_idx` — cost a **30x slowdown** (44m44s vs the expected ~1m30s for a full
+`04_resolve_links.py` run) at real pipeline scale (102,006 candidate IDs), apparently because
+filtering on a field nested inside a STRUCT defeats DuckDB's predicate pushdown in a way a flat
+integer column doesn't. Fixed by converting `oax_id` strings to `author_idx` integers before the
+`WHERE ... IN (...)` filter, matching the pattern already used elsewhere in the codebase — this
+dropped the run back to 1m28s. **Lesson for next time**: always filter/join raw OpenAlex tables
+on `author_idx`/`work_idx`/`topic_idx` (native surrogate keys), never on a string field reached
+through a struct, even when it's technically correct — nest-field filtering appears to scale very
+badly in DuckDB's parquet reader.
+
+**`SQL.md`** had three fully hardcoded Feb26 paths (the one place in the repo where an OpenAlex
+path lived outside `.env`/`config/settings.py`) — used to manually regenerate
+`works_intermediate_hep.parquet` → `authorships_hep.parquet` / `works_hep.parquet`, the
+HEP-institution-prefiltered intermediates `src/02_prepare_oax.py` depends on (see
+`AUTHORSHIPS_HEP.md`). Updated and re-run against Jul26.
+
+**End-to-end verification**: full `00→01→03→04` pipeline rerun holds at 98.4% resolved
+(22,675/23,049), matching the pre-migration baseline despite the OAX author pool growing from
+2.49M to 2.78M authors. `analysis/01_fetch_oeuvres.py --full` and `02_accuracy_check.py --full`
+also verified (see "Analysis Pipeline Status" below) — no data-quality regression detected.
+Confirmed via full diff review that none of the 9 migration-touched files added any
+role/scheme/fellowship filtering — the migration is scope-neutral, it doesn't carve out or
+exclude any cohort (DECRA, APF, CI, or otherwise).
+
 ## Early-Career Fellowship Cohort Review (2026-08-08)
 Corrected the role-code scope for "early career fellowship" analysis (e.g. the ECR/DECRA
 "prompt paper" study) and manually reviewed every unlinked case in scope at the time.
@@ -270,6 +332,31 @@ Output columns in `arc_persons.parquet`:
 - `analysis/03_annual_metrics.py` ✓ — annual_metrics 544,627 rows/22,586 persons; collab_metrics 4,915,067 rows/22,250 persons
 - `analysis/06_analyse_fellowships.py` — plot 2 updated: median of active publishers (not mean+zeros); DECRA bug fixed (role_code `DECRA` not `DE`); award_year >= 2015 filter added to trajectory plot
 
+### 2026-08-08 rerun, post Jul26-snapshot migration
+Re-ran `01_fetch_oeuvres.py --full`, `02_accuracy_check.py --full`, and `03_annual_metrics.py`
+against the new Jul26 OpenAlex data (see "OpenAlex Snapshot Migration" above) to confirm each
+script's path/schema fixes work end-to-end and that data quality held up against the newer,
+larger source.
+- `01_fetch_oeuvres.py` ✓ — 4,263,042 rows, 22,672 persons, 3,149,390 unique works (48s) —
+  comparable scale to the 2026-06-18 baseline (4,236,839 rows / 22,599 persons), as expected
+  given the corrected 23,049-person cohort and the larger Jul26 author pool.
+- `02_accuracy_check.py --full` ✓ (10s) — 0 over/under-coverage flags (unchanged); 116 shared
+  author_idx (was 105 — same expected common-name-collision pattern, e.g. Andrew Martin/Wei
+  Wang/Paul Thomas/Jun Li, not new contamination); 10,920 year flags + 45,679 domain outliers
+  (was 11,604 + 41,835, comparable scale). New in this run: 143,122 duplicate title+year groups
+  written to `title_dupes_full.csv` (a diagnostic not present in the 2026-06-18 run's notes).
+- `03_annual_metrics.py` ✓ (22s) — annual_metrics 546,076 rows/22,625 persons (was 544,627/22,586);
+  collab_metrics 5,116,507 rows/22,288 persons (was 4,915,067/22,250) — comparable scale,
+  confirms the `AUTH_GLOB` → `OPENALEX_COMPACT_DIR` path fix works for the raw authorships scan.
+- `04_au_baseline.py` ✓ (9s) — 3,382,340 AU-affiliated works found; sanity check AU n_pubs
+  86,187→164,835 and WLD n_pubs 8,084,109→11,439,994 (2010→2020) both look sensible in shape
+  and magnitude — full-corpus (non-ARC-filtered) scan of `compact/authorships` + `compact/works`
+  confirms the path fix works at whole-snapshot scale, not just the ARC-filtered joins above.
+- `04b_citation_quantiles.py` ✓ (47s) — 936 (field × year) rows, 26 fields; then re-ran
+  `03_annual_metrics.py` to backfill — `n_highly_cited` now populated for all 546,076 rows
+  (was stale from a 2026-06-15 run against the old Feb26 snapshot).
+- **Conclusion: no data-quality regression from the OpenAlex migration.**
+
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
 
@@ -285,6 +372,15 @@ Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
 - Cross-grant B3 rule: same blocking key + shared co-i + same admin_org → auto-merge (catches Jun Li)
 - Complete 00b run: 7,084 ARC-ORCID records still need fetching (running 2026-06-18; was 11,566)
 - Strengthen reliability_tier: add ARC for_names vs orcid_for_codes agreement signal for HAS_ORCID clusters
+- **Decide on `xpac`/`is_xpac`** (2026-08-08): `/home/lc/m/openalex_jul26/parquet_converted/`
+  has `xpac/` and `xpac_raw/` directories alongside `compact/`, mirroring the same table set
+  (authorships, references, work_abstracts, works, work_sdgs, work_topics) — **not currently
+  read by anything in this codebase** (`analysis/01_fetch_oeuvres.py` and everything else only
+  reads `OPENALEX_COMPACT_DIR`). Row counts differ meaningfully (`compact/works` 317.8M vs
+  `xpac/works` 192.6M — not a duplicate), and `xpac/work_topics` was modified *after*
+  `compact/work_topics` on the same day, suggesting it may be a newer or still-in-progress
+  extraction batch. Needs a decision: merge into `compact/`, read alongside it, or leave
+  untouched — deferred, revisit before treating any future oeuvres fetch as complete/final.
 
 ## Manual Resolution Techniques (Not Yet Automated in Pipeline)
 
