@@ -25,8 +25,8 @@ The Splink pipeline replaces the entire old multi-layer pipeline in `src_archive
 - **`data_persisted/`** (repo root, git-tracked): every file that represents costly manual
   work or a hard-to-reacquire external source — hand-curated matching/override CSVs
   (`manual_resolutions.csv`, `manual_splits.csv`, `manual_splits_hand_counts.csv`,
-  `manual_orcids.csv`, `manual_merges.csv`, `enrichment_blocklist.csv`, `for_concordance.csv`,
-  `for_divisions.csv`, `for_adjacent_divisions.csv`) plus the ANZSRC/Scopus/OpenAlex/ERA source
+  `manual_orcids.csv`, `manual_merges.csv`, `manual_name_corrections.csv`, `enrichment_blocklist.csv`,
+  `for_concordance.csv`, `for_divisions.csv`, `for_adjacent_divisions.csv`) plus the ANZSRC/Scopus/OpenAlex/ERA source
   `.xlsx` reference files. Previously split across `config/*.csv` (some git-tracked but
   unlabelled as precious) and `data/*.xlsx` (entirely gitignored, i.e. genuinely unrecoverable
   from a fresh clone) — consolidated 2026-08-07 so nothing irreplaceable can silently fall
@@ -325,6 +325,52 @@ Output columns in `arc_persons.parquet`:
 
 **data_persisted/manual_merges.csv** — 11 entries (same-grant nickname pairs + cross-grant confirmed same-person)
 **data_persisted/enrichment_blocklist.csv** — 2 entries: LP0220171_JNichols, DP0452211_RobertMarks
+
+## `AwardsCIF()` rebuild (2026-08-11, in progress)
+`src/utils/awards_cif.py` — a dataclass-first rebuild of the above design, not a wrapper around it.
+`AwardCIFItem`/`AwardsCIF` dataclasses defined first; the ten Phase-2 steps above are reimplemented
+as functions taking/returning `list[AwardsCIF]` (`merge_by_orcid`, `split_orcid_conflicts`,
+`split_multi_name_clusters`, `apply_manual_splits`, `apply_enriched_orcids`, `promote_low_by_for`,
+`apply_manual_orcids`, `merge_persons_by_orcid`, `apply_manual_merges`,
+`merge_same_grant_coinvestigators`, composed by `refine_clusters()`), same validated logic and step
+order, new representation. Splink itself (both the ARC-internal `dedupe_only` run and, later, the
+ARC↔OAX `link_only` run) is reused unchanged as a tool — only the surrounding pandas architecture is
+being rebuilt. Full design and rationale: `/home/lc/.claude/plans/review-this-code-base-groovy-key.md`.
+
+Built and verified so far: `load_award_cif_items()` (65,087 items, exact match), `cluster_items()`
+(22,962 provisional clusters via Splink `dedupe_only`), `refine_clusters()` (23,056 final clusters —
+exact match to the `arc_persons.parquet` baseline above; 63.9% ORCID coverage, matching the 64.0%
+enrichment baseline within normal rerun drift). Not yet built: `populate_oax_candidates()`,
+`compute_reliability()`, tests, full-cohort diff against `arc_persons.parquet`.
+
+**data_persisted/manual_name_corrections.csv** — new file, same hand-curated-override convention as
+`manual_orcids.csv`/`manual_merges.csv`, keyed on `unique_id` (item-level, applied before
+clustering) rather than `cluster_id`. Two confirmed ARC-source typos so far, both found via the same
+pattern (a minority name-form disagreeing with an otherwise-unanimous majority, confirmed directly
+against `raw_json.csv`'s `investigators-at-announcement` vs `investigators-current` fields for the
+one grant where the disagreement lives, not guessed): `LP0211975_MarieMalherbe` (→ François,
+ORCID 0000-0001-6127-4169) and `DP0451513_MartinNakata` (→ Nicholas, ORCID 0000-0002-0979-8253).
+**Explicitly not the fix for every name-variant found this way** — a broader scan (147 candidate
+ORCIDs with incompatible name forms under the same family name) turned out to be overwhelmingly
+genuine variation (married/maiden names, hyphenation, nicknames, compound-name field-order
+inconsistency — e.g. Trevor→David Waite is a real, ARC-confirmed name change spanning a whole career,
+not a typo) that `AwardsCIF.full_names`/`first_names` already retain correctly as sets — no
+single-field correction needed or wanted for those. Only genuine, single-record, ARC-self-corrected
+typos belong in this file.
+
+**Two real gaps found while investigating `populate_oax_candidates()` (unresolved, see the plan file
+for full detail)**: (1) `04_resolve_links.py`'s `secondary_oax_ids` is hardcoded to `[]` for any
+`arc_id` resolved via `unique_hc` (the single largest resolution bucket), regardless of what else
+scored 0.5–0.89 in `arc_oax_links.parquet` for that same person — quantified at 2,174/7,960 (27%)
+`unique_hc` persons having at least one such hidden candidate, 5,901 hidden pairs total. Whether
+these are mostly genuine or mostly noise needs OpenAlex-side characterization, not yet done.
+(2) Both `01_prepare_arc.py` and `03_link_arc_oax.py` block on a single reduced `first_initial`
+value even when a cluster's own evidence contains a full given name — and first-initial preservation
+across genuine nicknames is close to a coin flip (Michael/Mike preserves it, William/Bill and
+Anthony/Tony and Elizabeth/Libby do not), so a real nickname match lacking a shared ORCID can be
+structurally unreachable by blocking, never merely filtered by scoring. Proposed fix (not built):
+an additional, tighter blocking rule on the fuller given-name form when available, alongside (not
+replacing) the existing `first_initial` fallback.
 
 ## Analysis Pipeline Status (2026-06-18)
 - `analysis/01_fetch_oeuvres.py` ✓ — 4,236,839 rows, 22,599 persons
