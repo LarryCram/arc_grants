@@ -9,9 +9,17 @@ Validates:
   - n_pubs counts distinct works per year (new publications only)
   - cumulative n_works grows over time
   - career_age_at_year = year - first_pub_year
+
+The dedup/exclusion step used to build `deduped_works` is NOT re-implemented here --
+it calls the real analysis.utils.dedup.create_deduped_works(), the same function
+03_annual_metrics.py itself calls, so these tests exercise the actual production code
+path rather than a hand-copied SQL string that can silently drift out of sync with it
+(see analysis/tests/test_dedup.py for dedup/exclusion-specific tests).
 """
 
 import pytest
+
+from analysis.utils.dedup import create_deduped_works
 
 H_INDEX_SQL = """
 MAX(rk) FILTER (WHERE cited_by_count >= rk)
@@ -24,40 +32,8 @@ CUMUL_SQL = """
 WITH years AS (
     SELECT generate_series AS year FROM generate_series(2000, 2024)
 ),
-base AS (
-    SELECT DISTINCT arc_id, work_idx, publication_year, cited_by_count, field_name, type, title
-    FROM oeuvres
-    WHERE publication_year BETWEEN 1950 AND 2026
-),
-title_ranked AS (
-    SELECT arc_id, work_idx, cited_by_count, field_name,
-           MIN(publication_year) OVER (
-               PARTITION BY arc_id,
-                   CASE WHEN title IS NOT NULL AND length(title) >= 20
-                        THEN lower(regexp_replace(title, '[^a-zA-Z0-9]', '', 'g'))
-                        ELSE CAST(work_idx AS VARCHAR)
-                   END
-           ) AS publication_year,
-           ROW_NUMBER() OVER (
-               PARTITION BY arc_id,
-                   CASE WHEN title IS NOT NULL AND length(title) >= 20
-                        THEN lower(regexp_replace(title, '[^a-zA-Z0-9]', '', 'g'))
-                        ELSE CAST(work_idx AS VARCHAR)
-                   END
-               ORDER BY
-                   CASE type WHEN 'article' THEN 1 WHEN 'review' THEN 2
-                             WHEN 'book-chapter' THEN 3 WHEN 'book' THEN 4
-                             WHEN 'preprint' THEN 5 ELSE 6 END ASC,
-                   work_idx ASC
-           ) AS title_rn
-    FROM base
-),
-deduped AS (
-    SELECT arc_id, work_idx, publication_year, cited_by_count, field_name
-    FROM title_ranked WHERE title_rn = 1
-),
 first_pub AS (
-    SELECT arc_id, MIN(publication_year) AS first_pub_year FROM deduped GROUP BY arc_id
+    SELECT arc_id, MIN(publication_year) AS first_pub_year FROM deduped_works GROUP BY arc_id
 ),
 cumul AS (
     SELECT
@@ -66,7 +42,7 @@ cumul AS (
             PARTITION BY w.arc_id, y.year
             ORDER BY w.cited_by_count DESC
         ) AS rk
-    FROM deduped w
+    FROM deduped_works w
     CROSS JOIN years y
     WHERE w.publication_year <= y.year
 )
@@ -85,7 +61,7 @@ ORDER BY c.arc_id, c.year
 
 ANNUAL_PUBS_SQL = """
 SELECT arc_id, publication_year AS year, COUNT(DISTINCT work_idx) AS n_pubs
-FROM oeuvres
+FROM deduped_works
 WHERE publication_year BETWEEN 2000 AND 2024
 GROUP BY arc_id, publication_year
 ORDER BY arc_id, year
@@ -135,13 +111,14 @@ def with_oeuvres(con):
         GROUP BY arc_id, work_idx
     )
     SELECT d.arc_id, d.work_idx, d.is_primary_author_id,
-           w.publication_year, w.cited_by_count, w.type, w.title,
-           bt.field_name
+           w.publication_year, w.cited_by_count, w.type, w.title, w.doi,
+           bt.field_name, NULL::VARCHAR AS subfield_name, NULL::VARCHAR AS domain_name
     FROM deduped d
     JOIN works w ON w.work_idx = d.work_idx
     LEFT JOIN ({BEST_TOPIC}) bt ON bt.work_idx = d.work_idx
     """)
 
+    create_deduped_works(con, "oeuvres", "deduped_works")
     con.execute(f"CREATE TABLE metrics AS {CUMUL_SQL}")
     return con
 
@@ -291,57 +268,37 @@ def test_n_pubs_per_year(with_oeuvres):
 
 # ── Title-based deduplication ─────────────────────────────────────────────
 
-TITLE_DEDUP_SQL = """
-WITH base AS (
-    SELECT * FROM (VALUES
-        ('P1', 1, 2022, 5,  'preprint', 'Quantum entanglement revisited in modern physics'),
-        ('P1', 2, 2023, 20, 'article',  'Quantum entanglement revisited in modern physics'),
-        ('P1', 3, 2021, 10, 'article',  'A completely different paper about something else')
-    ) t(arc_id, work_idx, publication_year, cited_by_count, type, title)
-),
-title_ranked AS (
-    SELECT arc_id, work_idx, cited_by_count,
-           MIN(publication_year) OVER (
-               PARTITION BY arc_id,
-                   CASE WHEN title IS NOT NULL AND length(title) >= 20
-                        THEN lower(regexp_replace(title, '[^a-zA-Z0-9]', '', 'g'))
-                        ELSE CAST(work_idx AS VARCHAR)
-                   END
-           ) AS publication_year,
-           ROW_NUMBER() OVER (
-               PARTITION BY arc_id,
-                   CASE WHEN title IS NOT NULL AND length(title) >= 20
-                        THEN lower(regexp_replace(title, '[^a-zA-Z0-9]', '', 'g'))
-                        ELSE CAST(work_idx AS VARCHAR)
-                   END
-               ORDER BY
-                   CASE type WHEN 'article' THEN 1 WHEN 'review' THEN 2
-                             WHEN 'book-chapter' THEN 3 WHEN 'book' THEN 4
-                             WHEN 'preprint' THEN 5 ELSE 6 END ASC,
-                   work_idx ASC
-           ) AS title_rn
-    FROM base
-)
-SELECT arc_id, work_idx, publication_year, cited_by_count
-FROM title_ranked WHERE title_rn = 1
-ORDER BY work_idx
-"""
+# ── Title-based dedup, against the real create_deduped_works() -- see
+# analysis/tests/test_dedup.py for the fuller dedup/exclusion-specific suite. These two
+# stay here since they're the same scenario 03_annual_metrics.py's own docstring/history
+# used as its worked example (preprint+article pair, plus one genuinely different title).
+
+def _title_dedup_fixture(con):
+    con.execute("""
+        CREATE TABLE title_dedup_src AS SELECT * FROM (VALUES
+            ('P1', 1, 2022, 5,  'preprint', 'Quantum entanglement revisited in modern physics', NULL::VARCHAR, NULL::VARCHAR, NULL::VARCHAR, NULL::VARCHAR),
+            ('P1', 2, 2023, 20, 'article',  'Quantum entanglement revisited in modern physics', NULL::VARCHAR, NULL::VARCHAR, NULL::VARCHAR, NULL::VARCHAR),
+            ('P1', 3, 2021, 10, 'article',  'A completely different paper about something else', NULL::VARCHAR, NULL::VARCHAR, NULL::VARCHAR, NULL::VARCHAR)
+        ) t(arc_id, work_idx, publication_year, cited_by_count, type, title, field_name, subfield_name, domain_name, doi)
+    """)
+    create_deduped_works(con, "title_dedup_src", "title_dedup_out")
+    return con.execute("SELECT arc_id, work_idx, publication_year, cited_by_count FROM title_dedup_out ORDER BY work_idx").fetchall()
 
 
-def test_title_dedup_keeps_article_with_earliest_year(con):
-    """Preprint (2022) + article (2023) same title → keep article, year = 2022."""
-    rows = con.execute(TITLE_DEDUP_SQL).fetchall()
-    # 2 rows: deduped quantum paper + different paper
+def test_title_dedup_keeps_article_with_earliest_year_and_summed_citations(con):
+    """Preprint (2022, c=5) + article (2023, c=20) same title → keep article's work_idx,
+    year = 2022 (earliest), citations = 25 (summed, not article-only -- each version's
+    citations are real and additive, see analysis/utils/dedup.py)."""
+    rows = _title_dedup_fixture(con)
     assert len(rows) == 2
-    # quantum paper: article (work_idx=2) kept, but year = 2022 (preprint year)
     quantum = next(r for r in rows if r[1] == 2)
-    assert quantum[2] == 2022   # earliest year
-    assert quantum[3] == 20     # article's citation count
+    assert quantum[2] == 2022
+    assert quantum[3] == 25
 
 
 def test_title_dedup_unique_title_unchanged(con):
     """Paper with unique title is unaffected by title dedup."""
-    rows = con.execute(TITLE_DEDUP_SQL).fetchall()
+    rows = _title_dedup_fixture(con)
     other = next(r for r in rows if r[1] == 3)
     assert other[2] == 2021
     assert other[3] == 10

@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import duckdb
 from config.settings import PROCESSED_DATA, OPENALEX_COMPACT_DIR, OUTPUT_ROOT
+from analysis.utils.dedup import create_deduped_works
 
 ANALYSIS_OUT   = OUTPUT_ROOT / "analysis"
 PERSONS        = str(PROCESSED_DATA / "arc_persons.parquet")
@@ -79,53 +80,13 @@ def main(sample_n=None):
 
     # Deduplicated works — two levels:
     # 1. Exclude implausible years (OAX data errors).
-    # 2. Title-based dedup: same normalised title within one person's oeuvre →
-    #    keep the most recent publication_year (preprint→final), then prefer
+    # 2. Title-based dedup (analysis/utils/dedup.py, shared with dossier_build.py so
+    #    oeuvres.parquet-derived works and annual_metrics.parquet agree on what counts
+    #    as one paper): same normalised title within one person's oeuvre → keep the
+    #    earliest publication_year across versions (preprint→final), then prefer
     #    article > review > book-chapter > book > preprint, then lowest work_idx.
-    #    Titles < 20 chars are not deduplicated (too short to be distinctive).
-    con.execute(f"""
-    CREATE TABLE deduped_works AS
-    WITH base AS (
-        SELECT DISTINCT
-            arc_id, work_idx, publication_year, cited_by_count,
-            type, field_name, subfield_name, domain_name, title
-        FROM read_parquet('{oeuvres}')
-        WHERE publication_year BETWEEN {MIN_PUB_YEAR} AND {MAX_PUB_YEAR}
-    ),
-    ranked AS (
-        SELECT *,
-            -- earliest year across all versions of this title = when paper was first public
-            MIN(publication_year) OVER (
-                PARTITION BY arc_id,
-                    CASE WHEN title IS NOT NULL AND length(title) >= 20
-                         THEN lower(regexp_replace(title, '[^a-zA-Z0-9]', '', 'g'))
-                         ELSE CAST(work_idx AS VARCHAR)
-                    END
-            ) AS first_pub_year_for_title,
-            ROW_NUMBER() OVER (
-                PARTITION BY arc_id,
-                    CASE WHEN title IS NOT NULL AND length(title) >= 20
-                         THEN lower(regexp_replace(title, '[^a-zA-Z0-9]', '', 'g'))
-                         ELSE CAST(work_idx AS VARCHAR)
-                    END
-                ORDER BY
-                    CASE type
-                        WHEN 'article'      THEN 1
-                        WHEN 'review'       THEN 2
-                        WHEN 'book-chapter' THEN 3
-                        WHEN 'book'         THEN 4
-                        WHEN 'preprint'     THEN 5
-                        ELSE                     6
-                    END ASC,
-                    work_idx ASC
-            ) AS title_rn
-        FROM base
-    )
-    SELECT arc_id, work_idx,
-           first_pub_year_for_title AS publication_year,
-           cited_by_count, type, field_name, subfield_name, domain_name
-    FROM ranked WHERE title_rn = 1
-    """)
+    create_deduped_works(con, f"read_parquet('{oeuvres}')", "deduped_works",
+                          min_year=MIN_PUB_YEAR, max_year=MAX_PUB_YEAR)
     n_base = con.execute("SELECT COUNT(*) FROM deduped_works").fetchone()[0]
     print(f"  deduped_works: {n_base:,} rows after year filter + title dedup")
 
