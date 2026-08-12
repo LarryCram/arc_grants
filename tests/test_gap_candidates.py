@@ -68,16 +68,20 @@ class TestFirstNamesCompatible:
 
 
 # ── _compute_gap_candidates ───────────────────────────────────────────────────
+# Division check now uses real FOR2020 codes resolved to OAX fields (see
+# src/utils/cluster_checks.py's module docstring for why) -- fixtures use real codes/names,
+# not placeholder division labels. "Geology" (3705) and "Geophysics" (3706) both resolve to
+# OAX field "Earth and Planetary Sciences" (same field -- compatible); "Organic chemistry"
+# (3405) resolves to "Chemistry" (different field -- incompatible with either).
+
+def _for2020(code: str, name: str, is_primary: bool = True, confidence: float = 1.0) -> dict:
+    return {"code": code, "name": name, "is_primary": is_primary, "confidence": confidence}
+
 
 def _make_persons(rows: list[dict]) -> pd.DataFrame:
     """Build a minimal persons DataFrame for testing."""
-    defaults = {"for_names": [], "orcids": []}
+    defaults = {"for2020_codes": [], "orcids": []}
     return pd.DataFrame([{**defaults, **r} for r in rows])
-
-
-# Two divisions with no adjacency — any pair spans disconnected divisions.
-DIV_MAP = {"biology": "Life Sciences", "physics": "Physical Sciences"}
-ADJ: set = set()
 
 
 class TestComputeGapCandidates:
@@ -86,20 +90,33 @@ class TestComputeGapCandidates:
             {"cluster_id": "A", "family_names": ["smith"], "first_names": ["john", "j"]},
             {"cluster_id": "B", "family_names": ["smith"], "first_names": ["john", "j"]},
         ])
-        out = _compute_gap_candidates(persons, DIV_MAP, ADJ)
+        out = _compute_gap_candidates(persons)
         assert "B" in out.loc[out["cluster_id"] == "A", "gap_candidates"].iloc[0]
         assert "A" in out.loc[out["cluster_id"] == "B", "gap_candidates"].iloc[0]
 
     def test_division_mismatch_excluded(self):
         persons = _make_persons([
             {"cluster_id": "A", "family_names": ["smith"], "first_names": ["j"],
-             "for_names": ["biology"]},
+             "for2020_codes": [_for2020("3705", "Geology")]},
             {"cluster_id": "B", "family_names": ["smith"], "first_names": ["j"],
-             "for_names": ["physics"]},
+             "for2020_codes": [_for2020("3405", "Organic chemistry")]},
         ])
-        out = _compute_gap_candidates(persons, DIV_MAP, ADJ)
+        out = _compute_gap_candidates(persons)
         assert out.loc[out["cluster_id"] == "A", "gap_candidates"].iloc[0] == []
         assert out.loc[out["cluster_id"] == "B", "gap_candidates"].iloc[0] == []
+
+    def test_same_oax_field_different_for2020_code_compatible(self):
+        # Geology and Geophysics are different FOR2020 codes but the same OAX field
+        # ("Earth and Planetary Sciences") -- not a mismatch.
+        persons = _make_persons([
+            {"cluster_id": "A", "family_names": ["smith"], "first_names": ["j"],
+             "for2020_codes": [_for2020("3705", "Geology")]},
+            {"cluster_id": "B", "family_names": ["smith"], "first_names": ["j"],
+             "for2020_codes": [_for2020("3706", "Geophysics")]},
+        ])
+        out = _compute_gap_candidates(persons)
+        assert "B" in out.loc[out["cluster_id"] == "A", "gap_candidates"].iloc[0]
+        assert "A" in out.loc[out["cluster_id"] == "B", "gap_candidates"].iloc[0]
 
     def test_incompatible_names_not_listed(self):
         # Same surname, different full names with different initials → name_incompat fires
@@ -107,7 +124,7 @@ class TestComputeGapCandidates:
             {"cluster_id": "A", "family_names": ["smith"], "first_names": ["john", "j"]},
             {"cluster_id": "B", "family_names": ["smith"], "first_names": ["mary", "m"]},
         ])
-        out = _compute_gap_candidates(persons, DIV_MAP, ADJ)
+        out = _compute_gap_candidates(persons)
         assert out.loc[out["cluster_id"] == "A", "gap_candidates"].iloc[0] == []
         assert out.loc[out["cluster_id"] == "B", "gap_candidates"].iloc[0] == []
 
@@ -120,7 +137,7 @@ class TestComputeGapCandidates:
             {"cluster_id": "B", "family_names": ["smith"],
              "first_names": ["john", "j"]},
         ])
-        out = _compute_gap_candidates(persons, DIV_MAP, ADJ)
+        out = _compute_gap_candidates(persons)
         assert "B" in out.loc[out["cluster_id"] == "A", "gap_candidates"].iloc[0]
         assert "A" in out.loc[out["cluster_id"] == "B", "gap_candidates"].iloc[0]
 
@@ -131,7 +148,7 @@ class TestComputeGapCandidates:
             {"cluster_id": "B", "family_names": ["smith"], "first_names": ["j"],
              "orcids": ["0000-0002-0000-0002"]},
         ])
-        out = _compute_gap_candidates(persons, DIV_MAP, ADJ)
+        out = _compute_gap_candidates(persons)
         assert out.loc[out["cluster_id"] == "A", "gap_candidates"].iloc[0] == []
 
     def test_three_clusters_partial_compatibility(self):
@@ -143,7 +160,7 @@ class TestComputeGapCandidates:
             {"cluster_id": "B", "family_names": ["smith"], "first_names": ["j"]},
             {"cluster_id": "C", "family_names": ["smith"], "first_names": ["mary", "m"]},
         ])
-        out = _compute_gap_candidates(persons, DIV_MAP, ADJ)
+        out = _compute_gap_candidates(persons)
         a_cands = out.loc[out["cluster_id"] == "A", "gap_candidates"].iloc[0]
         b_cands = out.loc[out["cluster_id"] == "B", "gap_candidates"].iloc[0]
         c_cands = out.loc[out["cluster_id"] == "C", "gap_candidates"].iloc[0]
@@ -155,5 +172,5 @@ class TestComputeGapCandidates:
         persons = _make_persons([
             {"cluster_id": "A", "family_names": ["jones"], "first_names": ["alice", "a"]},
         ])
-        out = _compute_gap_candidates(persons, DIV_MAP, ADJ)
+        out = _compute_gap_candidates(persons)
         assert out.loc[out["cluster_id"] == "A", "gap_candidates"].iloc[0] == []

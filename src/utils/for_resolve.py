@@ -125,3 +125,68 @@ def oax_to_for2020(oax_code: str | int | None) -> str | None:
         return None
     result = _resolve_cached(str(oax_code), "OAX", "FOR2020")
     return result.code if result else None
+
+
+_ARC_TYPE_TO_SCHEME = {"RFCD98": "FOR1998", "FOR08": "FOR2008", "FOR20": "FOR2020"}
+
+
+def resolve_arc_for_entry(code: str | None, arc_type: str | None) -> tuple[str, str, float] | None:
+    """One raw ARC field-of-research entry (raw_json.csv's `data.attributes.field-of-research`
+    list -- {code, name, isPrimary, type}) -> (FOR2020 code, FOR2020 label, confidence).
+
+    ARC's own `type` labels ("RFCD98"/"FOR08"/"FOR20") are NOT the same strings
+    research_classification's Resolver expects ("FOR1998"/"FOR2008"/"FOR2020") -- confirmed
+    directly (not assumed) that RFCD98 (Research Fields, Courses and Disciplines 1998, ARC's
+    own pre-ANZSRC scheme) IS what the package calls FOR1998, by resolving real RFCD98-typed
+    codes through it and getting sensible FOR2020 matches back. Returns None for an
+    unrecognised `type` or an unmappable code -- ARC's raw data has ~76 grants (of ~33.6k) with
+    no field-of-research block at all, and RFCD98/FOR08 codes occasionally have no live
+    FOR2020 crosswalk entry.
+
+    Codes can be 4-digit (group) or 6-digit (field) at any vintage -- ARC's own data always
+    carries exactly one 4-digit code per grant plus 0-15 additional 6-digit codes (confirmed by
+    scanning the full raw corpus), so callers should not assume a fixed precision. Confidence is
+    1.0 for an exact/official crosswalk match, lower for a lexical/fuzzy bridge (seen as low as
+    0.8 on FOR2008->FOR2020 field-level bridges) -- worth keeping alongside the resolved code
+    rather than discarding, since not all resolutions are equally certain.
+    """
+    if not code or not arc_type:
+        return None
+    scheme = _ARC_TYPE_TO_SCHEME.get(arc_type)
+    if not scheme:
+        return None
+    result = _resolve_cached(code, scheme, "FOR2020")
+    if result is None:
+        return None
+    return (result.code, result.label, result.confidence)
+
+
+def oax_field_name(code: str | None) -> str | None:
+    """FOR2008-or-FOR2020 group code -> OAX FIELD label (one level coarser than
+    oax_subfield_name()'s OAX_SUBFIELD). Used for cross-division coherence checks where
+    ANZSRC's own administrative division boundaries split disciplines that OpenAlex's
+    content-derived field taxonomy groups together -- e.g. ANZSRC puts "Legal systems"
+    (division 48) and "Political science" (division 44) in different divisions, but both
+    resolve to the same OAX field "Social Sciences". Same one-resolve()-call shape as
+    oax_subfield_name().
+    """
+    if not code or len(code) != 4 or not code.isdigit():
+        return None
+    scheme = _for_scheme(code)
+    if not scheme:
+        return None
+    result = _resolve_cached(code, scheme, "OAX_FIELD")
+    return result.label if result else None
+
+
+def oax_to_for_name(oax_code: str | int | None) -> str | None:
+    """OAX domain/field/subfield/topic code or label -> FOR2020 group name (same resolve()
+    call as oax_to_for2020, reading .label instead of .code). Used by
+    src/utils/oeuvre_build.py::apply_subfield_filter() to derive a candidate work's own
+    FOR-division via data_persisted/for_divisions.csv's for_name-keyed lookup, without a
+    second resolve() call.
+    """
+    if not oax_code:
+        return None
+    result = _resolve_cached(str(oax_code), "OAX", "FOR2020")
+    return result.label if result else None

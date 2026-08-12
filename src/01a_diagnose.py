@@ -20,7 +20,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import PROCESSED_DATA
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
-from src.utils.cluster_checks import load_for_divisions, is_suspicious
+from src.utils.cluster_checks import is_suspicious_for2020
 
 PASS = "✓"
 FAIL = "✗"
@@ -68,14 +68,12 @@ def _load() -> tuple:
     tf_df = pd.read_parquet(PROCESSED_DATA / "oax_tf_full_name.parquet")
     tf_lookup = dict(zip(tf_df["full_name_key"], tf_df["tf_full_name_key"]))
 
-    div_map, adj = load_for_divisions()
-
-    return persons, gmap, inv_f, prep, tf_lookup, div_map, adj
+    return persons, gmap, inv_f, prep, tf_lookup
 
 
 # ── A: false positives ─────────────────────────────────────────────────────────
 
-def check_A(persons, gmap, inv_f, prep, tf_lookup, div_map, adj) -> int:
+def check_A(persons, gmap, inv_f, prep, tf_lookup) -> int:
     _header("[A] FALSE POSITIVES — distinct people merged into one cluster")
     failures = 0
 
@@ -93,13 +91,13 @@ def check_A(persons, gmap, inv_f, prep, tf_lookup, div_map, adj) -> int:
         failures += len(unres)
         _show_clusters(unres)
 
-    # A3: is_suspicious across ALL clusters (must agree with A2)
+    # A3: is_suspicious_for2020 across ALL clusters (must agree with A2)
     suspect = persons[persons.apply(
-        lambda r: is_suspicious(r, div_map, adj, tf_lookup), axis=1
+        lambda r: is_suspicious_for2020(r["orcids"], r["full_name_key"], r["for2020_codes"], tf_lookup), axis=1
     )]
     icon = FAIL if len(suspect) else PASS
     # MULTI_ORCID clusters are UNRESOLVED (A1) but not is_suspicious (has ORCIDs → bails)
-    print(f"  {icon}  A3  is_suspicious (all clusters, excl MULTI_ORCID): {len(suspect)}")
+    print(f"  {icon}  A3  is_suspicious_for2020 (all clusters, excl MULTI_ORCID): {len(suspect)}")
     if len(suspect):
         _show_clusters(suspect)
     failures += len(suspect)
@@ -299,10 +297,10 @@ def main() -> None:
     print("=== 01a: arc_persons quality diagnostics ===")
     print(f"    Loading from {PROCESSED_DATA}")
 
-    persons, gmap, inv_f, prep, tf_lookup, div_map, adj = _load()
+    persons, gmap, inv_f, prep, tf_lookup = _load()
     print(f"    {len(persons)} clusters  |  {len(gmap)} grant→cluster mappings")
 
-    fa = check_A(persons, gmap, inv_f, prep, tf_lookup, div_map, adj)
+    fa = check_A(persons, gmap, inv_f, prep, tf_lookup)
     fb = check_B(persons, gmap, inv_f, prep)
     fc = check_C(persons, gmap, inv_f)
 

@@ -17,8 +17,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.utils.for_resolve import (
+    oax_field_name,
     oax_subfield_name,
     oax_to_for2020,
+    oax_to_for_name,
+    resolve_arc_for_entry,
     upgrade_for_code,
     upgrade_for_name,
 )
@@ -111,6 +114,30 @@ class TestOaxSubfieldName:
 
 
 # ---------------------------------------------------------------------------
+# oax_field_name — one level coarser than oax_subfield_name(), used for cross-division
+# coherence checks (2026-08-12) where ANZSRC's own division boundaries split disciplines
+# OpenAlex's own field taxonomy groups together.
+# ---------------------------------------------------------------------------
+
+class TestOaxFieldName:
+    def test_political_science_and_legal_systems_share_a_field(self):
+        # ANZSRC divisions 44 (Human Society) and 48 (Law and Legal Studies) are
+        # administratively distinct, but both resolve to OAX field "Social Sciences".
+        assert oax_field_name("4408") == "Social Sciences"
+        assert oax_field_name("4805") == "Social Sciences"
+
+    def test_ecology_and_forestry_share_a_field(self):
+        assert oax_field_name("3103") == "Agricultural and Biological Sciences"
+        assert oax_field_name("3007") == "Agricultural and Biological Sciences"
+
+    def test_unmappable_returns_none(self):
+        assert oax_field_name("9999") is None
+
+    def test_none_returns_none(self):
+        assert oax_field_name(None) is None
+
+
+# ---------------------------------------------------------------------------
 # oax_to_for2020 — reverse direction, added for future ECR/DECRA analysis use
 # ---------------------------------------------------------------------------
 
@@ -124,3 +151,73 @@ class TestOaxToFor2020:
 
     def test_unmappable_returns_none(self):
         assert oax_to_for2020("not-a-real-oax-code") is None
+
+
+# ---------------------------------------------------------------------------
+# oax_to_for_name — same reverse direction as oax_to_for2020, .label not .code --
+# used by oeuvre_build.py::apply_subfield_filter() to derive a candidate work's own
+# FOR-division via for_divisions.csv's for_name-keyed lookup.
+# ---------------------------------------------------------------------------
+
+class TestOaxToForName:
+    def test_geophysics(self):
+        assert oax_to_for_name("Geophysics") == "Geophysics"
+
+    def test_geochemistry_and_petrology_maps_to_geochemistry_group(self):
+        # "Geochemistry and Petrology" is one OAX subfield but resolves to the
+        # "Geochemistry" FOR2020 group (Petrology has no separate FOR2020 group of its own).
+        assert oax_to_for_name("Geochemistry and Petrology") == "Geochemistry"
+
+    def test_none_returns_none(self):
+        assert oax_to_for_name(None) is None
+
+    def test_unmappable_returns_none(self):
+        assert oax_to_for_name("not-a-real-oax-code") is None
+
+
+# ---------------------------------------------------------------------------
+# resolve_arc_for_entry — ARC's raw field-of-research entry (raw_json.csv) -> FOR2020.
+# ARC's own `type` labels (RFCD98/FOR08/FOR20) are not the scheme names Resolver expects
+# (FOR1998/FOR2008/FOR2020) -- confirmed by resolving real RFCD98/FOR08 codes from the actual
+# ARC corpus and checking the results are sensible, not assumed from the label alone.
+# ---------------------------------------------------------------------------
+
+class TestResolveArcForEntry:
+    def test_for20_passthrough(self):
+        code, name, confidence = resolve_arc_for_entry("3705", "FOR20")
+        assert code == "3705"
+        assert name == "Geology"
+        assert confidence == 1.0
+
+    def test_for08_bridges_to_for2020(self):
+        # real ARC entry: FOR08 "100501 Antennas and Propagation" -> FOR2020 "400601"
+        code, name, confidence = resolve_arc_for_entry("100501", "FOR08")
+        assert code == "400601"
+        assert confidence == 1.0
+
+    def test_rfcd98_bridges_to_for2020(self):
+        # real ARC entry: RFCD98 "270299 Genetics Not Elsewhere Classified"
+        result = resolve_arc_for_entry("270299", "RFCD98")
+        assert result is not None
+        code, name, confidence = result
+        assert code == "310599"
+        assert confidence > 0
+
+    def test_leading_zero_preserved(self):
+        # FOR08 division 02 (Physical Sciences) -- confirmed present in the real ARC corpus
+        # with the leading zero intact; must not be silently dropped by int coercion anywhere
+        # in the resolution path.
+        code, name, confidence = resolve_arc_for_entry("0204", "FOR08")
+        assert name == "Condensed matter physics"
+
+    def test_unrecognised_type_returns_none(self):
+        assert resolve_arc_for_entry("3705", "SOME_OTHER_SCHEME") is None
+
+    def test_none_code_returns_none(self):
+        assert resolve_arc_for_entry(None, "FOR20") is None
+
+    def test_none_type_returns_none(self):
+        assert resolve_arc_for_entry("3705", None) is None
+
+    def test_unmappable_code_returns_none(self):
+        assert resolve_arc_for_entry("9999", "FOR20") is None

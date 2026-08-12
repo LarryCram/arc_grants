@@ -37,10 +37,20 @@ from splink import DuckDBAPI, Linker, SettingsCreator, block_on
 import splink.comparison_library as cl
 import splink.comparison_level_library as cll
 
-from config.settings import PROCESSED_DATA, ADMIN_ORGS_CSV, GRANT_SUMMARIES_CSV, DISKCACHE_DIR
+from config.settings import PROCESSED_DATA, ADMIN_ORGS_CSV, GRANT_SUMMARIES_CSV, ARC_GRANTS_CSV, DISKCACHE_DIR, OAX_AUTHORS, TOP_CUT
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
 from src.utils.names import make_expanded_for_tokens, name_part_tokens, strip_diacriticals, for_name_tokens
-from src.utils.for_resolve import upgrade_for_code, upgrade_for_name
+from src.utils.for_resolve import upgrade_for_code, upgrade_for_name, resolve_arc_for_entry
+from src.utils.cluster_checks import (
+    first_names_compatible,
+    RARE_NAME_TF as _CLUSTER_CHECKS_RARE_NAME_TF,
+    for2020_primary_fields as _for2020_primary_fields,
+    division_mismatch_for2020 as _self_division_mismatch,
+    division_mismatch_for2020_pairwise as _pairwise_division_mismatch,
+    is_suspicious_for2020,
+    aggregate_for2020_codes,
+    INDIGENOUS_DIVISION_PREFIX,
+)
 
 _DATA_PERSISTED = Path(__file__).resolve().parents[2] / "data_persisted"
 _FOR_CONCORDANCE_CSV = _DATA_PERSISTED / "for_concordance.csv"
@@ -49,8 +59,13 @@ _MANUAL_SPLITS_CSV = _DATA_PERSISTED / "manual_splits.csv"
 _MANUAL_ORCIDS_CSV = _DATA_PERSISTED / "manual_orcids.csv"
 _MANUAL_MERGES_CSV = _DATA_PERSISTED / "manual_merges.csv"
 _ENRICHMENT_BLOCKLIST_CSV = _DATA_PERSISTED / "enrichment_blocklist.csv"
+_MANUAL_RESOLUTIONS_CSV = _DATA_PERSISTED / "manual_resolutions.csv"
 
 CLUSTER_THRESHOLD = 0.9  # same value as 01_prepare_arc.py -- high precision, prefer splitting over merging
+RARE_NAME_TF = 2e-6  # OAX full_name_key TF below this -> rare name (tier 2 vs 3). Distinct from
+                      # cluster_checks.RARE_NAME_TF (5e-5), which governs is_suspicious()'s own
+                      # rare-name carve-out -- same constant name, same value as 01_prepare_arc.py,
+                      # different meaning/module than cluster_checks's.
 
 
 @dataclass(frozen=True)
@@ -74,7 +89,10 @@ class AwardCIFItem:
     institution_oax_id: str | None
     funding_commence_year: int | None
     for_name: str | None  # ANZSRC name for this grant, upgraded to 2020 series
-    for_code: str | None  # ANZSRC code for this grant, upgraded to 2020 series
+    for_code: str | None  # ANZSRC code for this grant, upgraded to 2020 series -- primary only,
+                          # sourced from grant_summaries.csv, kept unchanged for backward
+                          # compatibility with existing for_names/for_codes aggregation. See
+                          # for2020_codes below for the fuller replacement.
 
     # derived, normalized forms (mirrors 01_prepare_arc.py's arc_name_arrays()/_prep())
     full_name: str
@@ -85,6 +103,49 @@ class AwardCIFItem:
     first_name_canonical: str | None = None
     full_name_key: str | None = None
     for_name_tokens: list[str] = field(default_factory=list)
+
+    # Full per-grant FOR2020 code list (2026-08-12) -- every field-of-research entry ARC
+    # recorded for this grant (raw_json.csv, not just grant_summaries.csv's single primary),
+    # each resolved to a FOR2020 4-digit group via for_resolve.resolve_arc_for_entry() +
+    # truncation (see load_grant_for2020_codes()'s docstring). One dict per entry:
+    # {"code": "3705", "name": "Geology", "is_primary": True, "confidence": 1.0}, ordered
+    # primary-first then alphabetically. Empty list if this grant has no field-of-research
+    # block in raw_json.csv (~76/33,650 grants) or nothing resolved.
+    for2020_codes: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class CandidateWork:
+    """One OpenAlex work reached by ANY of an AwardsCIF's oax_candidates -- the atomic unit
+    src/utils/oeuvre_build.py operates on (roadmap step 2). `included`/`exclusion_reason`/
+    `signals` are set by oeuvre_build.py's pipeline stages, never by anything in this module --
+    this dataclass only defines the shape. `signals` holds actual recorded values (e.g.
+    signals["subfield_match"] = True), never a bare verdict alone -- matching the project's
+    "provenance with actual values, not just a category label" principle."""
+
+    work_idx: int
+    source_author_idxs: list[int] = field(default_factory=list)  # which of this AwardsCIF's own
+                                                                    # oax_candidates claim this work
+
+    publication_year: int | None = None
+    cited_by_count: int = 0
+    type: str | None = None
+    title: str | None = None
+    doi: str | None = None
+    source_id: int | None = None  # works.source_id -- venue/host record
+
+    subfield_idx: int | None = None  # best topic per work_idx (ROW_NUMBER() over score DESC,
+    subfield_name: str | None = None  # same pattern 01_fetch_oeuvres.py already uses)
+    field_name: str | None = None
+    domain_name: str | None = None
+
+    coauthor_author_idxs: list[int] = field(default_factory=list)
+    coauthor_names: list[str] = field(default_factory=list)
+    coauthor_institution_idxs: list[int] = field(default_factory=list)
+
+    included: bool = True
+    exclusion_reason: str | None = None  # set when included=False
+    signals: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -110,6 +171,15 @@ class AwardsCIF:
     for_codes: list[str] = field(default_factory=list)
     full_name_key: str | None = None  # modal full_name_key across items
 
+    # Full FOR2020 code list (2026-08-12), unioned across items' for2020_codes -- see
+    # AwardCIFItem.for2020_codes and load_grant_for2020_codes() for provenance. Deduped by
+    # code across the person's whole grant history: is_primary True if primary on >=1 grant,
+    # confidence = max seen. Ordered by weight = number of this person's grants where the code
+    # was primary (descending), then number of grants where it appeared at all (descending),
+    # then alphabetically by name -- a natural person-level extension of the per-grant
+    # primary-first-then-alpha ordering, not something ARC's data states directly.
+    for2020_codes: list[dict] = field(default_factory=list)
+
     grant_ids: list[str] = field(default_factory=list)  # = [item.unique_id for item in items]
     n_grants: int = 0
 
@@ -122,6 +192,20 @@ class AwardsCIF:
     # candidate OpenAlex author_idx set -- {oax_id} ∪ secondary_oax_ids, populated later
     oax_candidates: list[str] = field(default_factory=list)
 
+    # Set aside by set_aside_indigenous_research() (2026-08-12) -- Indigenous-focused research
+    # (FOR2020 division 45) is culturally important and not well portrayed by the bibliometric
+    # methods this project uses, so it's deliberately excluded from the working population
+    # rather than run through them. excluded_reason holds a short machine string ("indigenous"),
+    # matching CandidateWork.exclusion_reason's convention -- a category label, with the actual
+    # supporting facts (which grants/codes triggered it) in provenance, not just a bare flag.
+    excluded: bool = False
+    excluded_reason: str | None = None
+
+    # union of works reached by any oax_candidate (roadmap step 2, src/utils/oeuvre_build.py) --
+    # one list, not a separate included/excluded pair, so an included work's own signals stay
+    # just as inspectable as an excluded one's (mirrors items: self-contained atomic detail).
+    oeuvre: list[CandidateWork] = field(default_factory=list)
+
     # renamed from cluster_history; same JSON-event-log shape and existing event types
     # (splink_cluster, orcid_merge, manual_split, ...) -- ARC-side identity events only
     # in this pass; oeuvre-level exclusion provenance is appended by later work-set
@@ -133,6 +217,12 @@ class AwardsCIF:
         should call this rather than appending to `provenance` directly, so event shape
         stays consistent."""
         self.provenance.append({"event": event, **details})
+
+    @property
+    def works(self) -> list[CandidateWork]:
+        """Only the still-included works -- oeuvre keeps every candidate work, included or not,
+        for audit; most callers want this filtered view."""
+        return [w for w in self.oeuvre if w.included]
 
 
 # ── construction: load_award_cif_items ──────────────────────────────────────────
@@ -192,6 +282,80 @@ def _load_manual_name_corrections() -> dict[str, dict]:
     return corrections
 
 
+
+def load_grant_for2020_codes() -> dict[str, list[dict]]:
+    """grant_code -> ordered list of {code, name, is_primary, confidence} -- every ARC
+    field-of-research entry for that grant (raw_json.csv's
+    data.attributes.field-of-research list: {code, name, isPrimary, type}), each resolved to
+    FOR2020 via for_resolve.resolve_arc_for_entry() and truncated to 4-digit GROUP precision.
+
+    Truncation is safe, not approximate: ANZSRC codes are hierarchically prefixed, so a 6-digit
+    field code's first 4 digits ARE its parent group code by construction -- verified directly
+    against the package's own for2020_group_openalex_subfield.csv (every truncated code checked
+    is a real listed group), not assumed. ARC's own raw data always carries exactly one 4-digit
+    code per grant plus 0-15 additional 6-digit codes (confirmed by scanning the full 33,650-row
+    corpus), so this collapses everything to one consistent precision rather than leaving mixed
+    4-/6-digit codes for callers to handle.
+
+    Codes stay strings throughout -- never cast to int -- since ~44k of the raw entries (mostly
+    FOR2008/RFCD98-vintage, division 01-09) have a leading zero int() would silently drop
+    (confirmed present in the real data, not a hypothetical risk).
+
+    ARC's raw `type` field is one of RFCD98 (pre-ANZSRC, ARC's own name for what
+    research_classification calls FOR1998 -- confirmed by resolving real RFCD98 codes through
+    it and getting sensible FOR2020 matches, not assumed from the label alone), FOR08, or FOR20
+    -- resolve_arc_for_entry() handles the ARC-label -> package-scheme translation.
+
+    Deduped by resolved 4-digit code within a grant (is_primary = True if ANY matching raw entry
+    was primary; confidence = max seen). Ordered is_primary first, then alphabetically by name --
+    ARC's raw data carries no numeric weight field for multi-FOR grants (checked directly), so
+    isPrimary is the only ordering signal available.
+
+    Scoped to KEEP_SCHEMES before any resolution work (2026-08-13) -- raw_json.csv covers every
+    ARC scheme ever run (33,650 grants), most of which this project never uses at all (e.g. "LE"
+    Linkage-Equipment grants, which fund shared lab equipment serving a whole department and so
+    carry unusually broad FOR-code spreads that have nothing to do with any one CI's own
+    research identity -- confirmed directly on the single largest example found, 16 codes on one
+    LE grant). Resolving and inspecting out-of-scope grants wastes work and, worse, risks
+    polluting exactly this kind of diagnostic with irrelevant outliers -- scope first, then look.
+    """
+    df = pd.read_csv(ARC_GRANTS_CSV)
+    out: dict[str, dict[str, dict]] = defaultdict(dict)  # grant_code -> {code4: entry}
+
+    for _, row in df.iterrows():
+        try:
+            rec = json.loads(row["single_grant"])
+        except (TypeError, ValueError):
+            continue
+        grant_code = rec.get("data", {}).get("id")
+        if not grant_code or grant_code[:2] not in KEEP_SCHEMES:
+            continue
+        fors = rec.get("data", {}).get("attributes", {}).get("field-of-research") or []
+
+        for f in fors:
+            resolved = resolve_arc_for_entry(f.get("code"), f.get("type"))
+            if resolved is None:
+                continue
+            code20, name, confidence = resolved
+            code4 = code20[:4]
+            is_primary = bool(f.get("isPrimary"))
+
+            existing = out[grant_code].get(code4)
+            if existing is None:
+                out[grant_code][code4] = {
+                    "code": code4, "name": name,
+                    "is_primary": is_primary, "confidence": confidence,
+                }
+            else:
+                existing["is_primary"] = existing["is_primary"] or is_primary
+                existing["confidence"] = max(existing["confidence"], confidence)
+
+    return {
+        grant_code: sorted(entries.values(), key=lambda e: (not e["is_primary"], e["name"].lower()))
+        for grant_code, entries in out.items()
+    }
+
+
 def load_award_cif_items(
     con: duckdb.DuckDBPyConnection | None = None,
 ) -> tuple[list[AwardCIFItem], dict[str, dict]]:
@@ -244,6 +408,7 @@ def load_award_cif_items(
             con.close()
 
     expanded_for_tokens = make_expanded_for_tokens(str(_FOR_CONCORDANCE_CSV))
+    grant_for2020_codes = load_grant_for2020_codes()
 
     items: list[AwardCIFItem] = []
     for row in rows:
@@ -279,6 +444,7 @@ def load_award_cif_items(
             funding_commence_year=r["funding_commence_year"],
             for_name=for_name,
             for_code=for_code,
+            for2020_codes=grant_for2020_codes.get(r["grant_code"], []),
             full_name=f"{first_name} {r['family_name']}",
             first_names=first_names,
             family_names=family_names,
@@ -293,6 +459,13 @@ def load_award_cif_items(
 
 
 # ── construction: cluster_items ─────────────────────────────────────────────────
+
+def _aggregate_for2020_codes(items: list[AwardCIFItem]) -> list[dict]:
+    """Union items' for2020_codes across a person's whole grant history -- thin wrapper over
+    cluster_checks.aggregate_for2020_codes(), shared with 01_prepare_arc.py's own pandas-side
+    aggregation so the two pipelines can't drift apart. See that function's docstring."""
+    return aggregate_for2020_codes(it.for2020_codes for it in items)
+
 
 def _build_awards_cif(cluster_id: str, items: list[AwardCIFItem]) -> AwardsCIF:
     """Aggregate a group of items into one AwardsCIF -- mirrors 01_prepare_arc.py's
@@ -310,6 +483,7 @@ def _build_awards_cif(cluster_id: str, items: list[AwardCIFItem]) -> AwardsCIF:
         inst_arr=sorted({it.institution_oax_id for it in items if it.institution_oax_id}),
         for_names=sorted({it.for_name for it in items if it.for_name}),
         for_codes=sorted({it.for_code for it in items if it.for_code}),
+        for2020_codes=_aggregate_for2020_codes(items),
         full_name_key=fnk_counts.most_common(1)[0][0] if fnk_counts else None,
         grant_ids=[it.unique_id for it in items],
         n_grants=len(items),
@@ -1077,4 +1251,370 @@ def refine_clusters(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     clusters = merge_persons_by_orcid(clusters)
     clusters = apply_manual_merges(clusters)
     clusters = merge_same_grant_coinvestigators(clusters)
+    return clusters
+
+
+def set_aside_indigenous_research(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
+    """Set aside AwardsCIF whose research is Indigenous-focused (2026-08-12 decision): a
+    person is set aside if ANY of their grants had a FOR2020 division-45 (Indigenous Studies)
+    code as its PRIMARY declared field -- not merely present as a secondary code on an
+    otherwise-differently-focused grant, since AwardsCIF.for2020_codes is already ordered
+    primary-first, checking entries where is_primary=True is a direct, explicit test, not an
+    inferred one.
+
+    Marks AwardsCIF.excluded=True, excluded_reason="indigenous", and records a provenance event
+    with the actual triggering grant/code facts (not just the bare flag) -- but does NOT remove
+    them from the returned list; callers filter on `.excluded` themselves, so an excluded
+    AwardsCIF stays inspectable rather than silently vanishing. Indigenous-focused research is
+    culturally important and not well portrayed by the bibliometric methods this project uses,
+    so it's deliberately kept out of downstream oeuvre-building/scoring rather than run through
+    them -- this is a scope decision about method fit, not a judgement about the research itself.
+    """
+    n_excluded = 0
+    for c in clusters:
+        triggers = [
+            {"grant_code": it.grant_code, "code": e["code"], "name": e["name"]}
+            for it in c.items
+            for e in it.for2020_codes
+            if e["is_primary"] and e["code"].startswith(INDIGENOUS_DIVISION_PREFIX)
+        ]
+        if triggers:
+            c.excluded = True
+            c.excluded_reason = "indigenous"
+            c.record_event("excluded_indigenous_research", triggers=triggers)
+            n_excluded += 1
+
+    print(f"  Set aside {n_excluded} Indigenous-focused AwardsCIF (FOR2020 division 45 as a primary grant code)")
+    return clusters
+
+
+# ── construction: populate_oax_candidates ───────────────────────────────────────
+
+OAX_CANDIDATE_THRESHOLD = 0.5  # = 03_link_arc_oax.py's PREDICT_THRESHOLD -- the floor already
+                                # stored in arc_oax_links.parquet, not a new Splink run.
+
+
+def populate_oax_candidates(
+    clusters: list[AwardsCIF],
+    con: duckdb.DuckDBPyConnection | None = None,
+) -> list[AwardsCIF]:
+    """Populate oax_candidates as one undifferentiated set -- deliberately reading
+    arc_oax_links.parquet (03_link_arc_oax.py's own output, which already retains every
+    candidate pair >= OAX_CANDIDATE_THRESHOLD) directly, NOT arc_oax_resolved.parquet's
+    oax_id/secondary_oax_ids (04_resolve_links.py's output). This is the resolution of the
+    under-inclusion investigation in the plan file: 04's unique_hc path hardcodes
+    secondary_oax_ids to [] regardless of what else scored 0.5-0.89 for that person (confirmed
+    at 27% of the unique_hc bucket, 5,901 hidden pairs) -- reading 03's own output instead
+    closes that gap by construction, without touching 03 or 04 themselves. Every candidate
+    >= threshold is treated as equally possible; no primary/secondary distinction, per the
+    Aim's "set, not a pointer" design. 03/04 themselves are NOT rerun or modified -- this only
+    changes what populate_oax_candidates() reads, consistent with "Splink reused unchanged as
+    a tool." Expected (not yet verified, since the later work-scoring step that would filter
+    candidates down doesn't exist yet): a small increase in total candidates, with most of the
+    previously-correctly-dropped ones still needing to be dropped once that step is built --
+    this is a guess pending that tooling, not a confirmed outcome.
+    """
+    own_con = con is None
+    con = con or duckdb.connect()
+    try:
+        con.execute("SET enable_progress_bar = false")
+        links = con.execute(f"""
+            SELECT arc_id, oax_id
+            FROM read_parquet('{PROCESSED_DATA}/arc_oax_links.parquet')
+            WHERE match_probability >= {OAX_CANDIDATE_THRESHOLD}
+        """).fetchall()
+    finally:
+        if own_con:
+            con.close()
+
+    candidates_by_arc_id: dict[str, list[str]] = defaultdict(list)
+    for arc_id, oax_id in links:
+        candidates_by_arc_id[arc_id].append(oax_id)
+
+    n_matched = 0
+    for c in clusters:
+        found = candidates_by_arc_id.get(c.cluster_id)
+        if found:
+            n_matched += 1
+            c.oax_candidates = sorted(set(found))
+            c.record_event(
+                "oax_candidates_populated",
+                n_candidates=len(c.oax_candidates),
+                threshold=OAX_CANDIDATE_THRESHOLD,
+            )
+
+    return clusters
+
+
+def _load_manual_unlinks() -> dict[str, set[str]]:
+    """arc_id -> set of oax_ids a human has confirmed are NOT this person, from
+    data_persisted/manual_resolutions.csv's "unlink" rows. Pure noise removal -- can only
+    remove a confirmed-wrong candidate, never risks discarding a genuine one, unlike a
+    "resolve" row (see the plan file for why "resolve" is deliberately NOT applied here)."""
+    if not _MANUAL_RESOLUTIONS_CSV.exists():
+        return {}
+    df = pd.read_csv(_MANUAL_RESOLUTIONS_CSV).dropna(subset=["arc_id"])
+    out: dict[str, set[str]] = defaultdict(set)
+    for _, row in df[df["action"] == "unlink"].iterrows():
+        oax_id = row.get("oax_id")
+        if pd.notna(oax_id) and oax_id:
+            out[row["arc_id"]].add(oax_id)
+    return dict(out)
+
+
+def _oax_names_compat(oax_ids: list[str], oax_firstname: dict, oax_familyname: dict) -> bool:
+    """True when every OAX candidate in a group could plausibly be the same person --
+    mirrors 04_resolve_links.py's _oax_names_compat(). Requires identical family_name_main
+    and mutually compatible first names (same 3-char prefix among full names; initials pass
+    through). Guards the split-record dedup below against collapsing genuinely different
+    people who happen to share a topic."""
+    fams = {oax_familyname.get(oid, "") for oid in oax_ids}
+    if len(fams) != 1:
+        return False
+    full_firsts = [oax_firstname.get(oid, "") for oid in oax_ids if len(oax_firstname.get(oid, "")) >= 4]
+    if len(full_firsts) < 2:
+        return True
+    prefix = full_firsts[0][:3]
+    return all(n[:3] == prefix for n in full_firsts[1:])
+
+
+def dedup_oax_candidates(
+    clusters: list[AwardsCIF],
+    con: duckdb.DuckDBPyConnection | None = None,
+) -> list[AwardsCIF]:
+    """Stage-1 cleanup of oax_candidates: pure noise removal, never a choice between distinct
+    real people (see the plan file's "waterfall" design). Two operations, both ported from
+    04_resolve_links.py:
+
+    1. Manual unlink -- remove any candidate a human has directly confirmed is not this
+       person (data_persisted/manual_resolutions.csv). Deliberately NOT applying "resolve"
+       rows here -- see _load_manual_unlinks()'s docstring.
+    2. OAX-side split-record dedup (04's Steps 0/0b) -- when 2+ candidates for one AwardsCIF
+       share an ORCID, or share a specific topic AND are name-compatible, they are almost
+       certainly split records of ONE real OpenAlex author, not competing different people.
+       Collapse to the one holding the dominant share of combined works_count (> TOP_CUT);
+       leave the group untouched if no single record dominates.
+
+    Everything past this point in the existing 04 cascade (name-character filter, ORCID-
+    match-based selection, institution/field-score narrowing, works-count dominance, unique-
+    highest-probability) picks between candidates believed to be different real people --
+    deliberately NOT ported here, deferred to the not-yet-built work-level scoring step.
+    """
+    unlinks = _load_manual_unlinks()
+    for c in clusters:
+        blocked = unlinks.get(c.cluster_id)
+        if blocked and c.oax_candidates:
+            before = set(c.oax_candidates)
+            after = sorted(before - blocked)
+            if after != c.oax_candidates:
+                c.record_event("manual_unlink", removed=sorted(before - set(after)))
+                c.oax_candidates = after
+
+    all_oax_ids = sorted({oid for c in clusters for oid in c.oax_candidates})
+    if not all_oax_ids:
+        return clusters
+
+    own_con = con is None
+    con = con or duckdb.connect()
+    try:
+        con.execute("SET enable_progress_bar = false")
+        con.execute("CREATE OR REPLACE TEMP TABLE _cand_ids AS SELECT UNNEST(?) AS oax_id", [all_oax_ids])
+        rows = con.execute(f"""
+            SELECT o.unique_id, o.orcid, o.topic_names, o.first_name, o.family_name_main
+            FROM read_parquet('{PROCESSED_DATA}/openalex_authors_prep.parquet') o
+            JOIN _cand_ids c ON c.oax_id = o.unique_id
+        """).fetchall()
+        oax_orcid, oax_topics, oax_firstname, oax_familyname = {}, {}, {}, {}
+        for uid, orcid, topics, first_name, family_name_main in rows:
+            oax_orcid[uid] = orcid
+            oax_topics[uid] = list(topics) if topics is not None else []
+            oax_firstname[uid] = (first_name or "").lower().strip()
+            oax_familyname[uid] = (family_name_main or "").lower().strip()
+
+        idx_sql = ", ".join(i.replace("https://openalex.org/A", "") for i in all_oax_ids)
+        wc_rows = con.execute(f"""
+            SELECT author_idx, works_count FROM read_parquet('{OAX_AUTHORS}/*.parquet')
+            WHERE author_idx IN ({idx_sql})
+        """).fetchall()
+        oax_works = {f"https://openalex.org/A{idx}": wc for idx, wc in wc_rows}
+    finally:
+        if own_con:
+            con.close()
+
+    for c in clusters:
+        if len(c.oax_candidates) < 2:
+            continue
+        group = set(c.oax_candidates)
+        removed: set[str] = set()
+
+        orcid_to_ids: dict[str, list[str]] = defaultdict(list)
+        for oid in group:
+            orcid = oax_orcid.get(oid)
+            if orcid:
+                orcid_to_ids[orcid].append(oid)
+        for ids in orcid_to_ids.values():
+            if len(ids) > 1:
+                wcs = {oid: oax_works.get(oid, 0) for oid in ids}
+                total = sum(wcs.values())
+                best = max(wcs, key=wcs.get)
+                if total > 0 and wcs[best] / total > TOP_CUT:
+                    removed.update(oid for oid in ids if oid != best)
+
+        remaining = group - removed
+        topic_to_ids: dict[str, list[str]] = defaultdict(list)
+        for oid in remaining:
+            for t in oax_topics.get(oid, []):
+                topic_to_ids[t].append(oid)
+        orcid_protected = {oid for oid in remaining if oax_orcid.get(oid)}
+        for ids in topic_to_ids.values():
+            if len(ids) > 1 and _oax_names_compat(ids, oax_firstname, oax_familyname):
+                wcs = {oid: oax_works.get(oid, 0) for oid in ids}
+                best = max(wcs, key=wcs.get)
+                removed.update(
+                    oid for oid in ids
+                    if oid != best and oid not in orcid_protected
+                )
+
+        if removed:
+            c.oax_candidates = sorted(group - removed)
+            c.record_event("oax_split_record_dedup", removed=sorted(removed))
+
+    return clusters
+
+
+# ── reliability: compute_reliability ────────────────────────────────────────────
+# Division-mismatch/is_suspicious logic itself now lives in src/utils/cluster_checks.py
+# (for2020_primary_fields, division_mismatch_for2020[_pairwise], is_suspicious_for2020),
+# shared with 01_prepare_arc.py/01a_diagnose.py's production pipeline -- see that module's
+# docstring for the full rationale. Imported above under the names used here.
+
+def compute_orcid_for(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
+    """Populate orcid_for_codes -- ERA FOR codes derived from each cluster's ORCID works, read
+    from for_cache (populated by 00b_enrich_orcid.py). Merges codes across all ORCIDs on a
+    cluster, summing counts. Mirrors 01_prepare_arc.py's _enrich_orcid_for() exactly; not a
+    provenance event -- a data enrichment, not an identity-changing operation, matching the
+    original (which also doesn't touch cluster_history for this step)."""
+    with diskcache.Cache(str(DISKCACHE_DIR / "orcid_for")) as for_cache:
+        for c in clusters:
+            merged: dict[str, dict] = {}
+            for oid in c.orcids:
+                if not oid:
+                    continue
+                for entry in for_cache.get(oid, []):
+                    code = entry["code"]
+                    if code not in merged:
+                        merged[code] = {"code": code, "name": entry["name"], "count": 0}
+                    merged[code]["count"] += entry["count"]
+            c.orcid_for_codes = sorted(merged.values(), key=lambda x: -x["count"])
+
+    n_with_for = sum(1 for c in clusters if c.orcid_for_codes)
+    print(f"  orcid_for_codes: {n_with_for} clusters with >=1 ERA FOR code")
+    return clusters
+
+
+def compute_gap_candidates(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
+    """Populate gap_candidates -- other cluster_ids sharing the same (longest) family name that
+    cannot be ruled out as the same person. Mirrors 01_prepare_arc.py's _compute_gap_candidates():
+    pairwise within each family-name group, incompatible on any of name / FOR-division / ORCID ->
+    kept separate; otherwise both sides record each other as a gap candidate.
+
+    Feeds compute_reliability()'s tier 4 vs 4u distinction -- must run first.
+
+    Division check (2026-08-12): uses for2020_codes' numeric divisions via
+    _pairwise_division_mismatch(), not the old for_names + for_divisions.csv route -- see that
+    function's docstring for why (no adjacency tolerance, stricter than before)."""
+
+    def _fnm(family_names):
+        return max(family_names, key=len) if family_names else None
+
+    by_fnm: dict[str, list[AwardsCIF]] = defaultdict(list)
+    for c in clusters:
+        fnm = _fnm(c.family_names)
+        if fnm:
+            by_fnm[fnm].append(c)
+
+    gap: dict[str, list[str]] = {c.cluster_id: [] for c in clusters}
+    n_compat = n_incompat = 0
+    for fnm, grp in by_fnm.items():
+        if len(grp) < 2:
+            continue
+        for i, c1 in enumerate(grp):
+            for c2 in grp[i + 1:]:
+                name_incompat = (
+                    not first_names_compatible(c1.first_names, c2.first_names) or
+                    not first_names_compatible(c2.first_names, c1.first_names)
+                )
+                div_incompat = _pairwise_division_mismatch(c1.for2020_codes, c2.for2020_codes)
+                orcid_incompat = (
+                    len(c1.orcids) > 0 and len(c2.orcids) > 0
+                    and not set(c1.orcids) & set(c2.orcids)
+                )
+                if name_incompat or div_incompat or orcid_incompat:
+                    n_incompat += 1
+                else:
+                    gap[c1.cluster_id].append(c2.cluster_id)
+                    gap[c2.cluster_id].append(c1.cluster_id)
+                    n_compat += 1
+
+    for c in clusters:
+        c.gap_candidates = gap[c.cluster_id]
+
+    print(f"  Gap 1: {n_compat} compatible pairs, {n_incompat} incompatible pairs")
+    return clusters
+
+
+def compute_reliability(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
+    """Populate resolution_status and reliability_tier -- the final refinement step. Mirrors
+    01_prepare_arc.py's resolution_status assignment (is_suspicious) + _compute_reliability_tier().
+    Requires gap_candidates already populated (tier 4 vs 4u depends on it) -- run
+    compute_gap_candidates() first.
+
+    resolution_status: RESOLVED unless this cluster is common-name/no-ORCID/cross-OAX-field
+    (flagged for manual review, see cluster_checks.is_suspicious_for2020()), or has MULTI_ORCID
+    (an unresolved ORCID conflict).
+
+    Division check (2026-08-13): uses cluster_checks.is_suspicious_for2020() -- the same shared
+    function 01_prepare_arc.py's production pipeline now uses too, both built on for2020_codes'
+    OAX fields rather than the old for_names + for_divisions.csv route. See cluster_checks.py's
+    module docstring for the full rationale (a real, verified casing bug plus a structural
+    letter/numeric-division mismatch, not just a preference).
+
+    reliability_tier:
+      1a  HAS_ORCID, source = ARC data
+      1b  HAS_ORCID, source = ORCID enrichment (00b)
+      1c  HAS_ORCID, source = manual_orcids.csv
+      2   NO_ORCID, multi-grant, rare name  (tf < RARE_NAME_TF)
+      3   NO_ORCID, multi-grant, common name
+      4   NO_ORCID, singleton, no gap_candidates (isolated)
+      4u  NO_ORCID, singleton, has gap_candidates (unresolved collision)
+    """
+    tf_df = pd.read_parquet(PROCESSED_DATA / "oax_tf_full_name.parquet")
+    tf_lookup = dict(zip(tf_df["full_name_key"], tf_df["tf_full_name_key"]))
+
+    for c in clusters:
+        suspicious = is_suspicious_for2020(c.orcids, c.full_name_key, c.for2020_codes, tf_lookup)
+        c.resolution_status = "UNRESOLVED" if suspicious else "RESOLVED"
+        if c.orcid_status == "MULTI_ORCID":
+            c.resolution_status = "UNRESOLVED"
+
+        events = {e.get("event") for e in c.provenance}
+        if c.orcid_status in ("HAS_ORCID", "MULTI_ORCID"):
+            if "manual_orcid" in events:
+                c.reliability_tier = "1c"
+            elif "enriched_orcid" in events:
+                c.reliability_tier = "1b"
+            else:
+                c.reliability_tier = "1a"
+        elif c.n_grants >= 2:
+            tf = tf_lookup.get(c.full_name_key, 1.0) if c.full_name_key else 1.0
+            c.reliability_tier = "2" if tf < RARE_NAME_TF else "3"
+        else:
+            c.reliability_tier = "4u" if c.gap_candidates else "4"
+
+    counts = Counter(c.reliability_tier for c in clusters)
+    print(f"  Reliability tiers: {dict(sorted(counts.items()))}")
+    n_unresolved = sum(1 for c in clusters if c.resolution_status == "UNRESOLVED")
+    print(f"  resolution_status: {len(clusters) - n_unresolved} RESOLVED, {n_unresolved} UNRESOLVED")
+    return clusters
+
     return clusters

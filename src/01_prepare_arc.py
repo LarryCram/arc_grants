@@ -31,7 +31,16 @@ from src.utils.names import make_expanded_for_tokens, name_part_tokens, strip_di
 
 import diskcache
 from src.utils.for_resolve import upgrade_for_code, upgrade_for_name
-from src.utils.cluster_checks import load_for_divisions, division_mismatch, is_case_a, is_suspicious, first_names_compatible
+from src.utils.cluster_checks import (
+    is_case_a,
+    first_names_compatible,
+    aggregate_for2020_codes,
+    for2020_primary_fields,
+    division_mismatch_for2020_pairwise,
+    is_suspicious_for2020,
+    INDIGENOUS_DIVISION_PREFIX,
+)
+from src.utils.awards_cif import load_grant_for2020_codes
 
 MANUAL_SPLITS_CSV        = Path(__file__).resolve().parents[1] / "data_persisted" / "manual_splits.csv"
 MANUAL_ORCIDS_CSV        = Path(__file__).resolve().parents[1] / "data_persisted" / "manual_orcids.csv"
@@ -446,6 +455,7 @@ def _aggregate_clusters(df_original: pd.DataFrame, df_cluster_ids: pd.DataFrame)
             inst_arr=("inst_arr", union_lists),
             for_names=("for_names", union_lists),
             for_codes=("for_codes", union_lists),
+            for2020_codes=("for2020_codes", aggregate_for2020_codes),
             grant_ids=("unique_id", list),
             n_grants=("unique_id", "count"),
         )
@@ -521,6 +531,7 @@ def _apply_manual_merges(persons: pd.DataFrame, cluster_history: dict) -> pd.Dat
             "inst_arr":      _union(grp["inst_arr"]),
             "for_names":     _union(grp["for_names"]),
             "for_codes":     _union(grp["for_codes"]),
+            "for2020_codes": aggregate_for2020_codes(grp["for2020_codes"]),
             "grant_ids":     [g for row in grp["grant_ids"] for g in row],
             "n_grants":      int(grp["n_grants"].sum()),
             "full_name_key": grp.loc[best_idx, "full_name_key"],
@@ -654,6 +665,7 @@ def _merge_same_grant_coinvestigators(
             "inst_arr":      _union_lists(grp["inst_arr"]),
             "for_names":     _union_lists(grp["for_names"]),
             "for_codes":     _union_lists(grp["for_codes"]),
+            "for2020_codes": aggregate_for2020_codes(grp["for2020_codes"]),
             "grant_ids":     [g for r in grp["grant_ids"] for g in r],
             "n_grants":      int(grp["n_grants"].sum()),
             "full_name_key": grp.loc[best_idx, "full_name_key"],
@@ -709,21 +721,21 @@ def _compute_reliability_tier(persons: pd.DataFrame, tf_lookup: dict) -> pd.Data
     return out
 
 
-def _compute_gap_candidates(
-    persons: pd.DataFrame, div_map: dict, adj: set
-) -> pd.DataFrame:
+def _compute_gap_candidates(persons: pd.DataFrame) -> pd.DataFrame:
     """For each cluster, record gap_candidates: other cluster_ids sharing
     (family_name_main, first_initial) that cannot be ruled out as the same person.
 
     Incompatibility tests (any one → keep separate):
       - name:    first_names sets are mutually incompatible (cascade: full name / initial)
-      - FOR:     combined for_names span disconnected major divisions
+      - FOR:     primary FOR2020 codes' OAX fields share nothing in common (see
+                 cluster_checks.division_mismatch_for2020_pairwise() -- replaces the old
+                 for_names + for_divisions.csv route, 2026-08-13)
       - ORCID:   both have ORCIDs and they are disjoint
     """
     def _fnm(family_names):
         return max(family_names, key=len) if family_names else None
 
-    p = persons[["cluster_id", "first_names", "family_names", "for_names", "orcids"]].copy()
+    p = persons[["cluster_id", "first_names", "family_names", "for2020_codes", "orcids"]].copy()
     p["_fnm"] = p["family_names"].apply(_fnm)
     p = p.dropna(subset=["_fnm"])
 
@@ -743,8 +755,8 @@ def _compute_gap_candidates(
                     not first_names_compatible(fn1, fn2) or
                     not first_names_compatible(fn2, fn1)
                 )
-                div_incompat = division_mismatch(
-                    list(r1["for_names"]) + list(r2["for_names"]), div_map, adj
+                div_incompat = division_mismatch_for2020_pairwise(
+                    r1["for2020_codes"], r2["for2020_codes"]
                 )
                 orcid_incompat = (
                     len(r1["orcids"]) > 0 and len(r2["orcids"]) > 0
@@ -766,8 +778,6 @@ def _compute_gap_candidates(
 def _diagnostic_report(
     persons: pd.DataFrame,
     inst_lookup: dict,
-    div_map: dict,
-    adj: set,
     tf_lookup: dict,
 ) -> None:
     multi = persons[persons["n_grants"] > 1].sort_values("n_grants", ascending=False)
@@ -782,14 +792,14 @@ def _diagnostic_report(
     print(f"    0 institutions:  {len(no_inst):>4}")
 
     suspect = multi[multi.apply(
-        lambda r: is_suspicious(r, div_map, adj, tf_lookup), axis=1
+        lambda r: is_suspicious_for2020(r["orcids"], r["full_name_key"], r["for2020_codes"], tf_lookup), axis=1
     )]
     case_a = suspect[suspect["full_names"].apply(is_case_a)]
     case_b = suspect[~suspect["full_names"].apply(is_case_a)]
 
     auto_committed = len(multi) - len(suspect)
-    print(f"\n  Multi-grant auto-committed (ORCID / rare name / compatible divisions): {auto_committed}")
-    print(f"  Needs review (common name, no ORCID, cross-division FOR): {len(suspect)}")
+    print(f"\n  Multi-grant auto-committed (ORCID / rare name / compatible OAX fields): {auto_committed}")
+    print(f"  Needs review (common name, no ORCID, cross-OAX-field FOR): {len(suspect)}")
     print(f"    Case A — single name: {len(case_a)}")
     print(f"    Case B — multiple names: {len(case_b)}")
 
@@ -799,12 +809,12 @@ def _diagnostic_report(
             names  = "; ".join(row["full_names"][:4])
             orcids = ", ".join(row["orcids"]) if row["orcids"] else "—"
             insts  = "; ".join(_inst_label(i, inst_lookup) for i in row["inst_arr"][:4])
-            divs   = sorted({div_map.get(fn, "?") for fn in row["for_names"] if fn})
-            fors   = "; ".join(row["for_names"]) if row["for_names"] else "—"
+            primary = [e["name"] for e in row["for2020_codes"] if e["is_primary"]]
+            fields = sorted(for2020_primary_fields(row["for2020_codes"]))
             print(f"    n={row['n_grants']:>3}  [{orcids}]  {names}")
             print(f"           insts: {insts}")
-            print(f"           FOR:   {fors}")
-            print(f"           divs:  {' '.join(divs)}")
+            print(f"           FOR:   {'; '.join(primary) if primary else '—'}")
+            print(f"           OAX fields: {' '.join(fields)}")
 
     _show(case_a, "Case A — single name, needs review")
     _show(case_b, "Case B — multiple names, needs review")
@@ -813,15 +823,13 @@ def _diagnostic_report(
 def _export_manual_splits_template(
     persons: pd.DataFrame,
     inst_lookup: dict,
-    div_map: dict,
-    adj: set,
     tf_lookup: dict,
 ) -> None:
     multi_inst = persons[
         (persons["n_grants"] > 1)
         & (persons["inst_arr"].apply(len) > 1)
         & (persons["full_names"].apply(is_case_a))
-        & persons.apply(lambda r: is_suspicious(r, div_map, adj, tf_lookup), axis=1)
+        & persons.apply(lambda r: is_suspicious_for2020(r["orcids"], r["full_name_key"], r["for2020_codes"], tf_lookup), axis=1)
     ].sort_values("n_grants", ascending=False)
 
     existing: dict[str, dict] = {}
@@ -1046,6 +1054,7 @@ def _merge_persons_by_orcid(persons: pd.DataFrame, cluster_history: dict) -> pd.
             "inst_arr":     _union(grp["inst_arr"]),
             "for_names":    _union(grp["for_names"]),
             "for_codes":    _union(grp["for_codes"]),
+            "for2020_codes": aggregate_for2020_codes(grp["for2020_codes"]),
             "grant_ids":    [g for row in grp["grant_ids"] for g in row],
             "n_grants":     int(grp["n_grants"].sum()),
             "full_name_key": grp.loc[best_idx, "full_name_key"],
@@ -1275,6 +1284,7 @@ def main():
             )
             SELECT
                 a.unique_id,
+                a.grant_id as grant_code,
                 CONCAT_WS(' ', a.first_name, a.family_name) AS full_name,
                 arc_names(a.first_name, a.family_name).first_names AS first_names,
                 list_filter(arc_names(a.first_name, a.family_name).first_names, x -> len(x) = 1)  AS first_initials,
@@ -1301,6 +1311,12 @@ def main():
 
     print("[1/5] Loading full ARC grant rows...")
     df_raw = _load_all(con, arc_path)
+
+    print("  Attaching FOR2020 code lists (raw_json.csv, all field-of-research entries)...")
+    grant_for2020 = load_grant_for2020_codes()
+    df_raw["for2020_codes"] = df_raw["grant_code"].map(grant_for2020).apply(
+        lambda x: x if isinstance(x, list) else []
+    )
 
     print("[2/5] Preparing Splink input columns...")
     df = _prep(df_raw)
@@ -1468,7 +1484,6 @@ def main():
     )
     persons = persons.merge(fnk_mode, on="cluster_id", how="left")
 
-    div_map, adj = load_for_divisions()
     tf_df = pd.read_parquet(PROCESSED_DATA / "oax_tf_full_name.parquet")
     tf_lookup = dict(zip(tf_df["full_name_key"], tf_df["tf_full_name_key"]))
 
@@ -1485,13 +1500,30 @@ def main():
     print("  Auto-merging same-name clusters on single-org grants...")
     persons = _merge_same_grant_coinvestigators(persons, cluster_history)
 
+    # Set aside Indigenous-focused research (2026-08-13): a person is set aside if ANY of
+    # their grants had a FOR2020 division-45 (Indigenous Studies) code as its PRIMARY declared
+    # field. Indigenous-focused research is culturally important and not well portrayed by the
+    # bibliometric methods this pipeline uses, so it's kept out of arc_persons.parquet entirely
+    # rather than run through them -- written to a companion file for audit, not silently
+    # dropped. See src/utils/awards_cif.py::set_aside_indigenous_research() for the equivalent
+    # object-oriented version and the same reasoning.
+    def _is_indigenous(codes):
+        return any(e["is_primary"] and e["code"].startswith(INDIGENOUS_DIVISION_PREFIX) for e in codes)
+
+    indigenous_mask = persons["for2020_codes"].apply(_is_indigenous)
+    persons_excluded_indigenous = persons[indigenous_mask].copy()
+    persons = persons[~indigenous_mask].copy()
+    excluded_path = PROCESSED_DATA / "arc_persons_excluded_indigenous.parquet"
+    persons_excluded_indigenous.to_parquet(excluded_path, index=False)
+    print(f"  Set aside {len(persons_excluded_indigenous)} Indigenous-focused persons → {excluded_path}")
+
     # orcid_status: ORCID enrichment signal (used by 00b to target NO_ORCID RESOLVED clusters)
     persons["orcid_status"] = persons["orcids"].apply(
         lambda x: "HAS_ORCID" if len(x) == 1 else ("MULTI_ORCID" if len(x) > 1 else "NO_ORCID")
     )
     # resolution_status: is this cluster definitively one person?
     persons["resolution_status"] = persons.apply(
-        lambda r: "UNRESOLVED" if is_suspicious(r, div_map, adj, tf_lookup) else "RESOLVED",
+        lambda r: "UNRESOLVED" if is_suspicious_for2020(r["orcids"], r["full_name_key"], r["for2020_codes"], tf_lookup) else "RESOLVED",
         axis=1,
     )
     persons.loc[persons["orcid_status"] == "MULTI_ORCID", "resolution_status"] = "UNRESOLVED"
@@ -1504,7 +1536,7 @@ def main():
     persons = _enrich_orcid_for(persons)
 
     print("  Computing Gap 1 candidates (same blocking key, no incompatibility)...")
-    persons = _compute_gap_candidates(persons, div_map, adj)
+    persons = _compute_gap_candidates(persons)
 
     print("  Computing reliability tiers...")
     persons = _compute_reliability_tier(persons, tf_lookup)
@@ -1523,8 +1555,8 @@ def main():
     print(f"  Saved grant→cluster map → {map_path}")
 
     inst_lookup = _load_inst_names()
-    _diagnostic_report(persons, inst_lookup, div_map, adj, tf_lookup)
-    _export_manual_splits_template(persons, inst_lookup, div_map, adj, tf_lookup)
+    _diagnostic_report(persons, inst_lookup, tf_lookup)
+    _export_manual_splits_template(persons, inst_lookup, tf_lookup)
 
 
 if __name__ == "__main__":
