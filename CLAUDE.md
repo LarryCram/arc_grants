@@ -326,22 +326,30 @@ Output columns in `arc_persons.parquet`:
 **data_persisted/manual_merges.csv** — 11 entries (same-grant nickname pairs + cross-grant confirmed same-person)
 **data_persisted/enrichment_blocklist.csv** — 2 entries: LP0220171_JNichols, DP0452211_RobertMarks
 
-## `AwardsCIF()` rebuild (2026-08-11, in progress)
+## `AwardsCIF()` rebuild (2026-08-11 → 2026-08-13, roadmap step 1 complete)
 `src/utils/awards_cif.py` — a dataclass-first rebuild of the above design, not a wrapper around it.
 `AwardCIFItem`/`AwardsCIF` dataclasses defined first; the ten Phase-2 steps above are reimplemented
 as functions taking/returning `list[AwardsCIF]` (`merge_by_orcid`, `split_orcid_conflicts`,
 `split_multi_name_clusters`, `apply_manual_splits`, `apply_enriched_orcids`, `promote_low_by_for`,
 `apply_manual_orcids`, `merge_persons_by_orcid`, `apply_manual_merges`,
 `merge_same_grant_coinvestigators`, composed by `refine_clusters()`), same validated logic and step
-order, new representation. Splink itself (both the ARC-internal `dedupe_only` run and, later, the
-ARC↔OAX `link_only` run) is reused unchanged as a tool — only the surrounding pandas architecture is
-being rebuilt. Full design and rationale: `/home/lc/.claude/plans/review-this-code-base-groovy-key.md`.
+order, new representation. Splink itself (both the ARC-internal `dedupe_only` run and the ARC↔OAX
+`link_only` run) is reused unchanged as a tool — only the surrounding pandas architecture is
+rebuilt. Full design and rationale: `/home/lc/.claude/plans/review-this-code-base-groovy-key.md`.
 
-Built and verified so far: `load_award_cif_items()` (65,087 items, exact match), `cluster_items()`
-(22,962 provisional clusters via Splink `dedupe_only`), `refine_clusters()` (23,056 final clusters —
-exact match to the `arc_persons.parquet` baseline above; 63.9% ORCID coverage, matching the 64.0%
-enrichment baseline within normal rerun drift). Not yet built: `populate_oax_candidates()`,
-`compute_reliability()`, tests, full-cohort diff against `arc_persons.parquet`.
+**Roadmap step 1 (ARC-side identity + candidate `author_idx` set) is DONE.** Full chain:
+`load_award_cif_items() -> cluster_items() -> refine_clusters() -> set_aside_indigenous_research()
+-> populate_oax_candidates() -> dedup_oax_candidates() -> compute_orcid_for() ->
+compute_gap_candidates() -> compute_reliability()`. `populate_oax_candidates()` reads
+`arc_oax_links.parquet` directly (all Splink candidates ≥0.5, not just high-confidence ≥0.9) —
+avg 6.64 candidates/person vs. the old hardcoded-empty-`secondary_oax_ids` view's 5.02 —
+`dedup_oax_candidates()` then lexically strips OpenAlex's own split-record duplicates (manual
+`unlink` + same-ORCID/same-topic collapsing, 10,258/22,852 AwardsCIF touched). `tests/test_awards_cif.py`
+(38 tests) covers every pure function. Field-for-field diff against production `arc_persons.parquet`:
+≥99.15% match on every field (100% on `family_names`/`resolution_status`), residual traced to
+Splink's own documented run-to-run clustering stochasticity, not a logic gap.
+
+**Roadmap step 2 (each AwardsCIF's own work-set) is DONE** — see "oeuvre_build.py" section below.
 
 **data_persisted/manual_name_corrections.csv** — new file, same hand-curated-override convention as
 `manual_orcids.csv`/`manual_merges.csv`, keyed on `unique_id` (item-level, applied before
@@ -371,6 +379,119 @@ Anthony/Tony and Elizabeth/Libby do not), so a real nickname match lacking a sha
 structurally unreachable by blocking, never merely filtered by scoring. Proposed fix (not built):
 an additional, tighter blocking rule on the fuller given-name form when available, alongside (not
 replacing) the existing `first_initial` fallback.
+
+## FOR-code handling rebuilt on Resolver()-derived FOR2020 data; a real production bug fixed (2026-08-13)
+
+Triggered by `apply_subfield_filter()` (see "oeuvre_build.py" below) being badly over-aggressive
+on real data — became a much larger fix once traced to its root cause.
+
+**The bug**: `01_prepare_arc.py`'s `is_suspicious()` cross-division check (feeding
+`resolution_status`/`gap_candidates`) had been finding **zero** mismatches across the entire ARC
+population — verified directly (old approach=0 flagged, new approach=179, same population) — not
+because researchers rarely span multiple divisions, but because its `for_names` lookup against
+`data_persisted/for_divisions.csv` silently failed on **casing alone** for ~79% of clusters (ARC's
+raw data is sentence-case, e.g. "Health services and systems"; the CSV was title-case). Even where
+it resolved, the CSV's letter-keyed divisions (A-W) didn't correspond 1:1 to FOR2020's own numeric
+divisions (10/23 letters each spanned ≥2 different FOR2020 divisions). And even ANZSRC's own
+numeric divisions were the wrong granularity for this check's purpose: "Legal systems" (division
+48) and "Political science" (division 44) are administratively distinct but resolve to the same
+OpenAlex **field** "Social Sciences" — OAX_FIELD (~25 categories, content-derived) is what the
+check actually needed, not ANZSRC's own division (~22 categories, funding-administration
+boundaries). `data_persisted/for_divisions.csv`/`for_adjacent_divisions.csv` archived to
+`ZARCHIVE/data/` (`git mv`) once nothing referenced them.
+
+**The fix, applied to both `awards_cif.py` and production `01_prepare_arc.py`** (the bug was live
+in what `03`/`04`/every analysis script consume today, not just the parallel rebuild):
+- `AwardCIFItem.for2020_codes`/`AwardsCIF.for2020_codes` (+ the equivalent `01_prepare_arc.py`
+  `persons` column): every field-of-research entry ARC recorded per grant (`raw_json.csv`'s full
+  list — 2 to 16 entries/grant — not just `grant_summaries.csv`'s single primary), resolved via new
+  `for_resolve.resolve_arc_for_entry()` (maps ARC's own `RFCD98`/`FOR08`/`FOR20` type labels to the
+  package's `FOR1998`/`FOR2008`/`FOR2020` scheme names — confirmed `RFCD98` = the package's
+  `FOR1998` by resolving real codes through it, not assumed). Codes stay strings throughout (~44K
+  real entries have a leading zero `int()` would silently drop). Ordered primary-first then
+  alphabetically; deduped by resolved 4-digit FOR2020 group per grant (6-digit codes truncate
+  cleanly to their parent group — verified against the package's own group table).
+- `src/utils/cluster_checks.py` rebuilt around this — `for2020_primary_fields()`,
+  `division_mismatch_for2020()`/`_pairwise()`, `is_suspicious_for2020()`, `aggregate_for2020_codes()`
+  — shared by `01_prepare_arc.py`, `01a_diagnose.py`, and `awards_cif.py` so the two pipelines can't
+  drift apart. Old `load_for_divisions()`/`division_mismatch()`/`is_suspicious()` removed outright.
+- **Indigenous-focused research is set aside from the working population** (FOR2020 division 45 —
+  "Indigenous Studies" — as a *primary* code on any grant): culturally important, not well
+  portrayed by the bibliometric methods this pipeline uses, so kept out entirely rather than run
+  through them — `AwardsCIF.excluded`/`.excluded_reason` in the rebuild, a companion
+  `arc_persons_excluded_indigenous.parquet` in production (107 persons).
+- `_load_grant_for2020_codes()`/`load_grant_for2020_codes()` scoped to `KEEP_SCHEMES` before
+  resolving anything — `raw_json.csv` covers every ARC scheme ever run, including out-of-scope
+  ones like "LE" (Linkage-Equipment, funds shared lab equipment across a whole department, so
+  carries person-irrelevant FOR-code spreads — one such grant had 16 different codes).
+- `01_prepare_arc.py` fully migrated, not left on the old broken check: Phase 1 attaches
+  `for2020_codes` per grant; four separate hardcoded merge-aggregation call sites needed the new
+  field added to their field lists (a real bug the first full run caught directly —
+  `TypeError: 'float' object is not iterable` — not anticipated in advance).
+  `arc_persons.parquet` regenerated: **22,942 persons** (was 23,049 — mainly the 107 Indigenous
+  exclusions). `01a_diagnose.py`'s A2/A3 cross-check now genuinely agrees (172=172, identical
+  cluster lists) instead of accidentally agreeing at zero. `03_link_arc_oax.py`/`04_resolve_links.py`
+  confirmed schema-compatible by direct column-usage inspection — **not re-run**, since neither
+  consumes `resolution_status`/`gap_candidates`/`reliability_tier` at all.
+
+Committed and pushed (`0db3f64`).
+
+## `oeuvre_build.py` — roadmap step 2, giving each AwardsCIF its own work-set (2026-08-13)
+
+`src/utils/oeuvre_build.py` — sibling to `awards_cif.py`, mirrors the `dossier.py`/`dossier_build.py`
+split (data model vs. construction). Unions the OpenAlex works reached by every candidate
+`author_idx` in `AwardsCIF.oax_candidates`, then decides per work whether it belongs in this
+person's oeuvre. Only over-merge is addressed (under-merge stays explicitly out of scope, as
+throughout this project); no `AwardsCIF` is ever compared against another.
+
+Pipeline: `fetch_candidate_oeuvre -> apply_deterministic_filters -> dedup_oeuvre ->
+apply_subfield_filter -> score_institution_coherence -> score_coauthor_arc_corroboration ->
+score_identity_clusters`, composed by `build_oeuvre()`. New `CandidateWork` dataclass on
+`AwardsCIF.oeuvre` (one list, included-or-not, not two parallel lists — mirrors the
+`AwardCIFItem`-inside-`items` precedent).
+
+- **Deterministic filters** (hard excludes, never scored): disallowed `type`/filename-artifact
+  titles (`exclusions.py`, reused unchanged), implausible/future/missing year
+  (`dedup.MIN_PUB_YEAR..MAX_PUB_YEAR` = 1950–2026, **not** 2000–2024), missing DOI, corrupt
+  authorship (any authorship row on the work — own candidate's or a coauthor's — with a null
+  `author_idx`/`institution_idx`), missing source for `type='article'`. A `raw_orcid`-based
+  corruption filter was directed but dropped this pass — checked directly, no authorships table
+  variant this pipeline reads (`compact`/`xpac`/`xpac_raw`/the manually-regenerated
+  `authorships_hep.parquet`) carries a `raw_orcid` column at all; future work needs new extraction.
+- **Title-dedup**: `dedup.create_deduped_works()` reused unmodified (preprint/published-version
+  merges); a *different* case — 2+ of a cluster's own candidate `author_idx` claiming the *same*
+  `work_idx` — is collapsed earlier, at fetch time, before dedup ever runs.
+- **Field filter** (`apply_subfield_filter()`, name kept for history): compares
+  `CandidateWork.field_name` (OpenAlex's own field-level classification, no resolution needed)
+  against `cluster_checks.for2020_primary_fields()` (OAX_FIELD, from the person's own primary
+  FOR2020 codes) — **not** the original design (literal subfield-string match against a single
+  primary `for_code`), which was built, found badly over-aggressive on real data (one geochronologist
+  lost 158/160 works), and led directly to the FOR2020/OAX_FIELD rebuild above.
+- **Soft signals** (`institution_arc_match`, `coinvestigator_match`, `identity_cluster` via
+  `analysis/utils/identity_clustering.py`, widened to `own_author_idxs: set[int]` with a real
+  correctness fix — own-candidate co-occurrence on one work must not masquerade as an external
+  corroborating coauthor edge — plus a new in-memory entry point avoiding one DuckDB query per
+  cluster): recorded on every work, **not** used to gate inclusion this pass — combining them into
+  a weighted score needs empirical calibration against known contamination cases, not done.
+
+**Verified** (stratified random sample, 40 clusters by candidate-pool size — not the specific
+historically-documented contamination cases, whose exact `cluster_id`s weren't reliably available
+this session, an acknowledged gap): per-work inclusion rate drops monotonically with pool size —
+**38.1%** (1 candidate) / **19.5%** (2-5) / **9.3%** (6+) — the expected signature of stripping
+wrong-candidate noise, not uniform over-exclusion. Stage breakdown on the combined sample: 53.9%
+survive deterministic filters, 52.2% additionally survive dedup, 12.3% survive the field filter
+(the dominant exclusion source — even on the 1-candidate stratum it costs ~17.3% of raw works, a
+real false-positive rate from OAX_FIELD coarsening, e.g. a genuine psychology+linguistics career
+still splits across two fields — accepted per this project's precision-over-recall stance, not
+hidden). `WeiWang`-scale mega-pools (374-436 candidates) measured at ~17.5s for
+`score_identity_clusters()`'s O(n²) step on the single worst case — slow but survivable; total cost
+across every such outlier at full 23K-cluster scale not measured, a real open risk before an
+unattended full run. `tests/test_oeuvre_build.py` (27 tests, the four pure-logic functions) +
+`analysis/tests/test_identity_clustering.py` (14 tests, `identity_clustering.py`'s first ever).
+
+Not built this pass, deliberately: combining the soft signals into a weighted inclusion score
+(needs calibration), roadmap step 3 (dropping zero-work `author_idx`), step 4 (the
+definitive-evidence gate, `Dossier()` construction by selection).
 
 ## Analysis Pipeline Status (2026-06-18)
 - `analysis/01_fetch_oeuvres.py` ✓ — 4,236,839 rows, 22,599 persons

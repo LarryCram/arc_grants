@@ -139,6 +139,9 @@ class CandidateWork:
     field_name: str | None = None
     domain_name: str | None = None
 
+    own_institution_idxs: list[int] = field(default_factory=list)  # this AwardsCIF's own
+                                                                     # candidate author_idx's
+                                                                     # institution(s) on this work
     coauthor_author_idxs: list[int] = field(default_factory=list)
     coauthor_names: list[str] = field(default_factory=list)
     coauthor_institution_idxs: list[int] = field(default_factory=list)

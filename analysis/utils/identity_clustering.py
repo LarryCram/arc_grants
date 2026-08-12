@@ -25,6 +25,25 @@ caller's responsibility -- e.g. via create_deduped_works(), same as Dossier cons
 than re-deriving it here, and pulls authorship rows only for that small, known set --
 filter-small-set-first, per this project's documented 30x-regression lesson (CLAUDE.md,
 "OpenAlex Snapshot Migration").
+
+Widened 2026-08-13 (src/utils/oeuvre_build.py's roadmap-step-2 work) from a single
+own_author_idx to own_author_idxs: set[int] -- an AwardsCIF's candidate set is now several
+author_idx, not one resolved identity. This surfaced a real correctness point beyond the
+mechanical signature change: when two of a cluster's own candidate author_idx both appear as
+authors of the same work_idx (a real case -- fetch_candidate_oeuvre() explicitly collapses
+this), the coauthor-edge logic must exclude every own_author_idx from coauthors[work_idx], not
+just filter one -- otherwise two of a cluster's own candidates co-occurring would masquerade as
+an external corroborating coauthor edge, which is circular (that co-occurrence IS the identity
+ambiguity this whole system exists to resolve, not evidence resolving it).
+
+Also added an in-memory entry point (build_identity_clusters_from_data()) so callers that have
+already bulk-fetched authorship data (oeuvre_build.py's fetch_candidate_oeuvre(), which pulls
+every candidate work's full authorship list in one batched pass across all clusters) don't
+re-run a separate DuckDB query per cluster -- 23K separate small queries at full pipeline scale.
+That path keys institution matches on institution_idx (int), not institution_name (str) like
+the DB-querying path below -- a deliberate refinement, not an inconsistency: institution_idx is
+the canonical id CandidateWork.own_institution_idxs already carries, and avoids missing a match
+over a name-formatting variant the way string comparison could.
 """
 
 from __future__ import annotations
@@ -81,7 +100,8 @@ class UnionFind:
 class ClusterEdge:
     work_a: int
     work_b: int
-    reason: str  # "coauthor:<author_idx>" or "institution:<name>" -- auditable, not a bare weight
+    reason: str  # "coauthor:<author_idx>" or "institution:<name-or-idx>" -- auditable, not a
+                 # bare weight
 
 
 @dataclass(frozen=True)
@@ -92,7 +112,7 @@ class ClusteringResult:
 
 
 def _fetch_own_and_coauthor_data(
-    own_author_idx: int, con: duckdb.DuckDBPyConnection
+    own_author_idxs: set[int], con: duckdb.DuckDBPyConnection
 ) -> tuple[dict[int, set[int]], dict[int, set[str]]]:
     """Returns (work_idx -> set of coauthor author_idx, work_idx -> set of the person's own
     institution names for that work). Assumes build_identity_clusters() has already populated
@@ -106,7 +126,7 @@ def _fetch_own_and_coauthor_data(
     coauthors: dict[int, set[int]] = defaultdict(set)
     own_institutions: dict[int, set[str]] = defaultdict(set)
     for work_idx, author_idx, institution_name in rows:
-        if author_idx == own_author_idx:
+        if author_idx in own_author_idxs:
             if institution_name:
                 own_institutions[work_idx].add(institution_name)
         else:
@@ -114,14 +134,15 @@ def _fetch_own_and_coauthor_data(
     return dict(coauthors), dict(own_institutions)
 
 
-def build_identity_clusters(
-    own_author_idx: int, work_idxs: list[int], con: duckdb.DuckDBPyConnection
+def _cluster_from_edges(
+    work_idxs: list[int],
+    coauthors: dict[int, set],
+    own_institutions: dict[int, set],
 ) -> ClusteringResult:
-    """work_idxs: the person's own cleaned oeuvre (e.g. from Dossier.works / create_deduped_works
-    output) -- the caller decides what's in scope, this function only groups what it's given."""
-    con.execute("CREATE OR REPLACE TEMP TABLE _cluster_work_ids AS SELECT UNNEST(?) AS work_idx", [work_idxs])
-    coauthors, own_institutions = _fetch_own_and_coauthor_data(own_author_idx, con)
-
+    """Shared union-find core: given per-work coauthor and own-institution sets (already
+    excluding this cluster's own author_idx from `coauthors`, whatever key type
+    `own_institutions` uses -- name or idx), build the clustering. Both
+    build_identity_clusters() and build_identity_clusters_from_data() reduce to this."""
     uf = UnionFind()
     edges: list[ClusterEdge] = []
     for w in work_idxs:
@@ -142,3 +163,37 @@ def build_identity_clusters(
     groups = uf.groups()
     work_cluster = {w: root for root, members in groups.items() for w in members}
     return ClusteringResult(work_cluster=work_cluster, clusters=groups, edges=edges)
+
+
+def build_identity_clusters(
+    own_author_idxs: set[int], work_idxs: list[int], con: duckdb.DuckDBPyConnection
+) -> ClusteringResult:
+    """work_idxs: the person's own cleaned oeuvre (e.g. from Dossier.works / create_deduped_works
+    output) -- the caller decides what's in scope, this function only groups what it's given.
+    Queries authorships fresh from DuckDB -- see build_identity_clusters_from_data() for the
+    in-memory equivalent when the caller has already bulk-fetched this data."""
+    con.execute("CREATE OR REPLACE TEMP TABLE _cluster_work_ids AS SELECT UNNEST(?) AS work_idx", [work_idxs])
+    coauthors, own_institutions = _fetch_own_and_coauthor_data(own_author_idxs, con)
+    return _cluster_from_edges(work_idxs, coauthors, own_institutions)
+
+
+def build_identity_clusters_from_data(
+    work_idxs: list[int],
+    coauthor_author_idxs: dict[int, list[int]],
+    own_institution_idxs: dict[int, list[int]],
+) -> ClusteringResult:
+    """In-memory equivalent of build_identity_clusters(), for callers that have already bulk-
+    fetched authorship data for many people in one pass (e.g. oeuvre_build.py's
+    fetch_candidate_oeuvre(), which populates CandidateWork.coauthor_author_idxs and
+    .own_institution_idxs for every candidate work across all clusters in one batched query) --
+    avoids one separate DuckDB query per cluster (23K at full pipeline scale).
+
+    coauthor_author_idxs/own_institution_idxs: work_idx -> that work's own list (already
+    excluding this cluster's own candidate author_idx from coauthor_author_idxs, as
+    CandidateWork's fields already do -- see its docstring). Institution matching here keys on
+    institution_idx (int), not institution_name (str) like build_identity_clusters()'s DB path
+    -- see this module's own docstring for why that's a deliberate refinement.
+    """
+    coauthors = {w: set(idxs) for w, idxs in coauthor_author_idxs.items()}
+    own_institutions = {w: set(idxs) for w, idxs in own_institution_idxs.items()}
+    return _cluster_from_edges(work_idxs, coauthors, own_institutions)
