@@ -22,8 +22,8 @@ The Splink-based `00_extract_arc.py` → `01_prepare_arc.py` → `02_prepare_oax
 is complete and has been for some time — this is not a design-phase project anymore.
 Current work is downstream: bibliometric analysis (`analysis/00`-`07`), OpenAlex snapshot
 migration (Feb26 → Jul26, done 2026-08-08), and the early-career fellowship cohort study.
-`src_archive_20260520/` holds a fully superseded earlier pipeline attempt — never reference it
-for current architecture.
+`ZARCHIVE/src_archive_20260520/` holds a fully superseded earlier pipeline attempt — never
+reference it for current architecture.
 
 ## Data
 - ARC grants CSV, ~34,000 records, sourced from ARC public API

@@ -17,7 +17,8 @@ Link ARC Chief Investigators/Fellows (CIFs) to their OpenAlex author records for
 03_link_arc_oax.py      → arc_oax_links.parquet (link_only: ARC persons → OAX authors)
 04_resolve_links.py     → arc_oax_resolved.parquet, arc_ambiguous_deferred.parquet
 ```
-The Splink pipeline replaces the entire old multi-layer pipeline in `src_archive_20260520/`.
+The Splink pipeline replaces the entire old multi-layer pipeline, archived at
+`ZARCHIVE/src_archive_20260520/` (moved there 2026-08-14, nothing references it).
 `02_run_splink.py` is the old wrong approach — superseded, can be deleted.
 
 ## Key Paths
