@@ -63,14 +63,13 @@ Usage:
 """
 
 import argparse
-import os
 import sys
 import time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import duckdb
-from config.settings import OPENALEX_COMPACT_DIR, OUTPUT_ROOT
+from config.settings import OPENALEX_COMPACT_DIR, OUTPUT_ROOT, DUCKDB_TMP_DIR
 from analysis.utils.dedup import MIN_PUB_YEAR, MAX_PUB_YEAR
 
 ANALYSIS_OUT = OUTPUT_ROOT / "analysis"
@@ -87,12 +86,8 @@ def _elapsed(t0: float) -> str:
     return f"{s:.0f}s" if s < 60 else f"{s/60:.1f}m"
 
 
-DUCKDB_TMP = "/home/lc/k/tmp/arc_grants_duckdb"  # own subfolder -- /home/lc/k/tmp is shared with other work
-
-
 def main(sample_year: int | None = None):
     print("=== 04c_subfield_cooccurrence_baseline ===")
-    os.makedirs(DUCKDB_TMP, exist_ok=True)
     con = duckdb.connect()
     con.execute("SET enable_progress_bar = false")
     con.execute("SET threads TO 8")
@@ -102,7 +97,7 @@ def main(sample_year: int | None = None):
     # silently pressuring system memory -- safe failure mode, just too tight a limit. Raised to
     # 24GB accordingly (still well under this machine's 62GB total).
     con.execute("SET memory_limit = '24GB'")
-    con.execute(f"SET temp_directory = '{DUCKDB_TMP}'")
+    con.execute(f"SET temp_directory = '{DUCKDB_TMP_DIR}'")
     con.execute("SET preserve_insertion_order = false")
 
     # Same plausible-year bounds as analysis/utils/dedup.py -- without this, garbage years

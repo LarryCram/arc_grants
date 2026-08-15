@@ -37,7 +37,7 @@ from splink import DuckDBAPI, Linker, SettingsCreator, block_on
 import splink.comparison_library as cl
 import splink.comparison_level_library as cll
 
-from config.settings import PROCESSED_DATA, ADMIN_ORGS_CSV, GRANT_SUMMARIES_CSV, ARC_GRANTS_CSV, DISKCACHE_DIR, OAX_AUTHORS, TOP_CUT
+from config.settings import PROCESSED_DATA, ADMIN_ORGS_CSV, GRANT_SUMMARIES_CSV, ARC_GRANTS_CSV, DISKCACHE_DIR, OAX_AUTHORS, TOP_CUT, DUCKDB_TMP_DIR
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
 from src.utils.names import make_expanded_for_tokens, name_part_tokens, strip_diacriticals, for_name_tokens
 from src.utils.for_resolve import upgrade_for_code, upgrade_for_name, resolve_arc_for_entry
@@ -1620,4 +1620,119 @@ def compute_reliability(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     print(f"  resolution_status: {len(clusters) - n_unresolved} RESOLVED, {n_unresolved} UNRESOLVED")
     return clusters
 
+    return clusters
+
+
+# ── population-level construction: build_awards_cif_population, persistence ─────────
+
+AWARDS_CIF_PARQUET = PROCESSED_DATA / "awards_cif.parquet"
+
+
+def build_awards_cif_population(con: duckdb.DuckDBPyConnection | None = None) -> list[AwardsCIF]:
+    """Composes the full step-1 chain in order -- the AwardsCIF-side equivalent of
+    01_prepare_arc.py end to end, not previously composed anywhere as a single function
+    (each stage has always been called manually by whoever needed it, e.g. tests or ad hoc
+    validation runs). Mirrors refine_clusters()'s and oeuvre_build.py's build_oeuvre()'s own
+    "compose the small single-responsibility functions in order" style.
+
+    load_award_cif_items -> cluster_items -> refine_clusters -> set_aside_indigenous_research
+    -> populate_oax_candidates -> dedup_oax_candidates -> compute_orcid_for
+    -> compute_gap_candidates -> compute_reliability
+    """
+    own_con = con is None
+    con = con or duckdb.connect()
+    try:
+        if own_con:
+            con.execute("SET enable_progress_bar = false")
+            con.execute("SET memory_limit = '24GB'")
+            con.execute(f"SET temp_directory = '{DUCKDB_TMP_DIR}'")
+        items, corrections = load_award_cif_items(con)
+        clusters = cluster_items(items, corrections)
+        clusters = refine_clusters(clusters)
+        clusters = set_aside_indigenous_research(clusters)
+        clusters = populate_oax_candidates(clusters, con)
+        clusters = dedup_oax_candidates(clusters, con)
+        clusters = compute_orcid_for(clusters)
+        clusters = compute_gap_candidates(clusters)
+        clusters = compute_reliability(clusters)
+    finally:
+        if own_con:
+            con.close()
+    return clusters
+
+
+def persist_awards_cif(clusters: list[AwardsCIF], path: Path = AWARDS_CIF_PARQUET) -> None:
+    """Persists the step-1 AwardsCIF population to a real parquet file -- this never existed
+    before (confirmed by grep: awards_cif.py only ever read from PROCESSED_DATA, never wrote to
+    it; CLAUDE.md's "roadmap step 1 is DONE" note describes the functional chain validated by an
+    in-memory diff against arc_persons.parquet, not a persisted output). Same column shape as
+    arc_persons.parquet by design (diffable field-for-field) plus oax_candidates, excluded,
+    excluded_reason -- fields arc_persons.parquet doesn't have. `items` (raw per-grant detail,
+    reconstructable from load_award_cif_items()) and `oeuvre` (populated by later oeuvre_build.py
+    stages, empty at this point in the chain) are deliberately not persisted here.
+    """
+    rows = [{
+        "cluster_id": c.cluster_id,
+        "full_names": c.full_names,
+        "first_names": c.first_names,
+        "family_names": c.family_names,
+        "orcids": c.orcids,
+        "inst_arr": c.inst_arr,
+        "for_names": c.for_names,
+        "for_codes": c.for_codes,
+        "for2020_codes": c.for2020_codes,
+        "grant_ids": c.grant_ids,
+        "n_grants": c.n_grants,
+        "full_name_key": c.full_name_key,
+        "orcid_status": c.orcid_status,
+        "orcid_for_codes": c.orcid_for_codes,
+        "gap_candidates": c.gap_candidates,
+        "reliability_tier": c.reliability_tier,
+        "resolution_status": c.resolution_status,
+        "oax_candidates": c.oax_candidates,
+        "excluded": c.excluded,
+        "excluded_reason": c.excluded_reason,
+        # JSON string, not a native list-of-struct column -- provenance events carry different
+        # kwarg keys per event type (record_event()'s whole point is a free-form **details), so
+        # pyarrow can't infer one uniform STRUCT schema across heterogeneous event dicts
+        # (confirmed: "cannot mix list and non-list, non-null values" on a real run). Matches
+        # arc_persons.parquet's own cluster_history column, which is VARCHAR for the same reason.
+        "provenance": json.dumps(c.provenance),
+    } for c in clusters]
+    df = pd.DataFrame(rows)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(path, index=False)
+    print(f"  Persisted {len(df):,} AwardsCIF to {path}")
+
+
+def load_awards_cif(path: Path = AWARDS_CIF_PARQUET) -> list[AwardsCIF]:
+    """Reconstructs AwardsCIF instances from persist_awards_cif()'s output. `items`/`oeuvre`
+    come back empty (never persisted) -- callers needing those must run the relevant chain
+    (load_award_cif_items()/cluster_items(), or oeuvre_build.py's fetch stages) themselves."""
+    df = pd.read_parquet(path)
+    clusters = []
+    for row in df.to_dict(orient="records"):
+        clusters.append(AwardsCIF(
+            cluster_id=row["cluster_id"],
+            full_names=list(row["full_names"]),
+            first_names=list(row["first_names"]),
+            family_names=list(row["family_names"]),
+            orcids=list(row["orcids"]),
+            inst_arr=list(row["inst_arr"]),
+            for_names=list(row["for_names"]),
+            for_codes=list(row["for_codes"]),
+            for2020_codes=[dict(x) for x in row["for2020_codes"]],
+            grant_ids=list(row["grant_ids"]),
+            n_grants=row["n_grants"],
+            full_name_key=row["full_name_key"],
+            orcid_status=row["orcid_status"],
+            orcid_for_codes=[dict(x) for x in row["orcid_for_codes"]],
+            gap_candidates=list(row["gap_candidates"]),
+            reliability_tier=row["reliability_tier"],
+            resolution_status=row["resolution_status"],
+            oax_candidates=list(row["oax_candidates"]),
+            excluded=row["excluded"],
+            excluded_reason=row["excluded_reason"],
+            provenance=json.loads(row["provenance"]),
+        ))
     return clusters

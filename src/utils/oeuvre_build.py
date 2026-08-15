@@ -29,15 +29,235 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-from config.settings import OPENALEX_COMPACT_DIR
+from config.settings import OPENALEX_COMPACT_DIR, PROCESSED_DATA, DUCKDB_TMP_DIR
 from src.utils.awards_cif import AwardsCIF, CandidateWork, _load_coinvestigator_names, _norm_full
 from src.utils.cluster_checks import for2020_primary_fields
 from analysis.utils import dedup, exclusions
-from analysis.utils.identity_clustering import build_identity_clusters_from_data
 
 AUTH_GLOB  = str(OPENALEX_COMPACT_DIR / "authorships" / "*.parquet")
 WORK_GLOB  = str(OPENALEX_COMPACT_DIR / "works" / "*.parquet")
 TOPIC_GLOB = str(OPENALEX_COMPACT_DIR / "work_topics" / "*.parquet")
+
+# Stage 1/Stage 3 checkpoint locations (2026-08-15 full-scale-OOM fix) -- PROCESSED_DATA, not a
+# separate subfolder: AwardsCIF/oeuvre_build.py is the pipeline going forward, a refactor of
+# 01/03/04, not a side experiment (see the plan file's "Framing correction").
+STAGE1_SURVIVORS  = PROCESSED_DATA / "oeuvre_stage1_survivors.parquet"
+STAGE1_EXCLUSIONS = PROCESSED_DATA / "oeuvre_stage1_exclusions.parquet"
+STAGE3_SURVIVORS  = PROCESSED_DATA / "oeuvre_stage3_survivors.parquet"
+STAGE3_EXCLUSIONS = PROCESSED_DATA / "oeuvre_stage3_exclusions.parquet"
+
+# Work-row columns shared by the stage-1/stage-3 checkpoints -- deliberately no coauthor/
+# own_institution_idxs fields: those are only fetched by the (not-yet-restructured) stage 4
+# coauthor pull, on the much smaller population that survives stages 1+3 first.
+#
+# field_name (singular) is the single highest-scoring topic's field, kept for display/context
+# only. field_names (plural, list) is every distinct field across ALL of a work's topics --
+# what apply_field_filter_stage3() actually matches against (2026-08-15, following up on a real
+# finding: works have up to 3 topics, and the top-vs-2nd topic score gap is a near-tie in the
+# median case (0.0037) -- picking only the single best topic was discarding real, legitimate
+# field information in the majority of multi-topic works, not just a rare edge case (64.2% of
+# touched works have >1 distinct field across their topics; 14.6% of best-topic-only field
+# exclusions had another topic that actually matched the target field).
+_WORK_ROW_COLUMNS = [
+    "cluster_id", "work_idx", "source_author_idxs", "publication_year", "cited_by_count",
+    "type", "title", "doi", "source_id", "subfield_idx", "subfield_name", "field_name",
+    "field_names", "domain_name",
+]
+
+
+def fetch_and_filter_stage1(
+    clusters: list[AwardsCIF],
+    con: duckdb.DuckDBPyConnection | None = None,
+    path: Path = STAGE1_SURVIVORS,
+    exclusions_path: Path = STAGE1_EXCLUSIONS,
+    auth_glob: str = AUTH_GLOB,
+    work_glob: str = WORK_GLOB,
+    topic_glob: str = TOPIC_GLOB,
+) -> None:
+    """Stage 1 of the 2026-08-15 full-scale-OOM fix: extract every work reached by any
+    candidate author_idx and apply all corruption checks *in the same SQL pass*, before any
+    coauthor detail is ever fetched -- unlike the original fetch_candidate_oeuvre(), which pulled
+    full coauthor rows for every touched work (9,512,745 of them, ~100M authorship rows) before
+    any filtering happened at all. Only survivors are persisted; no CandidateWork object is
+    constructed for a work that fails here (see the plan file's "provenance shape differs by
+    stage" section -- a reason -> count summary fully describes a single-rule exclusion, so
+    nothing is lost by not retaining the excluded row itself).
+
+    Returns nothing -- writes directly to `path`/`exclusions_path` from DuckDB, never routing the
+    multi-million-row result through a pandas DataFrame (a second real crash, 2026-08-15: the
+    first fix's `.fetchdf()` on ~7M rows with two list-typed columns -- source_author_idxs and
+    the newer field_names -- materialized real Python object overhead pandas doesn't report and
+    DuckDB's own `memory_limit` can't see. Callers needing the data read it back from `path`.
+
+    Six checks, same precedence as apply_deterministic_filters() (first match wins), computed
+    once per work_idx (not once per cluster-work pair, since corruption is a property of the work
+    itself, not of any one AwardsCIF's relationship to it):
+      1-2. exclusions.exclude_reason() -- disallowed type, filename-artifact title
+      3-4. missing/implausible/future publication_year
+      5. missing DOI
+      6. corrupt authorship -- any authorship row (any author, not just a candidate's own) has a
+         null author_idx or institution_idx
+      7. raw_orcid logical impossibility -- any authorship row has raw_orcid populated while
+         publication_year < 2012 (ORCID launched Oct 2012). Column-existence-guarded: raw_orcid
+         doesn't exist in the authorships table today, so this check is a no-op until a future
+         raw-data iteration adds it -- confirmed not to hard-fail on the missing column.
+      8. missing source_id on an article
+
+    Returns the survivor DataFrame (work-row shape, no coauthor/institution detail -- see
+    _WORK_ROW_COLUMNS) and persists it, plus a (cluster_id, reason, n) exclusion-count summary,
+    to `path`/`exclusions_path`.
+    """
+    own_con = con is None
+    con = con or duckdb.connect()
+    try:
+        if own_con:
+            con.execute("SET enable_progress_bar = false")
+            con.execute("SET memory_limit = '24GB'")
+            con.execute(f"SET temp_directory = '{DUCKDB_TMP_DIR}'")
+        exclusions.register(con)
+
+        # Small (candidate-pair count, ~100K rows at full scale, two short strings each) --
+        # built via executemany(), not pandas, for consistency (this size was never the actual
+        # problem, but no reason to keep a pandas dependency here either).
+        cand_rows = [(c.cluster_id, oid) for c in clusters for oid in c.oax_candidates]
+        con.execute("CREATE OR REPLACE TEMP TABLE _cand_raw (cluster_id VARCHAR, oax_id VARCHAR)")
+        if cand_rows:
+            con.executemany("INSERT INTO _cand_raw VALUES (?, ?)", cand_rows)
+        con.execute("""
+            CREATE OR REPLACE TEMP TABLE _cand_map AS
+            SELECT cluster_id,
+                   TRY_CAST(regexp_replace(oax_id, 'https://openalex.org/A', '') AS BIGINT) AS author_idx
+            FROM _cand_raw
+            WHERE TRY_CAST(regexp_replace(oax_id, 'https://openalex.org/A', '') AS BIGINT) IS NOT NULL
+        """)
+
+        con.execute(f"""
+            CREATE OR REPLACE TEMP TABLE _cluster_works AS
+            SELECT m.cluster_id, a.work_idx, ARRAY_AGG(DISTINCT a.author_idx) AS source_author_idxs
+            FROM read_parquet('{auth_glob}') a
+            JOIN _cand_map m ON m.author_idx = a.author_idx
+            GROUP BY m.cluster_id, a.work_idx
+        """)
+
+        # raw_orcid: column-existence guard -- must not hard-fail while the column is absent.
+        auth_cols = {r[0] for r in con.execute(
+            f"DESCRIBE SELECT * FROM read_parquet('{auth_glob}') LIMIT 0"
+        ).fetchall()}
+        has_raw_orcid = "raw_orcid" in auth_cols
+        raw_orcid_select = (
+            "bool_or(a.raw_orcid IS NOT NULL) AS any_raw_orcid" if has_raw_orcid
+            else "FALSE AS any_raw_orcid"
+        )
+
+        # per-work corruption aggregate -- computed once per work_idx, not once per
+        # (cluster_id, work_idx) pair, since these facts are properties of the work itself.
+        con.execute(f"""
+            CREATE OR REPLACE TEMP TABLE _work_corruption AS
+            SELECT
+                a.work_idx,
+                bool_or(a.author_idx IS NULL) AS any_null_author,
+                bool_or(a.institution_idx IS NULL) AS any_null_inst,
+                {raw_orcid_select}
+            FROM read_parquet('{auth_glob}') a
+            JOIN (SELECT DISTINCT work_idx FROM _cluster_works) w ON w.work_idx = a.work_idx
+            GROUP BY a.work_idx
+        """)
+
+        con.execute(f"""
+            CREATE OR REPLACE TEMP TABLE _work_details AS
+            SELECT w.work_idx, w.publication_year, w.cited_by_count, w.type, w.doi, w.title, w.source_id
+            FROM read_parquet('{work_glob}') w
+            JOIN (SELECT DISTINCT work_idx FROM _cluster_works) ids ON ids.work_idx = w.work_idx
+        """)
+        con.execute(f"""
+            CREATE OR REPLACE TEMP TABLE _best_topic AS
+            SELECT work_idx, subfield_idx, subfield_name, field_name, domain_name
+            FROM (
+                SELECT t.work_idx, t.subfield_idx, t.subfield_name, t.field_name, t.domain_name,
+                       ROW_NUMBER() OVER (PARTITION BY t.work_idx ORDER BY t.score DESC) AS rn
+                FROM read_parquet('{topic_glob}') t
+                JOIN (SELECT DISTINCT work_idx FROM _cluster_works) ids ON ids.work_idx = t.work_idx
+            ) WHERE rn = 1
+        """)
+        # Every distinct field across ALL of a work's topics (up to 3), not just the single
+        # highest-scoring one -- see _WORK_ROW_COLUMNS' docstring for why: the top-vs-2nd topic
+        # score gap is a near-tie in the median case, so "best topic only" was arbitrarily
+        # discarding real field information for a majority of multi-topic works.
+        con.execute(f"""
+            CREATE OR REPLACE TEMP TABLE _all_fields AS
+            SELECT t.work_idx, ARRAY_AGG(DISTINCT t.field_name) AS field_names
+            FROM read_parquet('{topic_glob}') t
+            JOIN (SELECT DISTINCT work_idx FROM _cluster_works) ids ON ids.work_idx = t.work_idx
+            WHERE t.field_name IS NOT NULL
+            GROUP BY t.work_idx
+        """)
+
+        # Single reason column, same first-match-wins precedence as apply_deterministic_filters(),
+        # plus the new raw_orcid check inserted after corrupt_authorship (both are "any authorship
+        # row" checks).
+        con.execute(f"""
+            CREATE OR REPLACE TEMP TABLE _work_reason AS
+            SELECT
+                d.work_idx,
+                CASE
+                    WHEN exclude_reason(d.title, d.type, d.doi) IS NOT NULL
+                        THEN exclude_reason(d.title, d.type, d.doi)
+                    WHEN d.publication_year IS NULL THEN 'missing_year'
+                    WHEN d.publication_year < {dedup.MIN_PUB_YEAR} THEN 'implausible_year'
+                    WHEN d.publication_year > {dedup.MAX_PUB_YEAR} THEN 'future_year'
+                    WHEN d.doi IS NULL THEN 'missing_doi'
+                    WHEN wc.any_null_author OR wc.any_null_inst THEN 'corrupt_authorship'
+                    WHEN wc.any_raw_orcid AND d.publication_year < 2012 THEN 'raw_orcid_impossible'
+                    WHEN d.source_id IS NULL AND d.type = 'article' THEN 'missing_source'
+                    ELSE NULL
+                END AS reason
+            FROM _work_details d
+            JOIN _work_corruption wc ON wc.work_idx = d.work_idx
+        """)
+
+        # Written directly from DuckDB to parquet -- never materialized as a pandas DataFrame.
+        # At full scale this is ~7M rows with two list-typed columns (source_author_idxs,
+        # field_names); pandas stores list-typed columns as generic Python objects per cell,
+        # real memory overhead .fetchdf() would pay for on top of (and invisible to)
+        # DuckDB's own memory_limit -- exactly the class of problem this whole fix started from.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        exclusions_path.parent.mkdir(parents=True, exist_ok=True)
+
+        con.execute(f"""
+            COPY (
+                SELECT
+                    cw.cluster_id, cw.work_idx, cw.source_author_idxs,
+                    d.publication_year, d.cited_by_count, d.type, d.title, d.doi, d.source_id,
+                    bt.subfield_idx, bt.subfield_name, bt.field_name, af.field_names, bt.domain_name
+                FROM _cluster_works cw
+                JOIN _work_reason r ON r.work_idx = cw.work_idx
+                JOIN _work_details d ON d.work_idx = cw.work_idx
+                LEFT JOIN _best_topic bt ON bt.work_idx = cw.work_idx
+                LEFT JOIN _all_fields af ON af.work_idx = cw.work_idx
+                WHERE r.reason IS NULL
+            ) TO '{path}' (FORMAT PARQUET)
+        """)
+
+        con.execute(f"""
+            COPY (
+                SELECT cw.cluster_id, r.reason, COUNT(*) AS n
+                FROM _cluster_works cw
+                JOIN _work_reason r ON r.work_idx = cw.work_idx
+                WHERE r.reason IS NOT NULL
+                GROUP BY cw.cluster_id, r.reason
+            ) TO '{exclusions_path}' (FORMAT PARQUET)
+        """)
+
+        n_survivors = con.execute(f"SELECT COUNT(*) FROM read_parquet('{path}')").fetchone()[0]
+        reason_totals = con.execute(f"""
+            SELECT reason, SUM(n) FROM read_parquet('{exclusions_path}') GROUP BY reason
+        """).fetchall()
+    finally:
+        if own_con:
+            con.close()
+
+    print(f"  Stage 1: {n_survivors:,} survivors persisted to {path}")
+    print(f"  Stage 1 exclusions by reason: {dict(reason_totals)}")
 
 
 def fetch_candidate_oeuvre(
@@ -46,8 +266,8 @@ def fetch_candidate_oeuvre(
 ) -> list[AwardsCIF]:
     """Populate AwardsCIF.oeuvre: the union of OpenAlex works reached by any of its
     oax_candidates. One batched pass over all clusters, not a per-cluster loop -- matches
-    populate_oax_candidates()'s and identity_clustering.py's own "filter small set first"
-    precedent (CLAUDE.md's documented 30x-regression lesson).
+    populate_oax_candidates()'s own "filter small set first" precedent (CLAUDE.md's documented
+    30x-regression lesson).
 
     Collapses to one row per (cluster_id, work_idx) even when 2+ of a cluster's own candidate
     author_idx both claim the same work -- a different case from dedup_oeuvre()'s title-based
@@ -367,6 +587,102 @@ def apply_subfield_filter(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     return clusters
 
 
+def apply_field_filter_stage3(
+    clusters: list[AwardsCIF],
+    con: duckdb.DuckDBPyConnection | None = None,
+    path: Path = STAGE3_SURVIVORS,
+    exclusions_path: Path = STAGE3_EXCLUSIONS,
+    stage1_path: Path = STAGE1_SURVIVORS,
+) -> None:
+    """Stage 3 of the 2026-08-15 full-scale-OOM fix: reads the Stage 1 survivor set (persisted
+    by fetch_and_filter_stage1()) and applies field-match logic -- same
+    cluster_checks.for2020_primary_fields() call, same "no mapped reference, don't penalize"
+    guard, same "works with no assigned field are left alone" rule as apply_subfield_filter() --
+    entirely in DuckDB (read_parquet -> COPY ... TO parquet), never routing the multi-million-row
+    Stage 1 data through a pandas DataFrame (see fetch_and_filter_stage1()'s docstring -- a real
+    second crash on the first attempt at this, `.fetchdf()` on ~7M rows with two list-typed
+    columns).
+
+    Matches against `field_names` (every distinct field across a work's topics), not the single
+    `field_name` apply_subfield_filter() uses -- a real finding (2026-08-15): the top-vs-2nd
+    topic score gap is a near-tie in the median case, so matching only the single best-scoring
+    topic's field was arbitrarily discarding real field information for a majority of
+    multi-topic works (64.2% of touched works have >1 distinct field; 14.6% of best-topic-only
+    field exclusions had another topic that actually matched the target field).
+
+    Exclusion accounting matches Stage 1's shape: a per-(cluster_id, reason='field_mismatch', n)
+    summary, not a retained per-work record -- this also runs on a still-large population, so full
+    per-work retention would reintroduce real cost (see the plan file's "provenance shape differs
+    by stage" section).
+
+    `clusters`' per-cluster target-field lookup is small (tens of thousands of rows at most,
+    ARC-declared FOR2020 codes -> OAX fields) -- built directly via executemany(), not pandas,
+    even though its size was never the actual problem.
+    """
+    allowed_rows = []
+    no_reference_rows = []
+    for c in clusters:
+        target_fields = for2020_primary_fields(c.for2020_codes)
+        if not target_fields:
+            no_reference_rows.append((c.cluster_id,))
+            continue
+        for f in target_fields:
+            allowed_rows.append((c.cluster_id, f))
+
+    own_con = con is None
+    con = con or duckdb.connect()
+    try:
+        if own_con:
+            con.execute("SET enable_progress_bar = false")
+            con.execute("SET memory_limit = '24GB'")
+            con.execute(f"SET temp_directory = '{DUCKDB_TMP_DIR}'")
+
+        con.execute("CREATE OR REPLACE TEMP TABLE _allowed (cluster_id VARCHAR, field_name VARCHAR)")
+        if allowed_rows:
+            con.executemany("INSERT INTO _allowed VALUES (?, ?)", allowed_rows)
+        con.execute("CREATE OR REPLACE TEMP TABLE _no_ref (cluster_id VARCHAR)")
+        if no_reference_rows:
+            con.executemany("INSERT INTO _no_ref VALUES (?)", no_reference_rows)
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        exclusions_path.parent.mkdir(parents=True, exist_ok=True)
+
+        match_expr = """
+            s.cluster_id IN (SELECT cluster_id FROM _no_ref)
+            OR s.field_names IS NULL
+            OR EXISTS (
+                SELECT 1 FROM _allowed a
+                WHERE a.cluster_id = s.cluster_id AND list_contains(s.field_names, a.field_name)
+            )
+        """
+        con.execute(f"""
+            COPY (
+                SELECT s.* FROM read_parquet('{stage1_path}') s WHERE {match_expr}
+            ) TO '{path}' (FORMAT PARQUET)
+        """)
+
+        con.execute(f"""
+            COPY (
+                SELECT s.cluster_id, 'field_mismatch' AS reason, COUNT(*) AS n
+                FROM read_parquet('{stage1_path}') s
+                WHERE NOT ({match_expr})
+                GROUP BY s.cluster_id
+            ) TO '{exclusions_path}' (FORMAT PARQUET)
+        """)
+
+        n_survivors = con.execute(f"SELECT COUNT(*) FROM read_parquet('{path}')").fetchone()[0]
+        n_mismatch = con.execute(
+            f"SELECT COALESCE(SUM(n), 0) FROM read_parquet('{exclusions_path}')"
+        ).fetchone()[0]
+    finally:
+        if own_con:
+            con.close()
+
+    print(f"  Stage 3: {n_survivors:,} survivors persisted to {path}")
+    print(f"  Stage 3: {n_mismatch:,} works excluded (field_mismatch), "
+          f"{len(no_reference_rows)} clusters had no mapped reference field (skipped)")
+
+
 def _inst_id_to_idx(inst_id: str) -> int | None:
     """AwardsCIF.inst_arr entries are OpenAlex institution ID strings
     ("https://openalex.org/I<n>"), confirmed against admin_orgs.csv's institution_id column --
@@ -421,62 +737,30 @@ def score_coauthor_arc_corroboration(clusters: list[AwardsCIF]) -> list[AwardsCI
     return clusters
 
 
-def score_identity_clusters(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
-    """Records signals["identity_cluster"] = "main_component" | "small_component" | "singleton":
-    groups a cluster's still-included works via identity_clustering.build_identity_clusters_from_data()
-    (shared-coauthor / shared-own-institution union-find), using coauthor_author_idxs/
-    own_institution_idxs fetch_candidate_oeuvre() already pulled in bulk -- no new DB queries,
-    matching that function's own "filter small set first" precedent at 23K-cluster scale.
-
-    "main_component" = the largest resulting group for this cluster; "small_component" = any
-    other multi-work group; "singleton" = a work with no coauthor/institution edge to anything
-    else in this cluster's own surviving oeuvre. Diagnostic only in this pass -- does not gate
-    `included` (see score_institution_coherence()'s docstring for why).
-
-    Known scale risk, not solved here: the underlying union-find is O(n^2) pairwise per cluster,
-    reasonable for the tens-to-low-hundreds of works a typical person has, but this pipeline's
-    most extreme oax_candidates outlier (DE230100180_WeiWang, 436 candidate author_idx) could
-    plausibly bring thousands of works into one cluster's oeuvre -- verify this doesn't blow up
-    at real scale before trusting it unattended (see the plan file's verification section).
-    """
-    for c in clusters:
-        works = c.works
-        if not works:
-            continue
-        work_idxs = [w.work_idx for w in works]
-        coauthor_map = {w.work_idx: w.coauthor_author_idxs for w in works}
-        inst_map = {w.work_idx: w.own_institution_idxs for w in works}
-
-        result = build_identity_clusters_from_data(work_idxs, coauthor_map, inst_map)
-        sizes = {root: len(members) for root, members in result.clusters.items()}
-        main_root = max(sizes, key=sizes.get) if sizes else None
-
-        for w in works:
-            root = result.work_cluster.get(w.work_idx)
-            if root is None or sizes.get(root, 1) == 1:
-                w.signals["identity_cluster"] = "singleton"
-            elif root == main_root:
-                w.signals["identity_cluster"] = "main_component"
-            else:
-                w.signals["identity_cluster"] = "small_component"
-
-    return clusters
-
-
 def build_oeuvre(
     clusters: list[AwardsCIF],
     con: duckdb.DuckDBPyConnection | None = None,
 ) -> list[AwardsCIF]:
     """Composes the full roadmap-step-2 pipeline in order, same plain-pipeline style as
     src/utils/awards_cif.py's refine_clusters(): fetch -> deterministic filters -> title-dedup
-    -> field filter -> institution/coauthor/identity-cluster scoring.
+    -> field filter -> institution/coauthor scoring.
 
     This pass's actual inclusion gate is fully auditable without calibration: deterministic
-    corruption/type/year/doi filters + the field filter. The three scoring functions record
+    corruption/type/year/doi filters + the field filter. The two scoring functions record
     real, useful signals for the later definitive-evidence gate (roadmap step 4) but
     deliberately do not gate `included` themselves yet -- combining them into a weighted score
     needs empirical calibration against known contamination cases, not done here (see the plan
     file's "Not built this pass" section).
+
+    A third scoring function, score_identity_clusters() (shared-coauthor/shared-institution
+    union-find grouping), was dropped entirely 2026-08-15 -- confirmed unreliable by construction,
+    not just weak: it assumes works connected by a shared coauthor/institution are the same
+    person, but there's no evidence a candidate author_idx is ever "pure," and OpenAlex's own
+    merge errors most often happen between genuinely close real people (colleagues, frequent
+    co-authors) -- exactly the case that would show up as strongly *connected* in this graph. The
+    technique's blind spot sits precisely where contamination is most dangerous, so it was removed
+    rather than kept as a weak diagnostic. analysis/utils/identity_clustering.py (its only
+    consumer) and its test file were deleted as part of the same change.
     """
     own_con = con is None
     con = con or duckdb.connect()
@@ -487,7 +771,6 @@ def build_oeuvre(
         clusters = apply_subfield_filter(clusters)
         clusters = score_institution_coherence(clusters)
         clusters = score_coauthor_arc_corroboration(clusters)
-        clusters = score_identity_clusters(clusters)
     finally:
         if own_con:
             con.close()

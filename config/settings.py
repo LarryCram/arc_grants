@@ -11,17 +11,20 @@ load_dotenv()
 
 # Validate all required machine-local vars before constructing paths
 _required = {
-    "DATA_ROOT":    os.getenv("DATA_ROOT", ""),
-    "OUTPUT_ROOT":  os.getenv("OUTPUT_ROOT", ""),
-    "OPENALEX_DIR": os.getenv("OPENALEX_DIR", ""),
+    "DATA_ROOT":      os.getenv("DATA_ROOT", ""),
+    "OUTPUT_ROOT":    os.getenv("OUTPUT_ROOT", ""),
+    "OPENALEX_DIR":   os.getenv("OPENALEX_DIR", ""),
+    "DUCKDB_TMP_DIR": os.getenv("DUCKDB_TMP_DIR", ""),
 }
 _missing = [k for k, v in _required.items() if not v]
 if _missing:
     raise EnvironmentError(f"Not set in .env: {', '.join(_missing)}")
 
-DATA_ROOT    = Path(_required["DATA_ROOT"])
-OUTPUT_ROOT  = Path(_required["OUTPUT_ROOT"])
-OPENALEX_DIR = Path(_required["OPENALEX_DIR"])
+DATA_ROOT      = Path(_required["DATA_ROOT"])
+OUTPUT_ROOT    = Path(_required["OUTPUT_ROOT"])
+OPENALEX_DIR   = Path(_required["OPENALEX_DIR"])
+DUCKDB_TMP_DIR = Path(_required["DUCKDB_TMP_DIR"])
+DUCKDB_TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 # Data subdirectories
 RAW_DATA       = DATA_ROOT / "raw"

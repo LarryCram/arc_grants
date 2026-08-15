@@ -30,6 +30,8 @@ from src.utils.awards_cif import (
     merge_persons_by_orcid,
     compute_gap_candidates,
     compute_reliability,
+    persist_awards_cif,
+    load_awards_cif,
 )
 
 
@@ -371,3 +373,106 @@ class TestComputeReliability:
         c.gap_candidates = ["B"]
         out = compute_reliability([c])
         assert out[0].reliability_tier == "4u"
+
+
+# ---------------------------------------------------------------------------
+# persist_awards_cif / load_awards_cif -- round-trip through a real parquet file (tmp_path),
+# never touching PROCESSED_DATA. Confirms this new persistence (2026-08-15 -- AwardsCIF was
+# never written to disk anywhere before this) actually preserves every field a caller needs,
+# not just that to_parquet()/read_parquet() don't raise.
+# ---------------------------------------------------------------------------
+
+class TestPersistAndLoadAwardsCif:
+    def _full_cluster(self) -> AwardsCIF:
+        c = _build_awards_cif("A", [_item("G1_A", orcid="0000-0001-0001-0001", for_name="Geology", for_code="3705")])
+        c.for2020_codes = [{"code": "3705", "name": "Geology", "is_primary": True, "confidence": 1.0}]
+        c.orcid_for_codes = [{"code": "3705", "name": "Geology", "count": 4}]
+        c.gap_candidates = ["B", "C"]
+        c.oax_candidates = ["https://openalex.org/A100", "https://openalex.org/A200"]
+        c.reliability_tier = "1a"
+        c.resolution_status = "RESOLVED"
+        c.excluded = False
+        c.excluded_reason = None
+        c.record_event("splink_cluster", threshold=0.9)
+        return c
+
+    def test_round_trip_preserves_scalar_fields(self, tmp_path):
+        c = self._full_cluster()
+        path = tmp_path / "awards_cif.parquet"
+        persist_awards_cif([c], path=path)
+        [loaded] = load_awards_cif(path=path)
+        assert loaded.cluster_id == c.cluster_id
+        assert loaded.full_name_key == c.full_name_key
+        assert loaded.orcid_status == c.orcid_status
+        assert loaded.reliability_tier == "1a"
+        assert loaded.resolution_status == "RESOLVED"
+        assert loaded.n_grants == c.n_grants
+        assert loaded.excluded is False
+        assert loaded.excluded_reason is None
+
+    def test_round_trip_preserves_list_fields(self, tmp_path):
+        c = self._full_cluster()
+        path = tmp_path / "awards_cif.parquet"
+        persist_awards_cif([c], path=path)
+        [loaded] = load_awards_cif(path=path)
+        assert loaded.full_names == c.full_names
+        assert loaded.orcids == c.orcids
+        assert loaded.gap_candidates == ["B", "C"]
+        assert loaded.oax_candidates == [
+            "https://openalex.org/A100", "https://openalex.org/A200",
+        ]
+
+    def test_round_trip_preserves_struct_list_fields(self, tmp_path):
+        c = self._full_cluster()
+        path = tmp_path / "awards_cif.parquet"
+        persist_awards_cif([c], path=path)
+        [loaded] = load_awards_cif(path=path)
+        assert loaded.for2020_codes == [
+            {"code": "3705", "name": "Geology", "is_primary": True, "confidence": 1.0},
+        ]
+        assert loaded.orcid_for_codes == [{"code": "3705", "name": "Geology", "count": 4}]
+        assert len(loaded.provenance) == 1
+        assert loaded.provenance[0]["event"] == "splink_cluster"
+        assert loaded.provenance[0]["threshold"] == 0.9
+
+    def test_items_and_oeuvre_not_persisted(self, tmp_path):
+        # Deliberate -- items (raw per-grant detail) is reconstructable from
+        # load_award_cif_items(); oeuvre is populated by later oeuvre_build.py stages, empty at
+        # this point in the chain.
+        c = self._full_cluster()
+        path = tmp_path / "awards_cif.parquet"
+        persist_awards_cif([c], path=path)
+        [loaded] = load_awards_cif(path=path)
+        assert loaded.items == []
+        assert loaded.oeuvre == []
+
+    def test_multiple_clusters_round_trip(self, tmp_path):
+        c1 = _build_awards_cif("A", [_item("G1_A")])
+        c2 = _build_awards_cif("B", [_item("G1_B", full_name="Jane Doe")])
+        path = tmp_path / "awards_cif.parquet"
+        persist_awards_cif([c1, c2], path=path)
+        loaded = load_awards_cif(path=path)
+        assert {c.cluster_id for c in loaded} == {"A", "B"}
+
+    def test_heterogeneous_provenance_shapes_round_trip(self, tmp_path):
+        # Regression test: a real full-population run crashed here -- pyarrow's list-of-struct
+        # inference can't handle provenance events with different kwarg keys across clusters
+        # (record_event()'s whole point is a free-form **details per event type), raising
+        # "cannot mix list and non-list, non-null values". Fixed by JSON-encoding provenance as a
+        # string column instead of a native struct-list column (matches arc_persons.parquet's own
+        # cluster_history column, which is VARCHAR for the same reason).
+        c1 = _build_awards_cif("A", [_item("G1_A")])
+        c1.record_event("splink_cluster", threshold=0.9)
+        c2 = _build_awards_cif("B", [_item("G1_B", full_name="Jane Doe")])
+        c2.record_event("oax_split_record_dedup", removed=["https://openalex.org/A1", "https://openalex.org/A2"])
+        c3 = _build_awards_cif("C", [_item("G1_C", full_name="Alex Lee")])
+        # no provenance at all -- empty list, a third distinct shape
+        path = tmp_path / "awards_cif.parquet"
+        persist_awards_cif([c1, c2, c3], path=path)
+        loaded = {c.cluster_id: c for c in load_awards_cif(path=path)}
+        assert loaded["A"].provenance == [{"event": "splink_cluster", "threshold": 0.9}]
+        assert loaded["B"].provenance == [{
+            "event": "oax_split_record_dedup",
+            "removed": ["https://openalex.org/A1", "https://openalex.org/A2"],
+        }]
+        assert loaded["C"].provenance == []

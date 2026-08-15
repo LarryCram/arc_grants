@@ -8,13 +8,26 @@ Tests for src/utils/oeuvre_build.py's pure, non-DB logic:
 fetch_candidate_oeuvre/dedup_oeuvre/build_oeuvre are DB-heavy (DuckDB scans over the real
 OpenAlex compact tables) -- validated instead by the full-pipeline verification against real
 data (see the plan file), matching the same precedent as src/utils/awards_cif.py's
-populate_oax_candidates()/dedup_oax_candidates(). score_identity_clusters() is a thin wrapper
-around analysis.utils.identity_clustering.build_identity_clusters_from_data(), already covered
-directly by analysis/tests/test_identity_clustering.py.
+populate_oax_candidates()/dedup_oax_candidates().
+
+score_identity_clusters() (and analysis/utils/identity_clustering.py, its only consumer) was
+dropped entirely 2026-08-15 -- confirmed unreliable by construction: it assumed works connected
+by a shared coauthor/institution are the same person, but OpenAlex's own merge errors most often
+happen between genuinely close real people, exactly the case that would show up as strongly
+*connected* by this technique. See build_oeuvre()'s docstring in oeuvre_build.py for the full
+reasoning.
+
+fetch_and_filter_stage1/apply_field_filter_stage3 (2026-08-15 full-scale-OOM fix) ARE tested
+directly, unlike fetch_candidate_oeuvre/dedup_oeuvre above -- their glob paths are injectable
+(auth_glob/work_glob/topic_glob/stage1_path parameters), so small synthetic parquet fixtures
+written to tmp_path stand in for the real OpenAlex compact tables, giving full control over every
+corruption-check branch without needing production-scale data.
 """
 import sys
 from pathlib import Path
 
+import duckdb
+import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -25,6 +38,8 @@ from src.utils.oeuvre_build import (
     apply_subfield_filter,
     score_institution_coherence,
     score_coauthor_arc_corroboration,
+    fetch_and_filter_stage1,
+    apply_field_filter_stage3,
 )
 import src.utils.oeuvre_build as oeuvre_build
 
@@ -286,3 +301,363 @@ class TestScoreCoauthorArcCorroboration:
         c.oeuvre = [_work(1, coauthor_names=["Anyone"])]
         score_coauthor_arc_corroboration([c])
         assert c.oeuvre[0].signals["coinvestigator_match"] is False
+
+
+# ---------------------------------------------------------------------------
+# fetch_and_filter_stage1 -- synthetic parquet fixtures stand in for the real OpenAlex
+# authorships/works/work_topics tables via injectable auth_glob/work_glob/topic_glob.
+# ---------------------------------------------------------------------------
+
+# Explicit dtypes so a column that happens to be all-None in a given test (e.g. doi=None on the
+# fixture's only row) still round-trips through parquet as the right type -- pandas/pyarrow can't
+# infer "string" from a column with no non-null values present, and DuckDB then rejects passing
+# that column into exclude_reason(VARCHAR, VARCHAR, VARCHAR).
+_WORK_DTYPES = {
+    "work_idx": "int64", "publication_year": "Int64", "cited_by_count": "Int64",
+    "type": "string", "doi": "string", "title": "string", "source_id": "Int64",
+}
+_AUTH_DTYPES = {
+    "work_idx": "int64", "author_idx": "Int64", "author_name": "string",
+    "institution_idx": "Int64", "raw_orcid": "string",
+}
+
+
+def _write_pq(tmp_path, name, rows, dtypes=None) -> str:
+    path = tmp_path / name
+    df = pd.DataFrame(rows)
+    if dtypes:
+        df = df.astype({k: v for k, v in dtypes.items() if k in df.columns})
+    df.to_parquet(path, index=False)
+    return str(path)
+
+
+def _work_row(work_idx, **kwargs) -> dict:
+    defaults = dict(
+        publication_year=2020, cited_by_count=5, type="article",
+        doi=f"10.1/{work_idx}", title="A perfectly ordinary research article title",
+        source_id=1,
+    )
+    defaults.update(kwargs)
+    defaults["work_idx"] = work_idx
+    return defaults
+
+
+def _auth_row(work_idx, author_idx, **kwargs) -> dict:
+    defaults = dict(author_name="Someone", institution_idx=1)
+    defaults.update(kwargs)
+    defaults["work_idx"] = work_idx
+    defaults["author_idx"] = author_idx
+    return defaults
+
+
+def _topic_row(work_idx, **kwargs) -> dict:
+    defaults = dict(
+        subfield_idx=1, subfield_name="Sub", field_name="Field", domain_name="Domain", score=0.9,
+    )
+    defaults.update(kwargs)
+    defaults["work_idx"] = work_idx
+    return defaults
+
+
+class TestFetchAndFilterStage1:
+    def _run(self, tmp_path, clusters, auth_rows, work_rows, topic_rows=None):
+        auth_glob = _write_pq(tmp_path, "auth.parquet", auth_rows, dtypes=_AUTH_DTYPES)
+        work_glob = _write_pq(tmp_path, "works.parquet", work_rows, dtypes=_WORK_DTYPES)
+        # read_parquet() can't read a zero-column file, so an "empty" topics table still needs a
+        # dummy row with a work_idx that will never match a real test work (LEFT JOIN leaves the
+        # real rows' topic columns NULL, which is the intended "no topic data" case).
+        topic_glob = _write_pq(tmp_path, "topics.parquet", topic_rows or [_topic_row(-1)])
+        con = duckdb.connect()
+        survivors_path = tmp_path / "stage1_survivors.parquet"
+        exclusions_path = tmp_path / "stage1_exclusions.parquet"
+        fetch_and_filter_stage1(
+            clusters, con=con, path=survivors_path, exclusions_path=exclusions_path,
+            auth_glob=auth_glob, work_glob=work_glob, topic_glob=topic_glob,
+        )
+        # Reading the persisted parquet back is the test's own assertion boundary (legitimate
+        # small-scale "reporting" use of pandas) -- the function itself no longer returns a
+        # DataFrame, see fetch_and_filter_stage1()'s docstring for why.
+        survivors = pd.read_parquet(survivors_path)
+        exclusions_df = pd.read_parquet(exclusions_path)
+        return survivors, exclusions_df
+
+    def _cluster_with_candidate(self, cluster_id="A", author_idx=100):
+        c = _cluster(cluster_id)
+        c.oax_candidates = [f"https://openalex.org/A{author_idx}"]
+        return c
+
+    def test_valid_work_survives(self, tmp_path):
+        c = self._cluster_with_candidate()
+        survivors, exclusions_df = self._run(
+            tmp_path, [c],
+            auth_rows=[_auth_row(1, 100)],
+            work_rows=[_work_row(1)],
+        )
+        assert list(survivors["work_idx"]) == [1]
+        assert survivors.iloc[0]["cluster_id"] == "A"
+        assert len(exclusions_df) == 0
+
+    def test_field_names_aggregates_all_topics_not_just_best(self, tmp_path):
+        # Real finding (2026-08-15): works have up to 3 topics with a near-tied top-vs-2nd score
+        # in the median case, so field_names must carry every distinct field, not just the
+        # single highest-scoring topic's -- apply_field_filter_stage3() matches against this.
+        c = self._cluster_with_candidate()
+        survivors, exclusions_df = self._run(
+            tmp_path, [c],
+            auth_rows=[_auth_row(1, 100)],
+            work_rows=[_work_row(1)],
+            topic_rows=[
+                _topic_row(1, field_name="Earth and Planetary Sciences", score=0.51),
+                _topic_row(1, field_name="Chemistry", score=0.5),
+                _topic_row(1, field_name="Chemistry", score=0.3),  # duplicate field, lower score
+            ],
+        )
+        assert survivors.iloc[0]["field_name"] == "Earth and Planetary Sciences"  # best by score
+        assert sorted(survivors.iloc[0]["field_names"]) == ["Chemistry", "Earth and Planetary Sciences"]
+
+    def test_disallowed_type_excluded(self, tmp_path):
+        c = self._cluster_with_candidate()
+        survivors, exclusions_df = self._run(
+            tmp_path, [c],
+            auth_rows=[_auth_row(1, 100)],
+            work_rows=[_work_row(1, type="dataset")],
+        )
+        assert len(survivors) == 0
+        assert exclusions_df.iloc[0]["reason"] == "type_not_allowed"
+        assert exclusions_df.iloc[0]["n"] == 1
+
+    def test_missing_year_excluded(self, tmp_path):
+        c = self._cluster_with_candidate()
+        survivors, exclusions_df = self._run(
+            tmp_path, [c],
+            auth_rows=[_auth_row(1, 100)],
+            work_rows=[_work_row(1, publication_year=None)],
+        )
+        assert len(survivors) == 0
+        assert exclusions_df.iloc[0]["reason"] == "missing_year"
+
+    def test_implausible_year_excluded(self, tmp_path):
+        c = self._cluster_with_candidate()
+        survivors, exclusions_df = self._run(
+            tmp_path, [c],
+            auth_rows=[_auth_row(1, 100)],
+            work_rows=[_work_row(1, publication_year=1900)],
+        )
+        assert len(survivors) == 0
+        assert exclusions_df.iloc[0]["reason"] == "implausible_year"
+
+    def test_future_year_excluded(self, tmp_path):
+        c = self._cluster_with_candidate()
+        survivors, exclusions_df = self._run(
+            tmp_path, [c],
+            auth_rows=[_auth_row(1, 100)],
+            work_rows=[_work_row(1, publication_year=2999)],
+        )
+        assert len(survivors) == 0
+        assert exclusions_df.iloc[0]["reason"] == "future_year"
+
+    def test_missing_doi_excluded(self, tmp_path):
+        c = self._cluster_with_candidate()
+        survivors, exclusions_df = self._run(
+            tmp_path, [c],
+            auth_rows=[_auth_row(1, 100)],
+            work_rows=[_work_row(1, doi=None)],
+        )
+        assert len(survivors) == 0
+        assert exclusions_df.iloc[0]["reason"] == "missing_doi"
+
+    def test_corrupt_authorship_null_author_excluded(self, tmp_path):
+        c = self._cluster_with_candidate()
+        survivors, exclusions_df = self._run(
+            tmp_path, [c],
+            auth_rows=[_auth_row(1, 100), _auth_row(1, None)],
+            work_rows=[_work_row(1)],
+        )
+        assert len(survivors) == 0
+        assert exclusions_df.iloc[0]["reason"] == "corrupt_authorship"
+
+    def test_corrupt_authorship_null_institution_excluded(self, tmp_path):
+        c = self._cluster_with_candidate()
+        survivors, exclusions_df = self._run(
+            tmp_path, [c],
+            auth_rows=[_auth_row(1, 100), _auth_row(1, 999, institution_idx=None)],
+            work_rows=[_work_row(1)],
+        )
+        assert len(survivors) == 0
+        assert exclusions_df.iloc[0]["reason"] == "corrupt_authorship"
+
+    def test_missing_source_excluded_for_article(self, tmp_path):
+        c = self._cluster_with_candidate()
+        survivors, exclusions_df = self._run(
+            tmp_path, [c],
+            auth_rows=[_auth_row(1, 100)],
+            work_rows=[_work_row(1, source_id=None, type="article")],
+        )
+        assert len(survivors) == 0
+        assert exclusions_df.iloc[0]["reason"] == "missing_source"
+
+    def test_missing_source_ok_for_preprint(self, tmp_path):
+        c = self._cluster_with_candidate()
+        survivors, exclusions_df = self._run(
+            tmp_path, [c],
+            auth_rows=[_auth_row(1, 100)],
+            work_rows=[_work_row(1, source_id=None, type="preprint")],
+        )
+        assert list(survivors["work_idx"]) == [1]
+        assert len(exclusions_df) == 0
+
+    def test_first_reason_wins(self, tmp_path):
+        # disallowed type AND missing DOI both true -- exclude_reason() (type check) fires first
+        c = self._cluster_with_candidate()
+        survivors, exclusions_df = self._run(
+            tmp_path, [c],
+            auth_rows=[_auth_row(1, 100)],
+            work_rows=[_work_row(1, type="dataset", doi=None)],
+        )
+        assert exclusions_df.iloc[0]["reason"] == "type_not_allowed"
+
+    def test_raw_orcid_column_absent_is_a_no_op(self, tmp_path):
+        # authorships table has no raw_orcid column at all -- must not hard-fail, and an old-year
+        # work survives exactly as it would have before this check existed.
+        c = self._cluster_with_candidate()
+        survivors, exclusions_df = self._run(
+            tmp_path, [c],
+            auth_rows=[_auth_row(1, 100)],
+            work_rows=[_work_row(1, publication_year=2005)],
+        )
+        assert list(survivors["work_idx"]) == [1]
+        assert len(exclusions_df) == 0
+
+    def test_raw_orcid_impossible_excluded_when_column_present(self, tmp_path):
+        c = self._cluster_with_candidate()
+        survivors, exclusions_df = self._run(
+            tmp_path, [c],
+            auth_rows=[_auth_row(1, 100, raw_orcid="0000-0001-2345-6789")],
+            work_rows=[_work_row(1, publication_year=2005)],
+        )
+        assert len(survivors) == 0
+        assert exclusions_df.iloc[0]["reason"] == "raw_orcid_impossible"
+
+    def test_raw_orcid_present_but_recent_year_survives(self, tmp_path):
+        c = self._cluster_with_candidate()
+        survivors, exclusions_df = self._run(
+            tmp_path, [c],
+            auth_rows=[_auth_row(1, 100, raw_orcid="0000-0001-2345-6789")],
+            work_rows=[_work_row(1, publication_year=2020)],
+        )
+        assert list(survivors["work_idx"]) == [1]
+        assert len(exclusions_df) == 0
+
+    def test_same_work_multiple_candidates_collapses_to_one_row(self, tmp_path):
+        c = self._cluster_with_candidate()
+        c.oax_candidates = ["https://openalex.org/A100", "https://openalex.org/A200"]
+        survivors, exclusions_df = self._run(
+            tmp_path, [c],
+            auth_rows=[_auth_row(1, 100), _auth_row(1, 200)],
+            work_rows=[_work_row(1)],
+        )
+        assert len(survivors) == 1
+        assert sorted(survivors.iloc[0]["source_author_idxs"]) == [100, 200]
+
+    def test_exclusion_counts_grouped_by_cluster_and_reason(self, tmp_path):
+        c1 = self._cluster_with_candidate("A", 100)
+        c2 = self._cluster_with_candidate("B", 200)
+        survivors, exclusions_df = self._run(
+            tmp_path, [c1, c2],
+            auth_rows=[_auth_row(1, 100), _auth_row(2, 200)],
+            work_rows=[_work_row(1, type="dataset"), _work_row(2, type="dataset")],
+        )
+        assert len(survivors) == 0
+        counts = dict(zip(exclusions_df["cluster_id"], exclusions_df["n"]))
+        assert counts == {"A": 1, "B": 1}
+
+    def test_persists_to_given_paths(self, tmp_path):
+        c = self._cluster_with_candidate()
+        survivors_path = tmp_path / "custom_survivors.parquet"
+        exclusions_path = tmp_path / "custom_exclusions.parquet"
+        auth_glob = _write_pq(tmp_path, "auth.parquet", [_auth_row(1, 100)], dtypes=_AUTH_DTYPES)
+        work_glob = _write_pq(tmp_path, "works.parquet", [_work_row(1)], dtypes=_WORK_DTYPES)
+        topic_glob = _write_pq(tmp_path, "topics.parquet", [_topic_row(-1)])
+        fetch_and_filter_stage1(
+            [c], con=duckdb.connect(), path=survivors_path, exclusions_path=exclusions_path,
+            auth_glob=auth_glob, work_glob=work_glob, topic_glob=topic_glob,
+        )
+        assert survivors_path.exists()
+        assert exclusions_path.exists()
+        assert len(pd.read_parquet(survivors_path)) == 1
+
+
+# ---------------------------------------------------------------------------
+# apply_field_filter_stage3
+# ---------------------------------------------------------------------------
+
+def _survivor_row(cluster_id, work_idx, field_names=None, **kwargs) -> dict:
+    defaults = dict(
+        source_author_idxs=[100], publication_year=2020, cited_by_count=5, type="article",
+        title="A title", doi=f"10.1/{work_idx}", source_id=1,
+        subfield_idx=1, subfield_name="Sub", domain_name="Domain",
+    )
+    defaults.update(kwargs)
+    defaults["cluster_id"] = cluster_id
+    defaults["work_idx"] = work_idx
+    # field_name (singular, display-only, not matched against) also set for schema realism --
+    # the first field_names entry when present, matching what fetch_and_filter_stage1() produces.
+    defaults["field_name"] = field_names[0] if field_names else None
+    defaults["field_names"] = field_names
+    return defaults
+
+
+class TestApplyFieldFilterStage3:
+    def test_matching_field_included(self, tmp_path):
+        c = _cluster("A", for2020_codes=[_for2020("3705", "Geology")])
+        rows = [_survivor_row("A", 1, field_names=["Earth and Planetary Sciences"])]
+        survivors, exclusions_df = self._run(tmp_path, [c], rows)
+        assert list(survivors["work_idx"]) == [1]
+        assert len(exclusions_df) == 0
+
+    def test_mismatched_field_excluded_with_count(self, tmp_path):
+        c = _cluster("A", for2020_codes=[_for2020("3705", "Geology")])
+        rows = [_survivor_row("A", 1, field_names=["Psychology"])]
+        survivors, exclusions_df = self._run(tmp_path, [c], rows)
+        assert len(survivors) == 0
+        assert exclusions_df.iloc[0]["cluster_id"] == "A"
+        assert exclusions_df.iloc[0]["reason"] == "field_mismatch"
+        assert exclusions_df.iloc[0]["n"] == 1
+
+    def test_secondary_topic_field_match_included(self, tmp_path):
+        # Real finding (2026-08-15): a work's best-scoring topic isn't Geology, but a secondary
+        # topic is -- must survive, since the top-vs-2nd topic score gap is a near-tie in the
+        # median case and shouldn't be treated as a confident, exclusive signal.
+        c = _cluster("A", for2020_codes=[_for2020("3705", "Geology")])
+        rows = [_survivor_row("A", 1, field_names=["Psychology", "Earth and Planetary Sciences"])]
+        survivors, exclusions_df = self._run(tmp_path, [c], rows)
+        assert list(survivors["work_idx"]) == [1]
+        assert len(exclusions_df) == 0
+
+    def test_no_field_names_left_alone(self, tmp_path):
+        c = _cluster("A", for2020_codes=[_for2020("3705", "Geology")])
+        rows = [_survivor_row("A", 1, field_names=None)]
+        survivors, exclusions_df = self._run(tmp_path, [c], rows)
+        assert list(survivors["work_idx"]) == [1]
+
+    def test_no_for2020_codes_skips_cluster(self, tmp_path):
+        c = _cluster("A", for2020_codes=[])
+        rows = [_survivor_row("A", 1, field_names=["Anything At All"])]
+        survivors, exclusions_df = self._run(tmp_path, [c], rows)
+        assert list(survivors["work_idx"]) == [1]
+        assert len(exclusions_df) == 0
+
+    def _run(self, tmp_path, clusters, stage1_rows):
+        stage1_path = tmp_path / "stage1.parquet"
+        pd.DataFrame(stage1_rows).to_parquet(stage1_path, index=False)
+        survivors_path = tmp_path / "stage3_survivors.parquet"
+        exclusions_path = tmp_path / "stage3_exclusions.parquet"
+        apply_field_filter_stage3(
+            clusters, con=duckdb.connect(), path=survivors_path,
+            exclusions_path=exclusions_path, stage1_path=stage1_path,
+        )
+        # Reading back is the test's own assertion boundary -- the function itself no longer
+        # returns a DataFrame, see apply_field_filter_stage3()'s docstring for why.
+        survivors = pd.read_parquet(survivors_path)
+        exclusions_df = pd.read_parquet(exclusions_path)
+        return survivors, exclusions_df
