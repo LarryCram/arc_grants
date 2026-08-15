@@ -33,10 +33,12 @@ The Splink pipeline replaces the entire old multi-layer pipeline, archived at
   from a fresh clone) — consolidated 2026-08-07 so nothing irreplaceable can silently fall
   outside version control again. `config/` itself now holds only code (`settings.py`,
   `scope.py`, `scoring.py`).
-- Data root: `/home/lc/m/working/WORKING_ARC_PROJECT/`
-- Processed data: `/home/lc/m/working/WORKING_ARC_PROJECT/processed/`
-- OpenAlex data: set via `OPENALEX_DIR` env var in `.env` → `/home/lc/m/openalex_jul26/parquet_converted/`
-  (migrated from the old Feb26 snapshot 2026-08-08 — see "OpenAlex Snapshot Migration" below).
+- Data root: `/home/lc/k/WORKING_ARC_PROJECT/`
+- Processed data: `/home/lc/k/WORKING_ARC_PROJECT/processed/`
+- OpenAlex data: set via `OPENALEX_DIR` env var in `.env` → `/home/lc/k/openalex_jul26/parquet_converted/`
+  (migrated from the old Feb26 snapshot 2026-08-08 — see "OpenAlex Snapshot Migration" below; moved
+  from `/home/lc/m/...` to `/home/lc/k/...` 2026-08-14 when the drives were consolidated — `k` and
+  `m` are symlinks under `/home/lc/` to `/media/k-drive`/`/media/m-drive`).
   `OPENALEX_DIR` itself holds dimension tables (`authors/`, `institutions.parquet`, etc.);
   `OPENALEX_COMPACT_DIR` (`OPENALEX_DIR / "compact"`) holds the big fact tables (`works/`,
   `authorships/`, `work_topics/`, etc.) — a two-tier split that didn't exist in the old snapshot.
@@ -540,7 +542,8 @@ Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
 - Cross-grant B3 rule: same blocking key + shared co-i + same admin_org → auto-merge (catches Jun Li)
 - Complete 00b run: 7,084 ARC-ORCID records still need fetching (running 2026-06-18; was 11,566)
 - Strengthen reliability_tier: add ARC for_names vs orcid_for_codes agreement signal for HAS_ORCID clusters
-- **Decide on `xpac`/`is_xpac`** (2026-08-08): `/home/lc/m/openalex_jul26/parquet_converted/`
+- **Decide on `xpac`/`is_xpac`** (2026-08-08): `/home/lc/k/openalex_jul26/parquet_converted/`
+  (path as of the 2026-08-14 drive consolidation; was `/home/lc/m/...` when this note was written)
   has `xpac/` and `xpac_raw/` directories alongside `compact/`, mirroring the same table set
   (authorships, references, work_abstracts, works, work_sdgs, work_topics) — **not currently
   read by anything in this codebase** (`analysis/01_fetch_oeuvres.py` and everything else only
