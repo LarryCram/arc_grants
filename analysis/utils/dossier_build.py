@@ -36,6 +36,18 @@ OEUVRES = str(OUTPUT_ROOT / "analysis" / "oeuvres.parquet")
 ANNUAL_METRICS = str(OUTPUT_ROOT / "analysis" / "annual_metrics.parquet")
 
 
+def _fetch_ecr_roles(cluster_id: str, con: duckdb.DuckDBPyConnection) -> list[str]:
+    roles_sql = ", ".join(f"'{r}'" for r in _ecr.ECR_ROLES)
+    rows = con.execute(f"""
+        SELECT DISTINCT i.role_code
+        FROM read_parquet('{GRANT_MAP}') m
+        JOIN read_parquet('{INV_RAW}') i ON m.unique_id = i.unique_id
+        WHERE m.cluster_id = ? AND i.role_code IN ({roles_sql})
+        ORDER BY 1
+    """, [cluster_id]).fetchall()
+    return [r[0] for r in rows]
+
+
 def _fetch_award_contexts(cluster_id: str, con: duckdb.DuckDBPyConnection, first_pub_year: int | None) -> list[AwardContext]:
     roles_sql = ", ".join(f"'{r}'" for r in _ecr.ECR_ROLES)
     rows = con.execute(f"""
@@ -116,6 +128,7 @@ def build_dossier(cohort_row: pd.Series, con: duckdb.DuckDBPyConnection) -> Doss
     annual_series, first_pub_year = _fetch_annual_series(cluster_id, con)
     works, excluded_work_counts = _fetch_works(cluster_id, con)
     award_contexts = _fetch_award_contexts(cluster_id, con, first_pub_year)
+    ecr_roles = _fetch_ecr_roles(cluster_id, con)
 
     return Dossier(
         arc_id=cluster_id,
@@ -125,6 +138,7 @@ def build_dossier(cohort_row: pd.Series, con: duckdb.DuckDBPyConnection) -> Doss
         for_division=cohort_row.get("for_division"),
         panel=cohort_row.get("panel"),
         oax_id=cohort_row["oax_id"],
+        ecr_roles=ecr_roles,
         works=works,
         annual_series=annual_series,
         first_pub_year=first_pub_year,

@@ -123,6 +123,7 @@ class Dossier:
     for_division: str | None = None
     panel: str | None = None  # BSB / EIC / HCA / MPCE / SBE, from data_persisted/for_panels_2020.csv
     oax_id: str | None = None  # human-facing string form ("https://openalex.org/A..."), not author_idx
+    ecr_roles: list[str] = field(default_factory=list)  # role_code(s) qualifying this person for the ECR cohort -- DECRA/APD/APDI (analysis.07_analyse_ecr_fellowships.ECR_ROLES); can hold >1 across different grants
 
     works: list[Work] = field(default_factory=list)
     annual_series: list[YearRecord] = field(default_factory=list)
@@ -193,6 +194,7 @@ class Dossier:
         lines.append(f"- arc_id: `{self.arc_id}`")
         lines.append(f"- panel: {self.panel or '(unmapped)'} / division: {self.for_division or '(unknown)'}")
         lines.append(f"- FOR codes: {', '.join(self.for_codes) or '(none)'}")
+        lines.append(f"- ECR fellowship: {', '.join(self.ecr_roles) or '(unknown)'}")
         lines.append(f"- OpenAlex: {self.oax_id or '(unlinked)'}")
         lines.append(f"- first publication year: {self.first_pub_year or '(unknown)'}")
         lines.append("")
