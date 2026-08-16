@@ -552,6 +552,23 @@ Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
   `compact/work_topics` on the same day, suggesting it may be a newer or still-in-progress
   extraction batch. Needs a decision: merge into `compact/`, read alongside it, or leave
   untouched — deferred, revisit before treating any future oeuvres fetch as complete/final.
+- **Group-level ACIF-membership gate for oeuvre_build.py, not yet built** (2026-08-16, see
+  "Group-level ACIF-membership gate design" below for the full derivation): (1) when an ACIF has
+  an ARC-recorded ORCID, check it directly against each candidate `author_idx`'s own OpenAlex
+  `orcid` field *before* any signal-based reasoning -- a direct identity match settles which
+  group is correct far more decisively than `group_coherent`/`hep_match` inference, and should be
+  the first check attempted, not a fallback. (2) For groups without a direct ORCID match, a
+  size-conditioned rule: a *large* group (exact threshold not yet fixed -- discussion landed near
+  20 works as a starting candidate, not empirically finalized) with zero `hep_match=True` works
+  is strong evidence of being the wrong candidate for this ACIF, independent of how internally
+  coherent that group is with itself. (3) `group_coherent`, once a group's identity is otherwise
+  confirmed (via ORCID or the HEP-based group gate), still has a real, separate job: catching
+  individual misassigned works *within* an already-correctly-identified group (OpenAlex's own
+  disambiguation can misattribute specific papers into an otherwise-correct, ORCID-verified
+  `author_idx` -- ORCID confirms the group, not every work in it). Two confirmed real contamination
+  cases motivate this (Wei Wang, documented separately above; Mohammad Tariqul Islam, see below) --
+  `LP0560280_XiaolinWang` and `LP120200066_XinhuaWu` are suggestive but not yet confirmed either
+  way, worth investigating with the same discipline once this gate exists.
 
 ## Manual Resolution Techniques (Not Yet Automated in Pipeline)
 
@@ -721,3 +738,74 @@ itself, is deferred until later per the user's own explicit direction.
 Tests: `tests/test_cluster_checks.py` — 18 new tests (`TestDivisionMismatchFor2020`,
 `TestAcceptableDivisionPairs`, `TestIsSuspiciousFor2020`), 23 total in the file, all passing.
 `tests/test_awards_cif.py`'s existing 49 tests unaffected and still passing.
+
+## Group-level ACIF-membership gate design (2026-08-16, design only, not yet implemented)
+
+Following the `group_coherent` redesign (commit above), random-sample spot-checks surfaced a
+second, distinct problem: `group_coherent` correctly answers "is this work consistent with the
+rest of its own candidate's work-set" (test b), but nothing in the pipeline actually tests
+"does this candidate's whole work-set belong to this ACIF at all" (test a) at the *group* level --
+only Stage 3's per-*work* field-level filter runs, which is far too permissive to catch a
+genuinely coherent but entirely wrong group. `group_coherent` is not at fault here -- a wrong
+group can be, and often is, real and internally coherent (it's someone else's real career), which
+is exactly what it correctly reports.
+
+**Confirmed case: `DP230101204_MohammadIslam`** (no ORCID, single 2023 UNSW grant, 85 candidates
+in pool, 40 groups, dominant group 309 works). ACIF's declared primary FOR2020 code is "Materials
+engineering" (4016), correct for the real grant-holder (Dr Mohammad S Islam, UNSW, composite
+materials for cryogenic fuel tanks, fracture mechanics -- from the user's direct knowledge of his
+current bio). The dominant 309-work group's `author_idx` (5100748842) was identified precisely:
+it belongs to **Professor Mohammad Tariqul Islam, Universiti Kebangsaan Malaysia** (antenna/RF/
+microwave engineering, his own verified ORCID 0000-0002-4929-3209, 1,308 works, 72 recorded
+institutional affiliations with zero UNSW mentions anywhere) -- a real, different, fully-formed
+OpenAlex identity pulled into the candidate pool because his name sometimes collapses to
+"Mohammad Islam" in some papers' author-list formatting (an ARC<->OAX *linking* problem, a
+different mechanism from the Wei Wang case, which was an ARC-internal Splink dedupe error).
+`group_coherent` rated this wrong group 677/706 True overall -- correctly, since it *is* a
+coherent body of work, just not this ACIF's. Checked directly: of all 40 candidate groups in this
+mega-pool, every single one has zero `hep_match=True` works except one -- group `[5076009177]`,
+36 works, 19 `hep_match=True` (53%) -- very likely the real Dr Mohammad S Islam.
+
+**Suggestive but not confirmed: `LP0560280_XiaolinWang`** (no ORCID, 35 candidates, 24 groups).
+Its 570-work dominant group mixes condensed-matter physics with pharmaceutical/biomedical
+materials by title inspection; within it, `hep_match=True` works are disproportionately
+Condensed Matter Physics (184) versus `hep_match=False/None` works being disproportionately
+Biomedical Engineering/Polymers/Biomaterials -- consistent with a similar contamination pattern,
+but a real ORCID found for "Xiaolin Wang" (institutions matching this grant's UOW) resolves to a
+*separate* 2-work `author_idx` not in this cluster's candidate pool at all (an unrelated
+under-merge gap, out of scope for this pipeline) -- doesn't itself confirm or rule out the
+570-work group's own internal mix. `LP120200066_XinhuaWu` shares the same risk profile from the
+same random sample, not investigated further.
+
+**Design conclusion, reached through direct back-and-forth correction, not a single clean
+derivation** -- recorded here precisely because it wasn't obvious in advance:
+
+1. **When the ACIF has an ARC-recorded ORCID, check it directly against each candidate
+   `author_idx`'s own OpenAlex `orcid` field first**, before any `group_coherent`/`hep_match`
+   signal reasoning. This is a direct identity match, not an inference from a pattern, and
+   settles which group is correct far more decisively when it's available. Verified on
+   `DP220100261_VolkerHessel`: the ACIF's recorded ORCID (0000-0002-9494-1519) matches the
+   dominant 379-work group's own `author_idx` (5003448404) exactly, at the OpenAlex author-record
+   level, independent of any group-size or HEP-ratio inference. A population-level 2x2 of
+   `group_coherent` x `hep_match` presence (54,859 evaluable groups) was explored as a possible
+   general rule before landing here -- kept as background context, not a recommended mechanism:
+   the relationship is real (incoherent groups show 75% zero-HEP vs. coherent groups' 47%
+   population-wide) but far too diluted at small group sizes/low competition to be a clean gate on
+   its own; it strengthens specifically in large, high-competition mega-pools (17.0% vs. 9.4% HEP
+   presence at 16+ competing groups) -- exactly where a direct ORCID check, when available, is
+   preferable anyway.
+2. **For groups without a direct ORCID match** (the harder case -- no shortcut available), a
+   *large* group with zero `hep_match=True` works is strong, close-to-structural evidence of being
+   the wrong candidate: holding an ARC grant requires HEP institutional affiliation at the time,
+   so a genuinely large real oeuvre should show *some* HEP overlap somewhere. This isn't a
+   population-statistics claim needing extensive calibration -- it only needs a size threshold
+   large enough that "zero HEP by chance" becomes implausible. Not yet fixed at a specific number.
+3. **ORCID confirmation and `group_coherent` are not substitutes for each other.** An ORCID match
+   confirms *which group* is correct; it does not confirm that *every work* OpenAlex attributed
+   to that `author_idx` is correctly assigned (OpenAlex's own disambiguation can still misattribute
+   individual papers into an otherwise-correct, ORCID-verified record). `group_coherent`, applied
+   *within* an already-identity-confirmed group, is the tool for catching that -- confirmed
+   consistent on Hessel's group (379/379 works coherent, no internal outliers detected).
+
+Nothing above is implemented in `oeuvre_build.py` yet -- see the matching entry in "Pending code
+TODOs" above.
