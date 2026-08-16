@@ -98,7 +98,8 @@ def fetch_and_filter_stage1(
     Six checks, same precedence as apply_deterministic_filters() (first match wins), computed
     once per work_idx (not once per cluster-work pair, since corruption is a property of the work
     itself, not of any one AwardsCIF's relationship to it):
-      1-2. exclusions.exclude_reason() -- disallowed type, filename-artifact title
+      1-2. disallowed type, filename-artifact title (native SQL, mirrors exclusions.exclude_reason()
+         but inlined to avoid a Python-UDF crossing on title -- see _work_reason's comment)
       3-4. missing/implausible/future publication_year
       5. missing DOI
       6. corrupt authorship -- any authorship row (any author, not just a candidate's own) has a
@@ -120,7 +121,9 @@ def fetch_and_filter_stage1(
             con.execute("SET enable_progress_bar = false")
             con.execute("SET memory_limit = '24GB'")
             con.execute(f"SET temp_directory = '{DUCKDB_TMP_DIR}'")
-        exclusions.register(con)
+        # No exclusions.register(con) here -- type_not_allowed/filename_artifact are inlined as
+        # native SQL below (see _work_reason's comment) specifically to avoid a Python-UDF
+        # crossing on this stage's 9.5M-row title column.
 
         # Small (candidate-pair count, ~100K rows at full scale, two short strings each) --
         # built via executemany(), not pandas, for consistency (this size was never the actual
@@ -213,13 +216,31 @@ def fetch_and_filter_stage1(
         # Single reason column, same first-match-wins precedence as apply_deterministic_filters(),
         # plus the new raw_orcid check inserted after corrupt_authorship (both are "any authorship
         # row" checks).
+        #
+        # type_not_allowed/filename_artifact are inlined as native SQL here rather than calling
+        # exclusions.exclude_reason() as a Python UDF (2026-08-16 fix) -- a real crash, found on
+        # a genuinely malformed title in the raw OpenAlex works parquet (work_idx=7166000813,
+        # a non-UTF-8 byte where a typographic apostrophe should be -- confirmed directly: DuckDB
+        # rejects it with "Invalid byte encountered in STRING -> BLOB conversion" when crossing
+        # into Python, even though plain native-SQL reads of the same title succeed). Any Python
+        # UDF call requires DuckDB to marshal its VARCHAR arguments across the FFI boundary, which
+        # enforces strict UTF-8 validity even when DuckDB's own internal string handling tolerates
+        # a malformed value read straight off disk -- at 9.5M-row scale, one bad title anywhere in
+        # the touched-work set crashes the whole stage with no per-row isolation. Native SQL
+        # (IN-list + regexp_matches(), both verified directly against this exact row) doesn't
+        # cross that boundary at all, so a single malformed title can no longer take down the
+        # whole batch. ALLOWED_TYPES/the filename regex are still owned by exclusions.py --
+        # kept in sync by hand since inlining them avoids the Python-UDF crossing this needs.
+        allowed_types_sql = ", ".join(f"'{t}'" for t in exclusions.ALLOWED_TYPES)
         con.execute(f"""
             CREATE OR REPLACE TEMP TABLE _work_reason AS
             SELECT
                 d.work_idx,
                 CASE
-                    WHEN exclude_reason(d.title, d.type, d.doi) IS NOT NULL
-                        THEN exclude_reason(d.title, d.type, d.doi)
+                    WHEN d.type NOT IN ({allowed_types_sql}) THEN 'type_not_allowed'
+                    WHEN d.doi IS NULL AND d.title IS NOT NULL
+                         AND regexp_matches(TRIM(d.title), '^[A-Za-z0-9_-]+\\.pdf$', 'i')
+                        THEN 'filename_artifact'
                     WHEN d.publication_year IS NULL THEN 'missing_year'
                     WHEN d.publication_year < {dedup.MIN_PUB_YEAR} THEN 'implausible_year'
                     WHEN d.publication_year > {dedup.MAX_PUB_YEAR} THEN 'future_year'
