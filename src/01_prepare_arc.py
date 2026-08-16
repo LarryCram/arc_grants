@@ -40,7 +40,7 @@ from src.utils.cluster_checks import (
     is_suspicious_for2020,
     INDIGENOUS_DIVISION_PREFIX,
 )
-from src.utils.awards_cif import load_grant_for2020_codes
+from src.utils.awards_cif import load_grant_for2020_codes, _load_hep_crosswalk
 
 MANUAL_SPLITS_CSV        = Path(__file__).resolve().parents[1] / "data_persisted" / "manual_splits.csv"
 MANUAL_ORCIDS_CSV        = Path(__file__).resolve().parents[1] / "data_persisted" / "manual_orcids.csv"
@@ -1254,6 +1254,18 @@ def main():
     roles_sql   = ", ".join(f"'{r}'" for r in KEEP_ROLES)
     schemes_sql = ", ".join(f"'{s}'" for s in KEEP_SCHEMES)
 
+    # Scope decision (2026-08-16, user-directed, mirrors the same filter added to
+    # awards_cif.py's load_award_cif_items()): drop investigator records whose grant's
+    # admin_org doesn't resolve to a recognised Australian HEP. Uses the same
+    # canonical-name-resolved crosswalk as awards_cif.py -- NOT a naive direct join on
+    # admin_orgs.csv's own hep_code column, which would reintroduce the alias-vs-canonical
+    # resolution gap already found and fixed this session (an alias row can have a blank
+    # hep_code cell even when its canonical organisationName row has the correct value).
+    hep_crosswalk = _load_hep_crosswalk()
+    con.execute("CREATE OR REPLACE TEMP TABLE _hep_crosswalk (alias VARCHAR, hep_code VARCHAR)")
+    if hep_crosswalk:
+        con.executemany("INSERT INTO _hep_crosswalk VALUES (?, ?)", list(hep_crosswalk.items()))
+
     print(f"  Saving to {out_arc}...")
     con.execute(f"""
         COPY (
@@ -1281,6 +1293,7 @@ def main():
                     ON i.grant_code = s.grant_id
                 WHERE i.role_code IN ({roles_sql})
                   AND substring(i.grant_code, 1, 2) IN ({schemes_sql})
+                  AND g.admin_org IN (SELECT alias FROM _hep_crosswalk)
             )
             SELECT
                 a.unique_id,
@@ -1301,6 +1314,15 @@ def main():
                 ON a.AdminOrg = o.organisationName_alias
         ) TO '{out_arc}' (FORMAT PARQUET)
     """)
+    n_dropped_non_hep = con.execute(f"""
+        SELECT COUNT(*)
+        FROM '{PROCESSED_DATA}/investigators_raw.parquet' i
+        LEFT JOIN '{PROCESSED_DATA}/grants_flat.parquet' g ON i.grant_code = g.grant_code
+        WHERE i.role_code IN ({roles_sql})
+          AND substring(i.grant_code, 1, 2) IN ({schemes_sql})
+          AND g.admin_org NOT IN (SELECT alias FROM _hep_crosswalk)
+    """).fetchone()[0]
+    print(f"  Dropped {n_dropped_non_hep:,} investigator record(s) with a non-HEP admin_org")
     print("  ARC prep complete.")
 
     # ── Phase 2: Deduplicate ARC persons ─────────────────────────────────────

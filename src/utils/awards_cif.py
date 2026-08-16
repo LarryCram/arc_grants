@@ -502,8 +502,24 @@ def load_award_cif_items(
     hep_crosswalk = _load_hep_crosswalk()
 
     items: list[AwardCIFItem] = []
+    n_dropped_non_hep_admin = 0
     for row in rows:
         r = dict(zip(col_names, row))
+
+        # Scope decision (2026-08-16, user-directed): drop any investigator record whose
+        # grant's admin_org does not resolve to a recognised Australian HEP (e.g. Botanic
+        # Gardens & Parks Authority, medical research institutes) -- this used to be allowed
+        # through (documented on AwardsCIF.hep_codes as "~0.55% of in-scope grants have a
+        # non-HEP admin_org, rare but real"), but the oeuvre_build.py subfield/HEP keep/drop
+        # rule structurally can never evaluate hep_match for such a cluster (no HEP code exists
+        # to match against), so a person whose only/primary grant has a non-HEP admin_org gets
+        # judged on subfield_match alone -- a real, avoidable blind spot. Filtered at the
+        # earliest point items are constructed, same as the KEEP_ROLES/KEEP_SCHEMES scope
+        # filters already applied in the SQL above, so a non-HEP-admin_org record never enters
+        # clustering at all -- mirrored in 01_prepare_arc.py's Phase 1 for consistency.
+        if r["admin_org"] not in hep_crosswalk:
+            n_dropped_non_hep_admin += 1
+            continue
 
         first_name = r["first_name"]
         correction = corrections.get(r["unique_id"])
@@ -523,7 +539,21 @@ def load_award_cif_items(
             else None
         )
 
-        eligible_orgs = r["eligible_orgs"] or []
+        # Union eligible_orgs (announcement-time organisations-at-announcement list) with
+        # admin_org itself (2026-08-16 fix): these can genuinely disagree -- 12.13% of all
+        # grants have admin_org absent from eligible_orgs, found via Patricia Valery's
+        # FT100100511 (admin_org='Charles Darwin University', eligible_orgs=['Queensland
+        # Institute of Medical Research']) -- confirmed by the user as a real institution
+        # change (QIMR -> CDU) upon receiving the fellowship, not a data error in either
+        # field. admin_org (extract_grant_flat() prefers the *current*
+        # administering-organisation attrs field over the announcement-time one) can
+        # therefore be more current than eligible_orgs, which is built entirely from the
+        # announcement-time organisations-at-announcement list. Without this union, the scope
+        # filter above (which already validates admin_org resolves to a HEP) and hep_codes
+        # itself could disagree for the same item.
+        eligible_orgs = set(r["eligible_orgs"] or [])
+        if r["admin_org"]:
+            eligible_orgs.add(r["admin_org"])
         hep_codes = sorted({hep_crosswalk[name] for name in eligible_orgs if name in hep_crosswalk})
 
         items.append(AwardCIFItem(
@@ -550,6 +580,7 @@ def load_award_cif_items(
             for_name_tokens=expanded_for_tokens(for_name),
         ))
 
+    print(f"  Dropped {n_dropped_non_hep_admin:,} investigator record(s) with a non-HEP admin_org")
     return items, corrections
 
 
