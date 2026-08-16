@@ -673,6 +673,12 @@ class TestApplyFieldFilterStage3:
 # ---------------------------------------------------------------------------
 
 class TestComputeSubfieldHepSignals:
+    """group_coherent (2026-08-16 redesign) is purely OpenAlex-native -- within one candidate's
+    own Stage-3-surviving work-set, does a work's subfield recur in >=1 other work in the same
+    group? No AwardsCIF-declared FOR2020 reference is consulted at all for this signal (unlike
+    hep_match, which is unchanged). Verified against the real DP0559177_MarkNelson case before
+    being wired in -- see the function's own docstring."""
+
     def _run(self, tmp_path, clusters, stage3_rows, auth_rows, hep_crosswalk, monkeypatch):
         monkeypatch.setattr(oeuvre_build, "_load_institution_hep_crosswalk", lambda: hep_crosswalk)
         stage3_path = tmp_path / "stage3.parquet"
@@ -683,63 +689,109 @@ class TestComputeSubfieldHepSignals:
             clusters, con=duckdb.connect(), path=out_path,
             stage3_path=stage3_path, auth_glob=auth_glob,
         )
-        return pd.read_parquet(out_path)
+        return pd.read_parquet(out_path).set_index("work_idx")
 
-    def test_both_match_true(self, tmp_path, monkeypatch):
-        c = _cluster("A", for2020_codes=[_for2020("3705", "Geology")], hep_codes=["ANU"])
+    def test_recurring_subfield_is_coherent(self, tmp_path, monkeypatch):
+        # One candidate (author_idx 100), 3 works, "Numerical Analysis" recurs across all 3 --
+        # a real count-of-3 shared subfield, group_size=3 is exactly the evaluable threshold.
+        c = _cluster("A", hep_codes=["ANU"])
+        stage3_rows = [
+            _survivor_row("A", 1, field_names=["Mathematics"], subfield_names=["Numerical Analysis"]),
+            _survivor_row("A", 2, field_names=["Mathematics"], subfield_names=["Numerical Analysis", "Applied Mathematics"]),
+            _survivor_row("A", 3, field_names=["Mathematics"], subfield_names=["Numerical Analysis"]),
+        ]
+        auth_rows = [_auth_row(w, 100, institution_idx=200) for w in (1, 2, 3)]
+        out = self._run(tmp_path, [c], stage3_rows, auth_rows, {200: "ANU"}, monkeypatch)
+        assert out.loc[1, "group_coherent"] == True
+        assert out.loc[2, "group_coherent"] == True
+        assert out.loc[3, "group_coherent"] == True
+
+    def test_outlier_subfield_is_not_coherent(self, tmp_path, monkeypatch):
+        # Same group, but work 3's subfield ("Clinical Psychology") never appears elsewhere in
+        # its own group -- a genuine within-group outlier, correctly False.
+        c = _cluster("A", hep_codes=["ANU"])
+        stage3_rows = [
+            _survivor_row("A", 1, field_names=["Mathematics"], subfield_names=["Numerical Analysis"]),
+            _survivor_row("A", 2, field_names=["Mathematics"], subfield_names=["Numerical Analysis"]),
+            _survivor_row("A", 3, field_names=["Psychology"], subfield_names=["Clinical Psychology"]),
+        ]
+        auth_rows = [_auth_row(w, 100, institution_idx=200) for w in (1, 2, 3)]
+        out = self._run(tmp_path, [c], stage3_rows, auth_rows, {200: "ANU"}, monkeypatch)
+        assert out.loc[1, "group_coherent"] == True
+        assert out.loc[2, "group_coherent"] == True
+        assert out.loc[3, "group_coherent"] == False
+
+    def test_small_group_is_none(self, tmp_path, monkeypatch):
+        # Only 2 works in this candidate's group -- no reliable "rest of the group" to compare
+        # against, must be None (not evaluated), never silently False.
+        c = _cluster("A", hep_codes=["ANU"])
+        stage3_rows = [
+            _survivor_row("A", 1, field_names=["Mathematics"], subfield_names=["Numerical Analysis"]),
+            _survivor_row("A", 2, field_names=["Mathematics"], subfield_names=["Numerical Analysis"]),
+        ]
+        auth_rows = [_auth_row(w, 100, institution_idx=200) for w in (1, 2)]
+        out = self._run(tmp_path, [c], stage3_rows, auth_rows, {200: "ANU"}, monkeypatch)
+        assert out.loc[1, "group_coherent"] is None
+        assert out.loc[2, "group_coherent"] is None
+
+    def test_different_candidates_are_separate_groups(self, tmp_path, monkeypatch):
+        # Two different author_idx within the same cluster -- each group's coherence must be
+        # judged only against its own works, not pooled across candidates.
+        c = _cluster("A", hep_codes=["ANU"])
+        stage3_rows = [
+            _survivor_row("A", 1, source_author_idxs=[100], field_names=["Mathematics"], subfield_names=["Numerical Analysis"]),
+            _survivor_row("A", 2, source_author_idxs=[100], field_names=["Mathematics"], subfield_names=["Numerical Analysis"]),
+            _survivor_row("A", 3, source_author_idxs=[100], field_names=["Mathematics"], subfield_names=["Numerical Analysis"]),
+            _survivor_row("A", 4, source_author_idxs=[999], field_names=["Medicine"], subfield_names=["Cardiology"]),
+            _survivor_row("A", 5, source_author_idxs=[999], field_names=["Medicine"], subfield_names=["Cardiology"]),
+            _survivor_row("A", 6, source_author_idxs=[999], field_names=["Medicine"], subfield_names=["Cardiology"]),
+        ]
+        auth_rows = (
+            [_auth_row(w, 100, institution_idx=200) for w in (1, 2, 3)]
+            + [_auth_row(w, 999, institution_idx=200) for w in (4, 5, 6)]
+        )
+        out = self._run(tmp_path, [c], stage3_rows, auth_rows, {200: "ANU"}, monkeypatch)
+        for w in (1, 2, 3, 4, 5, 6):
+            assert out.loc[w, "group_coherent"] == True
+
+    def test_no_subfield_data_on_work_is_none(self, tmp_path, monkeypatch):
+        c = _cluster("A", hep_codes=["ANU"])
+        stage3_rows = [
+            _survivor_row("A", 1, field_names=["Mathematics"], subfield_names=None),
+            _survivor_row("A", 2, field_names=["Mathematics"], subfield_names=["Numerical Analysis"]),
+            _survivor_row("A", 3, field_names=["Mathematics"], subfield_names=["Numerical Analysis"]),
+        ]
+        auth_rows = [_auth_row(w, 100, institution_idx=200) for w in (1, 2, 3)]
+        out = self._run(tmp_path, [c], stage3_rows, auth_rows, {200: "ANU"}, monkeypatch)
+        assert out.loc[1, "group_coherent"] is None
+
+    def test_hep_match_true(self, tmp_path, monkeypatch):
+        c = _cluster("A", hep_codes=["ANU"])
         stage3_rows = [_survivor_row("A", 1, field_names=["Earth and Planetary Sciences"], subfield_names=["Geology"])]
         auth_rows = [_auth_row(1, 100, institution_idx=200)]
         out = self._run(tmp_path, [c], stage3_rows, auth_rows, {200: "ANU"}, monkeypatch)
-        row = out.iloc[0]
-        assert row["subfield_match"] == True
-        assert row["hep_match"] == True
-
-    def test_subfield_mismatch_false(self, tmp_path, monkeypatch):
-        c = _cluster("A", for2020_codes=[_for2020("3705", "Geology")], hep_codes=["ANU"])
-        stage3_rows = [_survivor_row("A", 1, field_names=["Psychology"], subfield_names=["Clinical Psychology"])]
-        auth_rows = [_auth_row(1, 100, institution_idx=200)]
-        out = self._run(tmp_path, [c], stage3_rows, auth_rows, {200: "ANU"}, monkeypatch)
-        row = out.iloc[0]
-        assert row["subfield_match"] == False
-        assert row["hep_match"] == True
+        assert out.loc[1, "hep_match"] == True
 
     def test_hep_mismatch_false(self, tmp_path, monkeypatch):
-        c = _cluster("A", for2020_codes=[_for2020("3705", "Geology")], hep_codes=["ANU"])
+        c = _cluster("A", hep_codes=["ANU"])
         stage3_rows = [_survivor_row("A", 1, field_names=["Earth and Planetary Sciences"], subfield_names=["Geology"])]
         auth_rows = [_auth_row(1, 100, institution_idx=200)]
         out = self._run(tmp_path, [c], stage3_rows, auth_rows, {200: "UNSW"}, monkeypatch)
-        row = out.iloc[0]
-        assert row["subfield_match"] == True
-        assert row["hep_match"] == False
-
-    def test_no_subfield_data_on_work_is_none(self, tmp_path, monkeypatch):
-        c = _cluster("A", for2020_codes=[_for2020("3705", "Geology")], hep_codes=["ANU"])
-        stage3_rows = [_survivor_row("A", 1, field_names=["Earth and Planetary Sciences"], subfield_names=None)]
-        auth_rows = [_auth_row(1, 100, institution_idx=200)]
-        out = self._run(tmp_path, [c], stage3_rows, auth_rows, {200: "ANU"}, monkeypatch)
-        assert out.iloc[0]["subfield_match"] is None
-
-    def test_no_reference_subfields_on_cluster_is_none(self, tmp_path, monkeypatch):
-        # C has no for2020_codes at all -- can't evaluate, must not read as False.
-        c = _cluster("A", for2020_codes=[], hep_codes=["ANU"])
-        stage3_rows = [_survivor_row("A", 1, field_names=["Earth and Planetary Sciences"], subfield_names=["Geology"])]
-        auth_rows = [_auth_row(1, 100, institution_idx=200)]
-        out = self._run(tmp_path, [c], stage3_rows, auth_rows, {200: "ANU"}, monkeypatch)
-        assert out.iloc[0]["subfield_match"] is None
+        assert out.loc[1, "hep_match"] == False
 
     def test_no_own_institution_data_is_none(self, tmp_path, monkeypatch):
         # Institution present on the authorship row but not in the crosswalk (e.g. foreign
         # institution) -- own_inst_idxs resolves to nothing, hep_match must be None not False.
-        c = _cluster("A", for2020_codes=[_for2020("3705", "Geology")], hep_codes=["ANU"])
+        c = _cluster("A", hep_codes=["ANU"])
         stage3_rows = [_survivor_row("A", 1, field_names=["Earth and Planetary Sciences"], subfield_names=["Geology"])]
         auth_rows = [_auth_row(1, 100, institution_idx=999)]
         out = self._run(tmp_path, [c], stage3_rows, auth_rows, {200: "ANU"}, monkeypatch)
-        assert out.iloc[0]["hep_match"] is None
+        assert out.loc[1, "hep_match"] is None
 
     def test_no_reference_hep_on_cluster_is_none(self, tmp_path, monkeypatch):
         # C has no hep_codes at all -- can't evaluate, must not read as False.
-        c = _cluster("A", for2020_codes=[_for2020("3705", "Geology")], hep_codes=[])
+        c = _cluster("A", hep_codes=[])
         stage3_rows = [_survivor_row("A", 1, field_names=["Earth and Planetary Sciences"], subfield_names=["Geology"])]
         auth_rows = [_auth_row(1, 100, institution_idx=200)]
         out = self._run(tmp_path, [c], stage3_rows, auth_rows, {200: "ANU"}, monkeypatch)
-        assert out.iloc[0]["hep_match"] is None
+        assert out.loc[1, "hep_match"] is None

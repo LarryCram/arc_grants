@@ -34,7 +34,7 @@ from src.utils.awards_cif import (
     AwardsCIF, CandidateWork, _load_coinvestigator_names, _norm_full,
     _load_institution_hep_crosswalk,
 )
-from src.utils.cluster_checks import for2020_primary_fields, for2020_primary_subfields
+from src.utils.cluster_checks import for2020_primary_fields
 from analysis.utils import dedup, exclusions
 
 AUTH_GLOB  = str(OPENALEX_COMPACT_DIR / "authorships" / "*.parquet")
@@ -744,27 +744,47 @@ def compute_subfield_hep_signals(
     stage3_path: Path = STAGE3_SURVIVORS,
     auth_glob: str = AUTH_GLOB,
 ) -> None:
-    """Per-candidate, per-work keep/drop signal (2026-08-16 reframing -- see the plan file's
-    "Reframing" section): does a Stage-3-surviving work's OAX subfield match the AwardsCIF's own
-    subfields, and does its institution's HEP code match the AwardsCIF's own HEP codes?
+    """Per-candidate, per-work keep/drop signal -- two tri-state (True/False/None) components,
+    persisted separately, not combined into a verdict here (same "persist components, don't bake
+    in threshold" principle as institution_arc_match/coinvestigator_match):
 
-    Both are recorded as explicit tri-state signals (True/False/None), not combined into a
-    verdict here -- "keep if both match, weaker/ambiguous if only one" is a decision for whoever
-    reads this data, not baked in at persist time (same "persist components, don't bake in
-    threshold" principle as institution_arc_match/coinvestigator_match). None (not False) when
-    there's genuinely nothing to evaluate against -- a work with no subfield-classified topics,
-    a work whose own-candidate institution never resolves to a HEP code, or an AwardsCIF with no
-    subfield/HEP reference at all -- so "not evaluated" is never silently read as "evaluated, no
-    match" (same principle as the deferred coauthor_count<30 cap's None state).
+    hep_match: does a Stage-3-surviving work's own-candidate institution resolve to one of the
+    AwardsCIF's own HEP codes? Unchanged since this function's original version.
+
+    group_coherent (2026-08-16 redesign, replaces the original subfield_match): does this work's
+    OAX subfield recur elsewhere within the SAME candidate author_idx's own Stage-3-surviving
+    work-set? Deliberately no longer compares against the AwardsCIF's own declared FOR2020 code
+    at all -- the original design (work's subfield vs. the single OAX subfield the AwardsCIF's
+    primary FOR2020 code happens to resolve to) was found, via real investigation
+    (DP0559177_MarkNelson: a single 2005 grant, declared primary "Mathematical physics" ->
+    OAX subfield "Mathematical Physics"), to reject a real, internally coherent 22-year research
+    career (diffusion/PDE modelling: Numerical Analysis, Applied Mathematics, Modelling and
+    Simulation) for the mundane reason that none of those subfields happen to be the literal
+    string "Mathematical Physics" -- confirmed this isn't fixable by also considering his
+    secondary codes either (4904 "Pure mathematics" resolves to "Algebra and Number Theory",
+    equally unmatched) — the problem was never which of the AwardsCIF's own codes to consult, it
+    was comparing against an external ARC-derived reference at all. Group-vs-AwardsCIF topical
+    fit is already Stage 3's job (field-level, coarser, already passed by the time a work reaches
+    this function) -- this signal instead asks a different, purely OpenAlex-native question: is
+    this work an outlier *within its own candidate's own body of work*, regardless of what the
+    AwardsCIF declared. Verified directly against Mark Nelson's own two real (8-work and 4-work)
+    coherent-but-different-specialty groups before being wired in here: both come back fully
+    True, correctly reversing the previous subfield_match-based 0/15 keep rate.
+
+    Algorithm ("dict inverse" / inverted-index, not leave-one-out): for each (cluster_id,
+    author_idx) group with >=3 Stage-3-surviving works, explode into (work_idx, subfield) pairs,
+    count how many distinct works in the group carry each subfield, then group_coherent = True
+    for a work if any of its own subfields has a group-wide count >= 2 (i.e. recurs in at least
+    one other work in the same group -- a count of 2 already proves that, no self-exclusion
+    needed). Groups with <3 works have no reliable "rest of the group" to compare against --
+    group_coherent = None (not evaluated), never silently False. Same for a work with no
+    subfield-classified topics of its own (subfield_names IS NULL) -- nothing to evaluate, None
+    regardless of the group's own size.
 
     The own-candidate institution fetch (source_author_idxs' own authorship row on each work,
     not all authors on it) is NOT the same cost problem as the still-deferred coauthor pull: it's
     bounded by (candidate, work) pairs, not by total authors on a work, so no cap is needed here.
     """
-    subfield_rows = [
-        (c.cluster_id, sf)
-        for c in clusters for sf in for2020_primary_subfields(c.for2020_codes)
-    ]
     hep_rows = [(c.cluster_id, hep) for c in clusters for hep in c.hep_codes]
     inst_hep_crosswalk = _load_institution_hep_crosswalk()
     inst_hep_rows = list(inst_hep_crosswalk.items())
@@ -777,9 +797,6 @@ def compute_subfield_hep_signals(
             con.execute("SET memory_limit = '24GB'")
             con.execute(f"SET temp_directory = '{DUCKDB_TMP_DIR}'")
 
-        con.execute("CREATE OR REPLACE TEMP TABLE _c_subfields (cluster_id VARCHAR, subfield_name VARCHAR)")
-        if subfield_rows:
-            con.executemany("INSERT INTO _c_subfields VALUES (?, ?)", subfield_rows)
         con.execute("CREATE OR REPLACE TEMP TABLE _c_hep (cluster_id VARCHAR, hep_code VARCHAR)")
         if hep_rows:
             con.executemany("INSERT INTO _c_hep VALUES (?, ?)", hep_rows)
@@ -806,19 +823,48 @@ def compute_subfield_hep_signals(
             GROUP BY oi.cluster_id, oi.work_idx
         """)
 
+        # Within-candidate-group subfield coherence -- purely OpenAlex-native, no AwardsCIF
+        # reference involved at all. source_author_idxs (list) is the group key, matching how
+        # Stage 1/3 already group works by which candidate(s) touch them.
+        con.execute(f"""
+            CREATE OR REPLACE TEMP TABLE _grp AS
+            SELECT cluster_id, source_author_idxs, work_idx, subfield_names,
+                   COUNT(*) OVER (PARTITION BY cluster_id, source_author_idxs) AS group_size
+            FROM read_parquet('{stage3_path}')
+        """)
+        con.execute("""
+            CREATE OR REPLACE TEMP TABLE _work_subfield AS
+            SELECT cluster_id, source_author_idxs, work_idx, unnest(subfield_names) AS subfield
+            FROM _grp WHERE subfield_names IS NOT NULL
+        """)
+        con.execute("""
+            CREATE OR REPLACE TEMP TABLE _subfield_work_count AS
+            SELECT cluster_id, source_author_idxs, subfield, COUNT(DISTINCT work_idx) AS n_works
+            FROM _work_subfield
+            GROUP BY cluster_id, source_author_idxs, subfield
+        """)
+        con.execute("""
+            CREATE OR REPLACE TEMP TABLE _group_coherent AS
+            SELECT g.cluster_id, g.source_author_idxs, g.work_idx,
+                   CASE WHEN g.subfield_names IS NULL THEN NULL
+                        WHEN g.group_size < 3 THEN NULL
+                        ELSE COALESCE(bool_or(swc.n_works >= 2), FALSE) END AS group_coherent
+            FROM _grp g
+            LEFT JOIN _work_subfield ws
+              ON ws.cluster_id = g.cluster_id AND ws.source_author_idxs = g.source_author_idxs
+                 AND ws.work_idx = g.work_idx
+            LEFT JOIN _subfield_work_count swc
+              ON swc.cluster_id = ws.cluster_id AND swc.source_author_idxs = ws.source_author_idxs
+                 AND swc.subfield = ws.subfield
+            GROUP BY g.cluster_id, g.source_author_idxs, g.work_idx, g.group_size, g.subfield_names
+        """)
+
         path.parent.mkdir(parents=True, exist_ok=True)
         con.execute(f"""
             COPY (
                 SELECT
                     s.cluster_id, s.work_idx,
-                    CASE
-                        WHEN s.subfield_names IS NULL THEN NULL
-                        WHEN NOT EXISTS (SELECT 1 FROM _c_subfields cs WHERE cs.cluster_id = s.cluster_id) THEN NULL
-                        ELSE EXISTS (
-                            SELECT 1 FROM _c_subfields cs
-                            WHERE cs.cluster_id = s.cluster_id AND list_contains(s.subfield_names, cs.subfield_name)
-                        )
-                    END AS subfield_match,
+                    gc.group_coherent,
                     CASE
                         WHEN oh.hep_codes IS NULL THEN NULL
                         WHEN NOT EXISTS (SELECT 1 FROM _c_hep ch WHERE ch.cluster_id = s.cluster_id) THEN NULL
@@ -829,32 +875,36 @@ def compute_subfield_hep_signals(
                     END AS hep_match
                 FROM read_parquet('{stage3_path}') s
                 LEFT JOIN _own_hep oh ON oh.cluster_id = s.cluster_id AND oh.work_idx = s.work_idx
+                LEFT JOIN _group_coherent gc
+                  ON gc.cluster_id = s.cluster_id AND gc.source_author_idxs = s.source_author_idxs
+                     AND gc.work_idx = s.work_idx
             ) TO '{path}' (FORMAT PARQUET)
         """)
 
         n_rows = con.execute(f"SELECT COUNT(*) FROM read_parquet('{path}')").fetchone()[0]
         counts = con.execute(f"""
             SELECT
-                SUM(CASE WHEN subfield_match THEN 1 ELSE 0 END) AS sf_true,
-                SUM(CASE WHEN subfield_match = FALSE THEN 1 ELSE 0 END) AS sf_false,
-                SUM(CASE WHEN subfield_match IS NULL THEN 1 ELSE 0 END) AS sf_null,
+                SUM(CASE WHEN group_coherent THEN 1 ELSE 0 END) AS gc_true,
+                SUM(CASE WHEN group_coherent = FALSE THEN 1 ELSE 0 END) AS gc_false,
+                SUM(CASE WHEN group_coherent IS NULL THEN 1 ELSE 0 END) AS gc_null,
                 SUM(CASE WHEN hep_match THEN 1 ELSE 0 END) AS hep_true,
                 SUM(CASE WHEN hep_match = FALSE THEN 1 ELSE 0 END) AS hep_false,
                 SUM(CASE WHEN hep_match IS NULL THEN 1 ELSE 0 END) AS hep_null,
-                SUM(CASE WHEN subfield_match AND hep_match THEN 1 ELSE 0 END) AS both_true
+                SUM(CASE WHEN group_coherent AND hep_match THEN 1 ELSE 0 END) AS both_true
             FROM read_parquet('{path}')
         """).fetchone()
     finally:
         # See fetch_and_filter_stage1()'s matching cleanup comment -- same shared-connection
         # accumulation risk applies here. This is the last stage in the driver today, but future
         # stages appended after this one would inherit the same risk if this weren't dropped.
-        for t in ["_c_subfields", "_c_hep", "_inst_hep", "_own_inst", "_own_hep"]:
+        for t in ["_c_hep", "_inst_hep", "_own_inst", "_own_hep",
+                  "_grp", "_work_subfield", "_subfield_work_count", "_group_coherent"]:
             con.execute(f"DROP TABLE IF EXISTS {t}")
         if own_con:
             con.close()
 
     print(f"  subfield/HEP signals: {n_rows:,} rows persisted to {path}")
-    print(f"  subfield_match: {counts[0]:,} True / {counts[1]:,} False / {counts[2]:,} None")
+    print(f"  group_coherent: {counts[0]:,} True / {counts[1]:,} False / {counts[2]:,} None")
     print(f"  hep_match:      {counts[3]:,} True / {counts[4]:,} False / {counts[5]:,} None")
     print(f"  both True (strong keep signal): {counts[6]:,}")
 
