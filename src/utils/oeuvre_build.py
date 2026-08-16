@@ -30,8 +30,11 @@ import duckdb
 import pandas as pd
 
 from config.settings import OPENALEX_COMPACT_DIR, PROCESSED_DATA, DUCKDB_TMP_DIR
-from src.utils.awards_cif import AwardsCIF, CandidateWork, _load_coinvestigator_names, _norm_full
-from src.utils.cluster_checks import for2020_primary_fields
+from src.utils.awards_cif import (
+    AwardsCIF, CandidateWork, _load_coinvestigator_names, _norm_full,
+    _load_institution_hep_crosswalk,
+)
+from src.utils.cluster_checks import for2020_primary_fields, for2020_primary_subfields
 from analysis.utils import dedup, exclusions
 
 AUTH_GLOB  = str(OPENALEX_COMPACT_DIR / "authorships" / "*.parquet")
@@ -45,6 +48,9 @@ STAGE1_SURVIVORS  = PROCESSED_DATA / "oeuvre_stage1_survivors.parquet"
 STAGE1_EXCLUSIONS = PROCESSED_DATA / "oeuvre_stage1_exclusions.parquet"
 STAGE3_SURVIVORS  = PROCESSED_DATA / "oeuvre_stage3_survivors.parquet"
 STAGE3_EXCLUSIONS = PROCESSED_DATA / "oeuvre_stage3_exclusions.parquet"
+# Per-candidate, per-work subfield/HEP keep/drop signal (2026-08-16 reframing) -- see
+# compute_subfield_hep_signals()'s docstring.
+STAGE_SUBFIELD_HEP_SIGNALS = PROCESSED_DATA / "oeuvre_subfield_hep_signals.parquet"
 
 # Work-row columns shared by the stage-1/stage-3 checkpoints -- deliberately no coauthor/
 # own_institution_idxs fields: those are only fetched by the (not-yet-restructured) stage 4
@@ -60,8 +66,8 @@ STAGE3_EXCLUSIONS = PROCESSED_DATA / "oeuvre_stage3_exclusions.parquet"
 # exclusions had another topic that actually matched the target field).
 _WORK_ROW_COLUMNS = [
     "cluster_id", "work_idx", "source_author_idxs", "publication_year", "cited_by_count",
-    "type", "title", "doi", "source_id", "subfield_idx", "subfield_name", "field_name",
-    "field_names", "domain_name",
+    "type", "title", "doi", "source_id", "subfield_idx", "subfield_name", "subfield_names",
+    "field_name", "field_names", "domain_name",
 ]
 
 
@@ -191,6 +197,18 @@ def fetch_and_filter_stage1(
             WHERE t.field_name IS NOT NULL
             GROUP BY t.work_idx
         """)
+        # Same idea, one level finer -- every distinct SUBFIELD across all of a work's topics
+        # (2026-08-16, for the per-candidate subfield+HEP keep/drop rule). Same near-tie
+        # reasoning applies, just more so: subfield has ~252 categories vs field's ~25, so two
+        # of a work's topics are even less likely to share a subfield than a field.
+        con.execute(f"""
+            CREATE OR REPLACE TEMP TABLE _all_subfields AS
+            SELECT t.work_idx, ARRAY_AGG(DISTINCT t.subfield_name) AS subfield_names
+            FROM read_parquet('{topic_glob}') t
+            JOIN (SELECT DISTINCT work_idx FROM _cluster_works) ids ON ids.work_idx = t.work_idx
+            WHERE t.subfield_name IS NOT NULL
+            GROUP BY t.work_idx
+        """)
 
         # Single reason column, same first-match-wins precedence as apply_deterministic_filters(),
         # plus the new raw_orcid check inserted after corrupt_authorship (both are "any authorship
@@ -228,12 +246,14 @@ def fetch_and_filter_stage1(
                 SELECT
                     cw.cluster_id, cw.work_idx, cw.source_author_idxs,
                     d.publication_year, d.cited_by_count, d.type, d.title, d.doi, d.source_id,
-                    bt.subfield_idx, bt.subfield_name, bt.field_name, af.field_names, bt.domain_name
+                    bt.subfield_idx, bt.subfield_name, sf.subfield_names,
+                    bt.field_name, af.field_names, bt.domain_name
                 FROM _cluster_works cw
                 JOIN _work_reason r ON r.work_idx = cw.work_idx
                 JOIN _work_details d ON d.work_idx = cw.work_idx
                 LEFT JOIN _best_topic bt ON bt.work_idx = cw.work_idx
                 LEFT JOIN _all_fields af ON af.work_idx = cw.work_idx
+                LEFT JOIN _all_subfields sf ON sf.work_idx = cw.work_idx
                 WHERE r.reason IS NULL
             ) TO '{path}' (FORMAT PARQUET)
         """)
@@ -253,6 +273,15 @@ def fetch_and_filter_stage1(
             SELECT reason, SUM(n) FROM read_parquet('{exclusions_path}') GROUP BY reason
         """).fetchall()
     finally:
+        # These temp tables (several at ~9.5M rows each) are only needed within this function --
+        # the result is already persisted to path/exclusions_path. A shared connection (the
+        # driver script passes one `con` through every stage) does NOT auto-release TEMP TABLE
+        # memory when a function returns, so an explicit drop is required or it accumulates
+        # across every later stage sharing this connection (confirmed the hard way, 2026-08-16 --
+        # a bare OOM kill with no Python traceback on the very next stage).
+        for t in ["_cand_raw", "_cand_map", "_cluster_works", "_work_corruption", "_work_details",
+                  "_best_topic", "_all_fields", "_all_subfields", "_work_reason"]:
+            con.execute(f"DROP TABLE IF EXISTS {t}")
         if own_con:
             con.close()
 
@@ -675,12 +704,138 @@ def apply_field_filter_stage3(
             f"SELECT COALESCE(SUM(n), 0) FROM read_parquet('{exclusions_path}')"
         ).fetchone()[0]
     finally:
+        # See fetch_and_filter_stage1()'s matching cleanup comment -- same shared-connection
+        # accumulation risk applies here.
+        for t in ["_allowed", "_no_ref"]:
+            con.execute(f"DROP TABLE IF EXISTS {t}")
         if own_con:
             con.close()
 
     print(f"  Stage 3: {n_survivors:,} survivors persisted to {path}")
     print(f"  Stage 3: {n_mismatch:,} works excluded (field_mismatch), "
           f"{len(no_reference_rows)} clusters had no mapped reference field (skipped)")
+
+
+def compute_subfield_hep_signals(
+    clusters: list[AwardsCIF],
+    con: duckdb.DuckDBPyConnection | None = None,
+    path: Path = STAGE_SUBFIELD_HEP_SIGNALS,
+    stage3_path: Path = STAGE3_SURVIVORS,
+    auth_glob: str = AUTH_GLOB,
+) -> None:
+    """Per-candidate, per-work keep/drop signal (2026-08-16 reframing -- see the plan file's
+    "Reframing" section): does a Stage-3-surviving work's OAX subfield match the AwardsCIF's own
+    subfields, and does its institution's HEP code match the AwardsCIF's own HEP codes?
+
+    Both are recorded as explicit tri-state signals (True/False/None), not combined into a
+    verdict here -- "keep if both match, weaker/ambiguous if only one" is a decision for whoever
+    reads this data, not baked in at persist time (same "persist components, don't bake in
+    threshold" principle as institution_arc_match/coinvestigator_match). None (not False) when
+    there's genuinely nothing to evaluate against -- a work with no subfield-classified topics,
+    a work whose own-candidate institution never resolves to a HEP code, or an AwardsCIF with no
+    subfield/HEP reference at all -- so "not evaluated" is never silently read as "evaluated, no
+    match" (same principle as the deferred coauthor_count<30 cap's None state).
+
+    The own-candidate institution fetch (source_author_idxs' own authorship row on each work,
+    not all authors on it) is NOT the same cost problem as the still-deferred coauthor pull: it's
+    bounded by (candidate, work) pairs, not by total authors on a work, so no cap is needed here.
+    """
+    subfield_rows = [
+        (c.cluster_id, sf)
+        for c in clusters for sf in for2020_primary_subfields(c.for2020_codes)
+    ]
+    hep_rows = [(c.cluster_id, hep) for c in clusters for hep in c.hep_codes]
+    inst_hep_crosswalk = _load_institution_hep_crosswalk()
+    inst_hep_rows = list(inst_hep_crosswalk.items())
+
+    own_con = con is None
+    con = con or duckdb.connect()
+    try:
+        if own_con:
+            con.execute("SET enable_progress_bar = false")
+            con.execute("SET memory_limit = '24GB'")
+            con.execute(f"SET temp_directory = '{DUCKDB_TMP_DIR}'")
+
+        con.execute("CREATE OR REPLACE TEMP TABLE _c_subfields (cluster_id VARCHAR, subfield_name VARCHAR)")
+        if subfield_rows:
+            con.executemany("INSERT INTO _c_subfields VALUES (?, ?)", subfield_rows)
+        con.execute("CREATE OR REPLACE TEMP TABLE _c_hep (cluster_id VARCHAR, hep_code VARCHAR)")
+        if hep_rows:
+            con.executemany("INSERT INTO _c_hep VALUES (?, ?)", hep_rows)
+        con.execute("CREATE OR REPLACE TEMP TABLE _inst_hep (institution_idx BIGINT, hep_code VARCHAR)")
+        if inst_hep_rows:
+            con.executemany("INSERT INTO _inst_hep VALUES (?, ?)", inst_hep_rows)
+
+        # Own-candidate institution per surviving work.
+        con.execute(f"""
+            CREATE OR REPLACE TEMP TABLE _own_inst AS
+            SELECT s.cluster_id, s.work_idx, ARRAY_AGG(DISTINCT a.institution_idx) AS own_inst_idxs
+            FROM read_parquet('{stage3_path}') s
+            JOIN read_parquet('{auth_glob}') a
+              ON a.work_idx = s.work_idx AND list_contains(s.source_author_idxs, a.author_idx)
+            WHERE a.institution_idx IS NOT NULL
+            GROUP BY s.cluster_id, s.work_idx
+        """)
+        # Resolve those institutions to HEP codes.
+        con.execute("""
+            CREATE OR REPLACE TEMP TABLE _own_hep AS
+            SELECT oi.cluster_id, oi.work_idx, ARRAY_AGG(DISTINCT ih.hep_code) AS hep_codes
+            FROM _own_inst oi, UNNEST(oi.own_inst_idxs) AS u(institution_idx)
+            JOIN _inst_hep ih ON ih.institution_idx = u.institution_idx
+            GROUP BY oi.cluster_id, oi.work_idx
+        """)
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        con.execute(f"""
+            COPY (
+                SELECT
+                    s.cluster_id, s.work_idx,
+                    CASE
+                        WHEN s.subfield_names IS NULL THEN NULL
+                        WHEN NOT EXISTS (SELECT 1 FROM _c_subfields cs WHERE cs.cluster_id = s.cluster_id) THEN NULL
+                        ELSE EXISTS (
+                            SELECT 1 FROM _c_subfields cs
+                            WHERE cs.cluster_id = s.cluster_id AND list_contains(s.subfield_names, cs.subfield_name)
+                        )
+                    END AS subfield_match,
+                    CASE
+                        WHEN oh.hep_codes IS NULL THEN NULL
+                        WHEN NOT EXISTS (SELECT 1 FROM _c_hep ch WHERE ch.cluster_id = s.cluster_id) THEN NULL
+                        ELSE EXISTS (
+                            SELECT 1 FROM _c_hep ch
+                            WHERE ch.cluster_id = s.cluster_id AND list_contains(oh.hep_codes, ch.hep_code)
+                        )
+                    END AS hep_match
+                FROM read_parquet('{stage3_path}') s
+                LEFT JOIN _own_hep oh ON oh.cluster_id = s.cluster_id AND oh.work_idx = s.work_idx
+            ) TO '{path}' (FORMAT PARQUET)
+        """)
+
+        n_rows = con.execute(f"SELECT COUNT(*) FROM read_parquet('{path}')").fetchone()[0]
+        counts = con.execute(f"""
+            SELECT
+                SUM(CASE WHEN subfield_match THEN 1 ELSE 0 END) AS sf_true,
+                SUM(CASE WHEN subfield_match = FALSE THEN 1 ELSE 0 END) AS sf_false,
+                SUM(CASE WHEN subfield_match IS NULL THEN 1 ELSE 0 END) AS sf_null,
+                SUM(CASE WHEN hep_match THEN 1 ELSE 0 END) AS hep_true,
+                SUM(CASE WHEN hep_match = FALSE THEN 1 ELSE 0 END) AS hep_false,
+                SUM(CASE WHEN hep_match IS NULL THEN 1 ELSE 0 END) AS hep_null,
+                SUM(CASE WHEN subfield_match AND hep_match THEN 1 ELSE 0 END) AS both_true
+            FROM read_parquet('{path}')
+        """).fetchone()
+    finally:
+        # See fetch_and_filter_stage1()'s matching cleanup comment -- same shared-connection
+        # accumulation risk applies here. This is the last stage in the driver today, but future
+        # stages appended after this one would inherit the same risk if this weren't dropped.
+        for t in ["_c_subfields", "_c_hep", "_inst_hep", "_own_inst", "_own_hep"]:
+            con.execute(f"DROP TABLE IF EXISTS {t}")
+        if own_con:
+            con.close()
+
+    print(f"  subfield/HEP signals: {n_rows:,} rows persisted to {path}")
+    print(f"  subfield_match: {counts[0]:,} True / {counts[1]:,} False / {counts[2]:,} None")
+    print(f"  hep_match:      {counts[3]:,} True / {counts[4]:,} False / {counts[5]:,} None")
+    print(f"  both True (strong keep signal): {counts[6]:,}")
 
 
 def _inst_id_to_idx(inst_id: str) -> int | None:

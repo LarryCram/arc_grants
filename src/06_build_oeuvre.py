@@ -2,9 +2,9 @@
 src/06_build_oeuvre.py
 
 Builds and persists the AwardsCIF population, then runs the oeuvre-build pipeline through
-Stage 3 (field filter) -- the 2026-08-15 full-scale-OOM fix. Currently stops after Stage 3;
-Stage 4 (coauthor pull, gated at coauthor_count < 30) and the Weights stage are not yet wired
-into this driver (see the plan file's "Not addressed by this fix" section).
+Stage 3 (field filter) and the per-candidate subfield+HEP signal computation (2026-08-16
+reframing). Stage 4 (coauthor pull, gated at coauthor_count < 30) and the Weights stage are not
+yet wired into this driver (see the plan file's "Not addressed by this fix" section).
 
 AwardsCIF() is the pipeline going forward -- a refactor of 01_prepare_arc.py/03_link_arc_oax.py/
 04_resolve_links.py onto a proper dataclass, not a side experiment -- so this script's output
@@ -17,6 +17,7 @@ Steps:
   2. persist_awards_cif() -- PROCESSED_DATA/awards_cif.parquet (never persisted before this)
   3. fetch_and_filter_stage1() -- PROCESSED_DATA/oeuvre_stage1_{survivors,exclusions}.parquet
   4. apply_field_filter_stage3() -- PROCESSED_DATA/oeuvre_stage3_{survivors,exclusions}.parquet
+  5. compute_subfield_hep_signals() -- PROCESSED_DATA/oeuvre_subfield_hep_signals.parquet
 
 Usage:
   .venv/bin/python src/06_build_oeuvre.py
@@ -35,10 +36,12 @@ from src.utils.awards_cif import build_awards_cif_population, persist_awards_cif
 from src.utils.oeuvre_build import (
     fetch_and_filter_stage1,
     apply_field_filter_stage3,
+    compute_subfield_hep_signals,
     STAGE1_SURVIVORS,
     STAGE1_EXCLUSIONS,
     STAGE3_SURVIVORS,
     STAGE3_EXCLUSIONS,
+    STAGE_SUBFIELD_HEP_SIGNALS,
 )
 
 
@@ -73,6 +76,12 @@ def main():
     apply_field_filter_stage3(
         clusters, con=con, path=STAGE3_SURVIVORS, exclusions_path=STAGE3_EXCLUSIONS,
         stage1_path=STAGE1_SURVIVORS,
+    )
+    print(f"  [{_elapsed(t0)}]")
+
+    print("=== Step 5 -- compute_subfield_hep_signals ===")
+    compute_subfield_hep_signals(
+        clusters, con=con, path=STAGE_SUBFIELD_HEP_SIGNALS, stage3_path=STAGE3_SURVIVORS,
     )
     print(f"  [{_elapsed(t0)}]")
 

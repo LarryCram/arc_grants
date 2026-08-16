@@ -93,7 +93,7 @@ def check_A(persons, gmap, inv_f, prep, tf_lookup) -> int:
 
     # A3: is_suspicious_for2020 across ALL clusters (must agree with A2)
     suspect = persons[persons.apply(
-        lambda r: is_suspicious_for2020(r["orcids"], r["full_name_key"], r["for2020_codes"], tf_lookup), axis=1
+        lambda r: is_suspicious_for2020(r["full_name_key"], r["for2020_codes"], tf_lookup), axis=1
     )]
     icon = FAIL if len(suspect) else PASS
     # MULTI_ORCID clusters are UNRESOLVED (A1) but not is_suspicious (has ORCIDs → bails)

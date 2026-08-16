@@ -40,6 +40,7 @@ from src.utils.oeuvre_build import (
     score_coauthor_arc_corroboration,
     fetch_and_filter_stage1,
     apply_field_filter_stage3,
+    compute_subfield_hep_signals,
 )
 import src.utils.oeuvre_build as oeuvre_build
 
@@ -54,12 +55,13 @@ def _item(unique_id, grant_code=None, full_name="John Smith") -> AwardCIFItem:
     )
 
 
-def _cluster(cluster_id, inst_arr=None, for2020_codes=None, items=None) -> AwardsCIF:
+def _cluster(cluster_id, inst_arr=None, for2020_codes=None, items=None, hep_codes=None) -> AwardsCIF:
     return AwardsCIF(
         cluster_id=cluster_id,
         items=items or [_item(f"{cluster_id}_G1")],
         inst_arr=inst_arr or [],
         for2020_codes=for2020_codes or [],
+        hep_codes=hep_codes or [],
     )
 
 
@@ -661,3 +663,83 @@ class TestApplyFieldFilterStage3:
         survivors = pd.read_parquet(survivors_path)
         exclusions_df = pd.read_parquet(exclusions_path)
         return survivors, exclusions_df
+
+
+# ---------------------------------------------------------------------------
+# compute_subfield_hep_signals -- 2026-08-16 reframing (per-candidate, per-work subfield+HEP
+# signal). _load_institution_hep_crosswalk() is monkeypatched, same pattern as
+# score_coauthor_arc_corroboration()'s _load_coinvestigator_names(), so tests are isolated from
+# real admin_orgs.csv content/institution IDs.
+# ---------------------------------------------------------------------------
+
+class TestComputeSubfieldHepSignals:
+    def _run(self, tmp_path, clusters, stage3_rows, auth_rows, hep_crosswalk, monkeypatch):
+        monkeypatch.setattr(oeuvre_build, "_load_institution_hep_crosswalk", lambda: hep_crosswalk)
+        stage3_path = tmp_path / "stage3.parquet"
+        pd.DataFrame(stage3_rows).to_parquet(stage3_path, index=False)
+        auth_glob = _write_pq(tmp_path, "auth.parquet", auth_rows, dtypes=_AUTH_DTYPES)
+        out_path = tmp_path / "signals.parquet"
+        compute_subfield_hep_signals(
+            clusters, con=duckdb.connect(), path=out_path,
+            stage3_path=stage3_path, auth_glob=auth_glob,
+        )
+        return pd.read_parquet(out_path)
+
+    def test_both_match_true(self, tmp_path, monkeypatch):
+        c = _cluster("A", for2020_codes=[_for2020("3705", "Geology")], hep_codes=["ANU"])
+        stage3_rows = [_survivor_row("A", 1, field_names=["Earth and Planetary Sciences"], subfield_names=["Geology"])]
+        auth_rows = [_auth_row(1, 100, institution_idx=200)]
+        out = self._run(tmp_path, [c], stage3_rows, auth_rows, {200: "ANU"}, monkeypatch)
+        row = out.iloc[0]
+        assert row["subfield_match"] == True
+        assert row["hep_match"] == True
+
+    def test_subfield_mismatch_false(self, tmp_path, monkeypatch):
+        c = _cluster("A", for2020_codes=[_for2020("3705", "Geology")], hep_codes=["ANU"])
+        stage3_rows = [_survivor_row("A", 1, field_names=["Psychology"], subfield_names=["Clinical Psychology"])]
+        auth_rows = [_auth_row(1, 100, institution_idx=200)]
+        out = self._run(tmp_path, [c], stage3_rows, auth_rows, {200: "ANU"}, monkeypatch)
+        row = out.iloc[0]
+        assert row["subfield_match"] == False
+        assert row["hep_match"] == True
+
+    def test_hep_mismatch_false(self, tmp_path, monkeypatch):
+        c = _cluster("A", for2020_codes=[_for2020("3705", "Geology")], hep_codes=["ANU"])
+        stage3_rows = [_survivor_row("A", 1, field_names=["Earth and Planetary Sciences"], subfield_names=["Geology"])]
+        auth_rows = [_auth_row(1, 100, institution_idx=200)]
+        out = self._run(tmp_path, [c], stage3_rows, auth_rows, {200: "UNSW"}, monkeypatch)
+        row = out.iloc[0]
+        assert row["subfield_match"] == True
+        assert row["hep_match"] == False
+
+    def test_no_subfield_data_on_work_is_none(self, tmp_path, monkeypatch):
+        c = _cluster("A", for2020_codes=[_for2020("3705", "Geology")], hep_codes=["ANU"])
+        stage3_rows = [_survivor_row("A", 1, field_names=["Earth and Planetary Sciences"], subfield_names=None)]
+        auth_rows = [_auth_row(1, 100, institution_idx=200)]
+        out = self._run(tmp_path, [c], stage3_rows, auth_rows, {200: "ANU"}, monkeypatch)
+        assert out.iloc[0]["subfield_match"] is None
+
+    def test_no_reference_subfields_on_cluster_is_none(self, tmp_path, monkeypatch):
+        # C has no for2020_codes at all -- can't evaluate, must not read as False.
+        c = _cluster("A", for2020_codes=[], hep_codes=["ANU"])
+        stage3_rows = [_survivor_row("A", 1, field_names=["Earth and Planetary Sciences"], subfield_names=["Geology"])]
+        auth_rows = [_auth_row(1, 100, institution_idx=200)]
+        out = self._run(tmp_path, [c], stage3_rows, auth_rows, {200: "ANU"}, monkeypatch)
+        assert out.iloc[0]["subfield_match"] is None
+
+    def test_no_own_institution_data_is_none(self, tmp_path, monkeypatch):
+        # Institution present on the authorship row but not in the crosswalk (e.g. foreign
+        # institution) -- own_inst_idxs resolves to nothing, hep_match must be None not False.
+        c = _cluster("A", for2020_codes=[_for2020("3705", "Geology")], hep_codes=["ANU"])
+        stage3_rows = [_survivor_row("A", 1, field_names=["Earth and Planetary Sciences"], subfield_names=["Geology"])]
+        auth_rows = [_auth_row(1, 100, institution_idx=999)]
+        out = self._run(tmp_path, [c], stage3_rows, auth_rows, {200: "ANU"}, monkeypatch)
+        assert out.iloc[0]["hep_match"] is None
+
+    def test_no_reference_hep_on_cluster_is_none(self, tmp_path, monkeypatch):
+        # C has no hep_codes at all -- can't evaluate, must not read as False.
+        c = _cluster("A", for2020_codes=[_for2020("3705", "Geology")], hep_codes=[])
+        stage3_rows = [_survivor_row("A", 1, field_names=["Earth and Planetary Sciences"], subfield_names=["Geology"])]
+        auth_rows = [_auth_row(1, 100, institution_idx=200)]
+        out = self._run(tmp_path, [c], stage3_rows, auth_rows, {200: "ANU"}, monkeypatch)
+        assert out.iloc[0]["hep_match"] is None

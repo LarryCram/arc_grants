@@ -604,3 +604,120 @@ The name-filter step in `04_resolve_links.py` rescues arc_ids with only sub-HC c
 - **Paul Young** (n=28, no ORCID): added to `data_persisted/manual_splits.csv` (confirmed_different_people=True);
   splits by institution into UQ virologist / USyd pharmacologist / Monash engineer / UNSW (crop) groups.
   Re-run 01_prepare_arc.py to materialise sub-clusters, then add per-sub-cluster manual resolutions.
+
+## `is_suspicious_for2020()` ORCID-bypass bug found and fixed; empirical division-pairs whitelist added (2026-08-16)
+
+Found while investigating whether roadmap step 3 addressed anything real (it doesn't, see
+`oeuvre_build.py`'s notes) — a spot-check of the largest OAX-candidate-pool `AwardsCIF`
+(`DE230100180_WeiWang`, 374 candidates) turned out to itself be a confirmed **ARC-side mis-merge**
+of at least 4 different real people, same class as the Raymond/Robert Gilbert and Paul Young cases
+above but far more consequential to find, since it exposed a real, previously-undetected bug.
+
+**The false merge**: 9 grants (`DE230100180`, 2023 DECRA + 8 `DP`/`LP` grants spanning 2008–2021)
+were clustered as one person under the literal name "Wei Wang." Only 1 of the 9 grants carries an
+ORCID (`0000-0001-5788-6314`); the other 8 have none. External biography + PhD-year confirmation
+(PhD 2019, City University of Hong Kong / USTC, joined UNSW 2019, DECRA 2022/2023, now RMIT —
+fire-safety-materials engineering) proves the ORCID-holder cannot be CI on any grant funded before
+2019 — ruling out all 8 other grants definitively. Grant-by-grant breakdown resolves cleanly into
+**4 people** using nothing but ARC's own admin_org/funding-year/FOR-division data: the real DECRA
+holder (UNSW→RMIT, div 40 Civil Engineering); a 6-grant 2008–2021 UNSW Information-Systems senior
+CI (div 46); an isolated 2009 UQ grant (also div 46, different institution — likely a 5th person or
+an early pre-UNSW career step, unconfirmed); and a 2016 Curtin Chemical-Engineering grant (div 40,
+different institution). Root cause of the original merge: all 9 records share the byte-identical
+name "Wei Wang," so Splink's name-comparison features had zero discriminating power — the entire
+merge decision rested on institution/FOR-token overlap being weighted too weakly to overcome a
+perfect name match (same class of gap as the existing pending TODO re: conditioning Splink's `03`
+institution comparison on `all_single_org`, here showing up in the ARC-internal `01` dedupe too).
+
+**The bug**: `cluster_checks.is_suspicious_for2020()` had `if len(orcids) > 0: return False` as its
+*first* condition — any cluster with even one ORCID, on even one of many grant records, was fully
+exempted from the cross-division suspicion check, regardless of how many other records (with no
+ORCID at all) it contained. This conflated two different claims: "two clusters sharing an ORCID
+should merge" (the project's genuine, correct, long-standing rule) vs. "a cluster containing even
+one ORCID-bearing record is verified as a whole" (never a justified inference — the other 8 records
+were clustered by Splink's name/institution/FOR-token blocking alone, independent of the ORCID).
+`01a_diagnose.py`'s A3 check calls the same shared function, so it inherited the identical blind
+spot. **Fix: the ORCID bypass was removed entirely**, not narrowed to a coverage threshold — ARC's
+own investigator-level `orcid` field turns out to be a *current, backfilled* snapshot rather than a
+point-in-time capture (confirmed directly: 11,095 of 33,835 in-scope ORCID-bearing investigator
+records, 32.8%, sit on grants funded before 2012, ORCID's actual launch date — spot-checked several
+real cases, e.g. Michael Kalish's DP0208035 (UWA, 2002) cross-references cleanly against his own
+real ORCID employment history showing UWA through May 2002 then a move overseas — so a coverage
+threshold would have been the wrong fix, chasing a false signal). `is_suspicious_for2020()` no
+longer takes an `orcids` parameter at all (dead after the removal; all 5 call sites across
+`01_prepare_arc.py`/`01a_diagnose.py`/`awards_cif.py` updated).
+
+**Removing the bypass outright was only safe because of a second, larger fix alongside it**:
+`division_mismatch_for2020()` gained `ACCEPTABLE_DIVISION_PAIRS` — an empirically-derived whitelist
+of FOR2020 2-digit division pairs that legitimately co-occur in real single-person careers, added
+after the user raised a concrete confound: ARC applicants sometimes deliberately spread proposals
+across different FOR divisions (e.g. PHYS/ENG, CHEM/ENG, MATH/IT) specifically to be assessed by
+different panels — a real, named tactic, not hypothetical — so a naive "any cross-division spread is
+suspicious" rule would over-flag many genuine people. Rather than hand-curate a whitelist, it was
+computed: from every ORCID-confirmed (single ORCID present on 100% of the cluster's own grant
+records — the only trustworthy ground-truth subset) multi-grant, non-excluded cluster's own
+primary-FOR2020-division pairs, tested against a null model of "two people, each drawn from the
+population's own single-division base rate, happened to be merged" (z = (observed − expected) /
+sqrt(expected), expected = 2 × p(A) × p(B) × n_confirmed — the population base rate p(div) computed
+from *all* in-scope grants, unconditioned on clustering outcome, not from the already-selected
+cross-division subsample, which would have biased common divisions upward). Threshold z ≥ 3.4
+approximates a Bonferroni correction for the ~171 possible division pairs tested at 0.05
+family-wise. **41 pairs cleared the bar** — see `cluster_checks.py`'s `ACCEPTABLE_DIVISION_PAIRS`
+for the full list and module docstring for the full derivation. All three of the user's named
+example pairs came out clearly above threshold (Chemical Sciences/Engineering z=9.25,
+Engineering/Physical Sciences z=6.51, Information-Computing-Sciences/Mathematical Sciences z=5.98),
+independently validating the method against real domain knowledge; the pair implicated in the Wei
+Wang case itself (Engineering/Information-Computing-Sciences, 40/46) did **not** clear the
+threshold — the tolerance list does not undermine the very case that motivated building it.
+
+**A real methodological bug was caught and fixed mid-derivation**: the first computation of this
+list accidentally included the 107 Indigenous-focused `AwardsCIF` that
+`set_aside_indigenous_research()` marks `excluded=True` but deliberately leaves in the returned
+list (callers must filter on `.excluded` themselves, per that function's own docstring) — the
+survey's own SQL query never added that filter. Caught because the user was surprised division 45
+appeared at all ("it was meant to be filtered away at the ARC stage"). Fixed by restricting both the
+confirmed-cluster population and the base-rate population to non-excluded grants; division 45 is
+now absent from every whitelisted pair, as it should be.
+
+**`division_mismatch_for2020()` widened to 3+ divisions** (same day, same session): the
+exactly-2-division-only version was flagging real, single, highly prolific researchers purely for
+having a broad research career spanning 3+ divisions — e.g. a 27-grant plant ecophysiologist
+(divisions 30/31/40/41, Agricultural/Biological/Engineering/Environmental Sciences) — even though
+most of their individual division pairs (30-31, 30-41, 31-41) were each independently whitelisted.
+Widened to check that *every* pairwise combination among a cluster's divisions is whitelisted, not
+just requiring exactly 2 divisions total. **Known, accepted residual limitation, explicitly flagged
+by the user**: this doesn't fully rescue cases where even one division among several doesn't
+pairwise-whitelist with the rest (in the plant-ecophysiologist example, Engineering (40) doesn't
+pairwise-whitelist with 30/31/41 at all, so that case is still flagged even after widening) — and
+more fundamentally, checking "all pairwise combinations whitelisted" cannot distinguish one real
+person from two *different* people wrongly merged whose individual division-sets happen to combine
+into an all-pairwise-whitelisted union (person A in {30,31}, person B in {31,41}, merged union
+{30,31,41} would pass). This exemption only protects against one specific false-positive pattern; a
+high grant count is not itself evidence of one person (a common name can accumulate many grants from
+several real people as easily as one prolific one) — the check does not replace the rare-name gate,
+ORCID-based checks, or manual review as the actual mechanism for catching a wrongful merge, and
+`is_suspicious_for2020`/`division_mismatch_for2020` are never the last word regardless: "suspicious"
+only ever means "surfaced for human review" (via `01a_diagnose.py`/`_export_manual_splits_template()`),
+never an automatic split — only an explicit `confirmed_different_people=True` entry in
+`data_persisted/manual_splits.csv` can actually change a cluster's structure.
+
+**Population-level impact** (full `build_awards_cif_population()` re-run, 23,054 `AwardsCIF`):
+`resolution_status` UNRESOLVED count went **178 → 231** (RESOLVED 22,869 → 22,823) — 53 net
+additional clusters now correctly surfaced for review that the ORCID bypass previously silently
+passed through as RESOLVED. (An intermediate exactly-2-division-only version produced 251
+UNRESOLVED before the 3+-division widening rescued 20 of those as genuine false positives.)
+
+**Not yet done, deliberately parked** (user: "let us park that — it can happen right at the end"):
+`apply_manual_splits()` (both `01_prepare_arc.py`'s `_apply_manual_splits` and `awards_cif.py`'s
+mirror) only splits a confirmed cluster by `institution_oax_id` — this is insufficient for Wei Wang
+specifically, since 2 of the 4 real people (the DECRA holder and the info-systems senior CI) are
+both at UNSW, so an institution-only split would still leave them merged together. No mechanism
+currently exists for an explicit, finer-than-institution per-`grant_id` split assignment (the
+existing `manual_splits.csv`/`manual_splits_hand_counts.csv` schemas don't carry one — the code
+hardcodes the institution split key regardless of CSV content beyond the boolean
+`confirmed_different_people` flag). Extending this, and actually splitting the Wei Wang cluster
+itself, is deferred until later per the user's own explicit direction.
+
+Tests: `tests/test_cluster_checks.py` — 18 new tests (`TestDivisionMismatchFor2020`,
+`TestAcceptableDivisionPairs`, `TestIsSuspiciousFor2020`), 23 total in the file, all passing.
+`tests/test_awards_cif.py`'s existing 49 tests unaffected and still passing.

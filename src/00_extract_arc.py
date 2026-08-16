@@ -110,11 +110,41 @@ def extract_investigators(attrs: dict, grant_code: str) -> list[dict]:
 
 
 def extract_grant_flat(attrs: dict, grant_code: str) -> dict:
-    """Extract flat grant-level fields."""
+    """Extract flat grant-level fields.
+
+    eligible_roles / eligible_names (2026-08-16): ARC's own organisations-at-announcement list
+    carries 7 distinct roleName values, not just the 2 originally handled here. Investigated all
+    7 directly against real in-scope (KEEP_SCHEMES) grants before finalizing this set:
+      - Administering Organisation (30,551, exactly 1/grant) -- include
+      - Other Eligible Organisation (5,036) -- include
+      - Collaborating Organisation (701) -- include (added 2026-08-16): real examples are genuine
+        Australian universities (Melbourne, Monash, Macquarie, ACU, Griffith), same character as
+        Other Eligible Organisation
+      - Partner Organisation (15,250) -- excluded (user-directed): formally a weaker/different
+        relationship to the grant than the funded team itself
+      - Host Organisation (809, mostly on FT/Future Fellowship grants) -- excluded: real examples
+        overwhelmingly foreign universities or industry (Cambridge, Lund, Caltech, Boeing, Dyson),
+        rarely an Australian HEP; represents where a fellow is hosted, not part of the funded team
+      - Other Organisation (8,126) and bare Other (889) -- excluded: real examples overwhelmingly
+        foreign universities or non-HEP bodies (Auckland, Illinois, UCL, museums, private companies)
+    `eligible_names` (the original 2-role set) was previously computed and then discarded -- only
+    its count survived into grants_flat.parquet (n_eligible_orgs). n_eligible_orgs is load-bearing
+    downstream (01_prepare_arc.py/awards_cif.py's _merge_same_grant_coinvestigators,
+    04_resolve_links.py's institution-overlap check all treat n_eligible_orgs==1 as "single-org
+    grant" and rely on that exact 2-role definition) -- so it keeps its original 2-role scope
+    unchanged here. The new eligible_orgs column below is a *separate*, deliberately wider 3-role
+    set (adds Collaborating Organisation) for HEP-code resolution -- see
+    src/utils/awards_cif.py's HEP-code aggregation, which consumes it. Do not fold eligible_orgs's
+    role set back into n_eligible_orgs's -- that would silently change which grants count as
+    "single-org" for the merge/disambiguation logic above.
+    """
     orgs = attrs.get("organisations-at-announcement", []) or []
-    eligible_roles = {"Administering Organisation", "Other Eligible Organisation"}
-    eligible_names = {o["organisationName"] for o in orgs
-                      if o.get("roleName") in eligible_roles and o.get("organisationName")}
+    n_eligible_roles = {"Administering Organisation", "Other Eligible Organisation"}
+    n_eligible_names = {o["organisationName"] for o in orgs
+                        if o.get("roleName") in n_eligible_roles and o.get("organisationName")}
+    eligible_orgs_roles = n_eligible_roles | {"Collaborating Organisation"}
+    eligible_orgs_names = {o["organisationName"] for o in orgs
+                           if o.get("roleName") in eligible_orgs_roles and o.get("organisationName")}
     return {
         "grant_code":           grant_code,
         "scheme_name":          safe_str(attrs.get("scheme-name")),
@@ -126,7 +156,8 @@ def extract_grant_flat(attrs: dict, grant_code: str) -> dict:
         "admin_org":            safe_str(attrs.get("administering-organisation") or
                                          attrs.get("announcement-administering-organisation")),
         "grant_summary":        safe_str(attrs.get("grant-summary")),
-        "n_eligible_orgs":      len(eligible_names),
+        "n_eligible_orgs":      len(n_eligible_names),
+        "eligible_orgs":        sorted(eligible_orgs_names),
     }
 
 

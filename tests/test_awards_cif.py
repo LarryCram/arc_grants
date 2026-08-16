@@ -32,6 +32,8 @@ from src.utils.awards_cif import (
     compute_reliability,
     persist_awards_cif,
     load_awards_cif,
+    _load_hep_crosswalk,
+    _load_institution_hep_crosswalk,
 )
 
 
@@ -476,3 +478,41 @@ class TestPersistAndLoadAwardsCif:
             "removed": ["https://openalex.org/A1", "https://openalex.org/A2"],
         }]
         assert loaded["C"].provenance == []
+
+
+# ---------------------------------------------------------------------------
+# _load_hep_crosswalk / _load_institution_hep_crosswalk -- real admin_orgs.csv, not synthetic
+# fixtures (same convention as load_award_cif_items()/cluster_items() etc. per this file's own
+# module docstring: functions depending on real persisted data are validated against real data,
+# not mocked). Asserts on well-known real Australian universities, stable/durable facts.
+# ---------------------------------------------------------------------------
+
+class TestHepCrosswalks:
+    def test_name_crosswalk_resolves_known_university(self):
+        crosswalk = _load_hep_crosswalk()
+        assert crosswalk.get("The Australian National University") == "ANU"
+
+    def test_name_crosswalk_resolves_previously_broken_aliases(self):
+        # Regression test (2026-08-16): these 3 aliases were found with HEP='y' but blank
+        # institution_id/hep_code in admin_orgs.csv, silently resolving to "no HEP" -- fixed
+        # directly in the CSV, and the crosswalk itself resolves via the canonical
+        # organisationName group defensively regardless (see _load_hep_crosswalk()'s docstring).
+        crosswalk = _load_hep_crosswalk()
+        assert crosswalk.get("University of Western Sydney") == "WSU"
+        assert crosswalk.get("The University of Western Sydney") == "WSU"
+        assert crosswalk.get("Northern Territory University") == "CDU"
+        assert crosswalk.get("The Flinders University of South Australia") == "FLI"
+
+    def test_name_crosswalk_no_entry_for_non_hep_org(self):
+        crosswalk = _load_hep_crosswalk()
+        assert "AINSE Limited" not in crosswalk
+
+    def test_institution_crosswalk_resolves_known_university(self):
+        crosswalk = _load_institution_hep_crosswalk()
+        # Western Sydney University's OpenAlex institution_idx -> WSU
+        assert crosswalk.get(63525965) == "WSU"
+
+    def test_institution_crosswalk_only_covers_real_heps(self):
+        crosswalk = _load_institution_hep_crosswalk()
+        # ~42 real Australian HEPs have a resolvable institution_id, not all 114 admin_orgs rows
+        assert 30 <= len(crosswalk) <= 60

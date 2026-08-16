@@ -792,7 +792,7 @@ def _diagnostic_report(
     print(f"    0 institutions:  {len(no_inst):>4}")
 
     suspect = multi[multi.apply(
-        lambda r: is_suspicious_for2020(r["orcids"], r["full_name_key"], r["for2020_codes"], tf_lookup), axis=1
+        lambda r: is_suspicious_for2020(r["full_name_key"], r["for2020_codes"], tf_lookup), axis=1
     )]
     case_a = suspect[suspect["full_names"].apply(is_case_a)]
     case_b = suspect[~suspect["full_names"].apply(is_case_a)]
@@ -829,7 +829,7 @@ def _export_manual_splits_template(
         (persons["n_grants"] > 1)
         & (persons["inst_arr"].apply(len) > 1)
         & (persons["full_names"].apply(is_case_a))
-        & persons.apply(lambda r: is_suspicious_for2020(r["orcids"], r["full_name_key"], r["for2020_codes"], tf_lookup), axis=1)
+        & persons.apply(lambda r: is_suspicious_for2020(r["full_name_key"], r["for2020_codes"], tf_lookup), axis=1)
     ].sort_values("n_grants", ascending=False)
 
     existing: dict[str, dict] = {}
@@ -1523,7 +1523,7 @@ def main():
     )
     # resolution_status: is this cluster definitively one person?
     persons["resolution_status"] = persons.apply(
-        lambda r: "UNRESOLVED" if is_suspicious_for2020(r["orcids"], r["full_name_key"], r["for2020_codes"], tf_lookup) else "RESOLVED",
+        lambda r: "UNRESOLVED" if is_suspicious_for2020(r["full_name_key"], r["for2020_codes"], tf_lookup) else "RESOLVED",
         axis=1,
     )
     persons.loc[persons["orcid_status"] == "MULTI_ORCID", "resolution_status"] = "UNRESOLVED"

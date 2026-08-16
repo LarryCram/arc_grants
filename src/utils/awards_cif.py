@@ -113,6 +113,15 @@ class AwardCIFItem:
     # block in raw_json.csv (~76/33,650 grants) or nothing resolved.
     for2020_codes: list[dict] = field(default_factory=list)
 
+    # HEP codes for every HEP-eligible organisation formally on this grant (2026-08-16) --
+    # NOT just admin_org's own HEP. Resolved from grants_flat.parquet's eligible_orgs column
+    # (Administering + Other Eligible + Collaborating Organisation roles -- see
+    # 00_extract_arc.py::extract_grant_flat()'s docstring for why those 3 and not the other 4
+    # role names ARC records) via _load_hep_crosswalk(). Deduplicated, sorted; empty if none of
+    # this grant's eligible orgs resolve to an Australian HEP (rare but real -- ~0.55% of
+    # in-scope grants have a non-HEP admin_org, e.g. medical research institutes).
+    hep_codes: list[str] = field(default_factory=list)
+
 
 @dataclass
 class CandidateWork:
@@ -173,6 +182,11 @@ class AwardsCIF:
     for_names: list[str] = field(default_factory=list)
     for_codes: list[str] = field(default_factory=list)
     full_name_key: str | None = None  # modal full_name_key across items
+
+    # HEP codes across every one of this person's grants' full eligible-org sets (2026-08-16) --
+    # union of AwardCIFItem.hep_codes, not just each grant's single admin_org's HEP. See
+    # AwardCIFItem.hep_codes' docstring for scope/provenance.
+    hep_codes: list[str] = field(default_factory=list)
 
     # Full FOR2020 code list (2026-08-12), unioned across items' for2020_codes -- see
     # AwardCIFItem.for2020_codes and load_grant_for2020_codes() for provenance. Deduped by
@@ -359,6 +373,78 @@ def load_grant_for2020_codes() -> dict[str, list[dict]]:
     }
 
 
+def _load_admin_orgs_rows() -> tuple[list[dict], dict[str, str]]:
+    """admin_orgs.csv rows, plus canonical organisationName -> hep_code (any non-null hep_code
+    found under any alias row sharing that canonical name -- see _load_hep_crosswalk()'s
+    docstring for why resolution goes through the canonical name, not each alias row
+    individually). Shared by _load_hep_crosswalk() (alias name -> hep_code) and
+    _load_institution_hep_crosswalk() (OpenAlex institution_idx -> hep_code) so both read the
+    CSV once and apply the same defensive resolution.
+    """
+    import csv as _csv
+    canonical_hep: dict[str, str] = {}
+    rows = []
+    with open(ADMIN_ORGS_CSV, newline="", encoding="utf-8") as f:
+        for row in _csv.DictReader(f):
+            rows.append(row)
+            name = row.get("organisationName", "").strip()
+            hep = row.get("hep_code", "").strip()
+            if name and hep and name not in canonical_hep:
+                canonical_hep[name] = hep
+    return rows, canonical_hep
+
+
+def _load_hep_crosswalk() -> dict[str, str]:
+    """admin_orgs.csv organisationName_alias -> hep_code, resolved via the canonical
+    organisationName group rather than trusting each alias row individually.
+
+    Why (2026-08-16, user finding): admin_orgs.csv is designed as alias -> canonical-name ->
+    crosswalk-data, but that discipline can be forgotten when a new alias row is added -- found
+    3 real instances where an alias row was correctly flagged HEP='y' but its own
+    institution_id/hep_code cells were blank while the canonical-name row for the same real
+    institution had the correct data (University of Western Sydney / The University of Western
+    Sydney -> Western Sydney University; Northern Territory University -> Charles Darwin
+    University; The Flinders University of South Australia -> Flinders University). Those three
+    have since been fixed directly in admin_orgs.csv, but this resolves defensively regardless --
+    any hep_code found under *any* alias of a canonical organisationName is applied to every
+    alias sharing that canonical name, so a future forgotten alias doesn't silently resolve to
+    "no HEP" the way it did here.
+    """
+    rows, canonical_hep = _load_admin_orgs_rows()
+    crosswalk: dict[str, str] = {}
+    for row in rows:
+        alias = row.get("organisationName_alias", "").strip()
+        name = row.get("organisationName", "").strip()
+        hep = canonical_hep.get(name)
+        if alias and hep:
+            crosswalk[alias] = hep
+    return crosswalk
+
+
+def _load_institution_hep_crosswalk() -> dict[int, str]:
+    """admin_orgs.csv OpenAlex institution_idx (int) -> hep_code, same canonical-group
+    resolution as _load_hep_crosswalk(). For resolving a candidate's own OpenAlex-side
+    institution (from an authorship row's institution_idx, not an ARC organisation name string)
+    to a HEP code -- used by oeuvre_build.py's subfield+HEP keep/drop signal (2026-08-16). Only
+    ~42/114 admin_orgs.csv rows are real Australian HEPs with a resolvable institution_id at all;
+    everything else (foreign institutions, non-HEP research institutes) correctly has no entry.
+    """
+    rows, canonical_hep = _load_admin_orgs_rows()
+    crosswalk: dict[int, str] = {}
+    for row in rows:
+        name = row.get("organisationName", "").strip()
+        inst_id = row.get("institution_id", "").strip()
+        hep = canonical_hep.get(name)
+        if not (inst_id and hep):
+            continue
+        try:
+            idx = int(inst_id.rsplit("I", 1)[-1])
+        except (ValueError, IndexError):
+            continue
+        crosswalk[idx] = hep
+    return crosswalk
+
+
 def load_award_cif_items(
     con: duckdb.DuckDBPyConnection | None = None,
 ) -> tuple[list[AwardCIFItem], dict[str, dict]]:
@@ -394,6 +480,7 @@ def load_award_cif_items(
                 o.institution_id AS institution_oax_id,
                 g.funding_commence_year,
                 g.primary_for_name,
+                g.eligible_orgs,
                 regexp_extract(s.primary_field_of_research, '^\\d{{4}}') AS for2008_code
             FROM read_parquet('{PROCESSED_DATA}/investigators_raw.parquet') i
             LEFT JOIN read_parquet('{PROCESSED_DATA}/grants_flat.parquet') g
@@ -412,6 +499,7 @@ def load_award_cif_items(
 
     expanded_for_tokens = make_expanded_for_tokens(str(_FOR_CONCORDANCE_CSV))
     grant_for2020_codes = load_grant_for2020_codes()
+    hep_crosswalk = _load_hep_crosswalk()
 
     items: list[AwardCIFItem] = []
     for row in rows:
@@ -435,6 +523,9 @@ def load_award_cif_items(
             else None
         )
 
+        eligible_orgs = r["eligible_orgs"] or []
+        hep_codes = sorted({hep_crosswalk[name] for name in eligible_orgs if name in hep_crosswalk})
+
         items.append(AwardCIFItem(
             unique_id=r["unique_id"],
             grant_code=r["grant_code"],
@@ -448,6 +539,7 @@ def load_award_cif_items(
             for_name=for_name,
             for_code=for_code,
             for2020_codes=grant_for2020_codes.get(r["grant_code"], []),
+            hep_codes=hep_codes,
             full_name=f"{first_name} {r['family_name']}",
             first_names=first_names,
             family_names=family_names,
@@ -484,6 +576,7 @@ def _build_awards_cif(cluster_id: str, items: list[AwardCIFItem]) -> AwardsCIF:
         family_names=sorted({fn for it in items for fn in it.family_names}),
         orcids=orcids,
         inst_arr=sorted({it.institution_oax_id for it in items if it.institution_oax_id}),
+        hep_codes=sorted({hc for it in items for hc in it.hep_codes}),
         for_names=sorted({it.for_name for it in items if it.for_name}),
         for_codes=sorted({it.for_code for it in items if it.for_code}),
         for2020_codes=_aggregate_for2020_codes(items),
@@ -1572,9 +1665,11 @@ def compute_reliability(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     Requires gap_candidates already populated (tier 4 vs 4u depends on it) -- run
     compute_gap_candidates() first.
 
-    resolution_status: RESOLVED unless this cluster is common-name/no-ORCID/cross-OAX-field
-    (flagged for manual review, see cluster_checks.is_suspicious_for2020()), or has MULTI_ORCID
-    (an unresolved ORCID conflict).
+    resolution_status: RESOLVED unless this cluster is common-name/cross-OAX-field (flagged for
+    manual review, see cluster_checks.is_suspicious_for2020() -- no longer ORCID-gated as of
+    2026-08-16, since an ORCID on a minority of a cluster's own grant records was found to say
+    nothing about the records that don't carry it), or has MULTI_ORCID (an unresolved ORCID
+    conflict, forced UNRESOLVED separately below regardless of is_suspicious_for2020's verdict).
 
     Division check (2026-08-13): uses cluster_checks.is_suspicious_for2020() -- the same shared
     function 01_prepare_arc.py's production pipeline now uses too, both built on for2020_codes'
@@ -1595,7 +1690,7 @@ def compute_reliability(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     tf_lookup = dict(zip(tf_df["full_name_key"], tf_df["tf_full_name_key"]))
 
     for c in clusters:
-        suspicious = is_suspicious_for2020(c.orcids, c.full_name_key, c.for2020_codes, tf_lookup)
+        suspicious = is_suspicious_for2020(c.full_name_key, c.for2020_codes, tf_lookup)
         c.resolution_status = "UNRESOLVED" if suspicious else "RESOLVED"
         if c.orcid_status == "MULTI_ORCID":
             c.resolution_status = "UNRESOLVED"
@@ -1678,6 +1773,7 @@ def persist_awards_cif(clusters: list[AwardsCIF], path: Path = AWARDS_CIF_PARQUE
         "family_names": c.family_names,
         "orcids": c.orcids,
         "inst_arr": c.inst_arr,
+        "hep_codes": c.hep_codes,
         "for_names": c.for_names,
         "for_codes": c.for_codes,
         "for2020_codes": c.for2020_codes,
@@ -1719,6 +1815,7 @@ def load_awards_cif(path: Path = AWARDS_CIF_PARQUET) -> list[AwardsCIF]:
             family_names=list(row["family_names"]),
             orcids=list(row["orcids"]),
             inst_arr=list(row["inst_arr"]),
+            hep_codes=list(row["hep_codes"]),
             for_names=list(row["for_names"]),
             for_codes=list(row["for_codes"]),
             for2020_codes=[dict(x) for x in row["for2020_codes"]],
