@@ -552,23 +552,28 @@ Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
   `compact/work_topics` on the same day, suggesting it may be a newer or still-in-progress
   extraction batch. Needs a decision: merge into `compact/`, read alongside it, or leave
   untouched — deferred, revisit before treating any future oeuvres fetch as complete/final.
-- **Group-level ACIF-membership gate for oeuvre_build.py, not yet built** (2026-08-16, see
-  "Group-level ACIF-membership gate design" below for the full derivation): (1) when an ACIF has
-  an ARC-recorded ORCID, check it directly against each candidate `author_idx`'s own OpenAlex
-  `orcid` field *before* any signal-based reasoning -- a direct identity match settles which
-  group is correct far more decisively than `group_coherent`/`hep_match` inference, and should be
-  the first check attempted, not a fallback. (2) For groups without a direct ORCID match, a
-  size-conditioned rule: a *large* group (exact threshold not yet fixed -- discussion landed near
-  20 works as a starting candidate, not empirically finalized) with zero `hep_match=True` works
-  is strong evidence of being the wrong candidate for this ACIF, independent of how internally
-  coherent that group is with itself. (3) `group_coherent`, once a group's identity is otherwise
-  confirmed (via ORCID or the HEP-based group gate), still has a real, separate job: catching
-  individual misassigned works *within* an already-correctly-identified group (OpenAlex's own
-  disambiguation can misattribute specific papers into an otherwise-correct, ORCID-verified
-  `author_idx` -- ORCID confirms the group, not every work in it). Two confirmed real contamination
-  cases motivate this (Wei Wang, documented separately above; Mohammad Tariqul Islam, see below) --
-  `LP0560280_XiaolinWang` and `LP120200066_XinhuaWu` are suggestive but not yet confirmed either
-  way, worth investigating with the same discipline once this gate exists.
+- **Group-level ACIF-membership gate for oeuvre_build.py** (2026-08-16 design, 2026-08-17 partial
+  build) -- see "Group-level ACIF-membership gate design" and "`src/utils/work_piling.py` — Phase 2
+  piling infrastructure" below. The IDF-weighted feature/distance/clustering machinery (points (2)
+  and (3)'s within-group-coherence spirit, generalized) is built and cross-section-tested; the
+  ORCID-first check (point 1) and the pile-to-ACIF channeling step (ORCID-first, then HEP-overlap,
+  then FOR-grounded field/subfield) are designed but not yet production code. Two real, unresolved
+  gaps found during cross-section testing: mega-pool false bridging (DBSCAN can merge two confirmed-
+  different people via an indirect chain through *other* candidates in a large pool, even when they
+  aren't directly similar), and within-pile contamination hiding inside a nominally "correct"
+  dominant pile (Hayward's main pile was only 59% the right person). Not wired into any driver
+  script yet.
+- **`ACCEPTABLE_DIVISION_PAIRS` re-derivation** (2026-08-17, see the matching CLAUDE.md section and
+  `cluster_checks.py`'s module docstring) -- attempted, not adopted, reverted to the original
+  41-pair list after three iterations each surfaced a new problem (unexplained 2-3x inflation, a
+  real regression whitelisting the Wei Wang false-merge's own division pair, and a still-unexplained
+  gap even after fixing that). Needs a slower pass grounded in real, named-case validation from the
+  start, not aggregate statistics alone.
+- **`division_mismatch_for2020()` OAX_FIELD-finer-than-division gap** (2026-08-17, found tracing
+  `DP230101204_MohammadIslam`): a legitimate single-ANZSRC-division researcher can be wrongly
+  flagged as a cross-division mismatch whenever OAX_FIELD splits that one division into 2+ fields --
+  confirmed the whitelist's contents are provably irrelevant to this specific failure mode. Fix
+  belongs in the function's own gating logic, not the whitelist. Not yet fixed.
 
 ## Manual Resolution Techniques (Not Yet Automated in Pipeline)
 
@@ -809,3 +814,188 @@ derivation** -- recorded here precisely because it wasn't obvious in advance:
 
 Nothing above is implemented in `oeuvre_build.py` yet -- see the matching entry in "Pending code
 TODOs" above.
+
+## `src/utils/work_piling.py` — Phase 2 piling infrastructure built and tested (2026-08-17)
+
+New module (sibling to `oeuvre_build.py`) implementing the "Group-level ACIF-membership gate"
+design above via direct categorical/feature-vector clustering, not Splink and not a graph/network
+implementation (both considered and rejected -- see the plan file, since removed, for the full
+reasoning: Splink's Fellegi-Sunter model is built for matching records with *fixed* identity
+attributes, which a work-snapshotted-at-one-career-point isn't; a literal multigraph -- several
+distinct edge types between the same work pair -- is poorly supported by any mainstream Python
+network package). Built, tested against a 13-ACIF cross-section (`piling_cross_section.csv`,
+8 known-ground-truth cases + 5 ordinary small pools), **not yet wired into production** (no
+driver script consumes it; Stage 1/3/`06_build_oeuvre.py` are unchanged by this module's
+existence).
+
+**Pipeline**: `compute_and_persist_idf_tables()` -> `fetch_cross_section_raw()` ->
+`build_feature_matrix()` -> `compute_distance_matrix()` -> `cluster_piles_dbscan()`/
+`cluster_piles_agglomerative()`.
+- Five IDF-weighted feature blocks per work: coauthor, institution (own-candidate's, not every
+  coauthor's), field, subfield, topic (topic read directly from `work_topics` -- not persisted on
+  Stage 3 survivor rows, needs its own fetch). Weight `idf = log(1/tf)`, `tf` from five new
+  precomputed tables (`work_tf_coauthor/institution/field/subfield/topic.parquet`, same
+  `(value, tf=count/n)` shape as the existing `oax_tf_*.parquet` tables), computed once over the
+  **Stage 3** survivor population (2,552,260 rows at last run -- not Stage 1, so "how common" is
+  measured over the same population Phase 2 actually clusters, not a broader, noisier one).
+- Distance: **cosine**, not Jaccard -- weighted/Ruzicka Jaccard has no efficient vectorized form
+  (needs a per-pair min/max), confirmed impractical at the largest real pool's scale (WeiWang,
+  12,800 works, ~82M pairs); cosine is one sparse matrix multiply and stays fast at that scale.
+- Clustering: **DBSCAN**, not agglomerative -- confirmed empirically, not just by design
+  preference: agglomerative (average-linkage) badly over-fragments genuinely coherent single-person
+  careers (Hessel's 380 confirmed works: 103 clusters at threshold 0.7), because real careers are
+  often *chains* of partial evidence (paper A shares a coauthor with B, B shares an institution
+  with C, no direct link between A and C) that average-linkage's "keep the whole cluster's average
+  distance low" requirement can't tolerate but DBSCAN's density-reachability chaining can (same
+  threshold: 6 clusters, mostly one 345-work dominant pile). Working eps range found empirically:
+  **0.85-0.95** correctly unifies a known-coherent career (Hessel: 374-380/380 in one cluster) while
+  still separating two confirmed-different real people (MohammadIslam's 36-work correct vs. 309-work
+  wrong pile) *when tested in isolation* -- see the mega-pool caveat below.
+
+**Confirmed real finding, not yet resolved: mega-pool false bridging.** In WeiWang/MohammadIslam-
+scale pools (many candidates), DBSCAN at the eps needed to correctly unify one coherent career also
+sometimes merges two confirmed-different real people -- not because they're directly similar
+(MohammadIslam's two confirmed groups have minimum pairwise cosine distance 0.90, above the 0.85-
+0.90 threshold that unifies them) but because *other* candidates in the same large pool provide an
+indirect chaining path between them. Confirmed by isolating just the two groups (no other
+candidates present): they correctly stay separate at the same eps. Two candidate fixes discussed,
+neither built: (a) prune the candidate pool before piling (reconnects to the parked Phase-1
+prefilter work below), (b) try HDBSCAN (stability-based cluster extraction across an eps range,
+rather than one fixed global eps) as a more robust alternative to plain DBSCAN.
+
+**Also found, real but not yet incorporated**: within-candidate contamination can hide *inside* a
+dominant pile, not just show up as an obviously-separate secondary cluster -- Hayward's "main"
+106-work pile (eps=0.85) was only 59% (63/106) from the ORCID-confirmed correct candidate; the
+other 37 works trace to a confirmed *different* real person (externally verified: "Andrew Hayward,"
+UCL Institute of Epidemiology and Health Care director, not "Alice Hayward" at all -- shares only
+the family name + first-initial "A" that Splink blocks on). Piling's own clustering doesn't
+guarantee purity within a pile; the pile-to-ACIF channeling step (ORCID-first, then HEP-overlap,
+then FOR-grounded field/subfield match -- see the piling design notes, none built as production
+code yet) is meant to catch this by checking each pile as a whole, but a 59%-correct pile would
+likely still pass a whole-pile institution check. Not resolved.
+
+**Design decision, validated against a real case**: pile-to-ACIF assignment should allow *multiple*
+independently-corroborated piles per ACIF (fragment-splitting, e.g. one real person's career split
+by OAX across several `author_idx`s), not force everything into one "keep pile" that might blend
+different real people -- the latter would reintroduce exactly the over-merge failure mode this
+project has repeatedly found and fixed (Wei Wang, Gilbert, Young). Not yet implemented as
+production code (design only, in the now-removed plan file).
+
+**Cross-section spot-check findings, useful precedent for future case-by-case validation**:
+Meyer's "secondary" 3-work Waterloo/Canada pile initially looked like a correctly-caught
+contamination case, but checking the *whole* candidate's institution history (67 of ~76 works are
+also Waterloo/Canada) showed the "main" pile was equally Canada-based -- likely one real,
+internationally-mobile person (Canada-based with a genuine Australian grant connection), not two
+different people. Retracted after checking, rather than left standing on an unverified assumption
+-- a reminder that "the secondary pile looks foreign, the main pile must be the true one" isn't a
+safe inference without checking the main pile's own composition too.
+
+**Files**: `src/utils/work_piling.py` (all of the above), `PROCESSED_DATA/work_tf_*.parquet` (five
+tables), `PROCESSED_DATA/piling_cross_section.csv` (the 13-ACIF test set, frozen for reuse).
+`requirements.txt` gained `scikit-learn>=1.4` (DBSCAN/AgglomerativeClustering/cosine_distances).
+
+## Scope and FOR-code fixes (2026-08-17)
+
+Three related fixes, found while investigating the piling work above and validated against real
+cases before being applied population-wide -- not chased purely from aggregate statistics.
+
+**FOR-code handling: every code is a real, ARC-declared discipline signal, not just the primary
+one.** `is_primary` marks emphasis, not exclusivity -- restricting to primary-only throughout the
+codebase (the prior convention) was discarding real evidence for no reason specific to any one use
+case. `cluster_checks.py` gained `for2020_all_fields()`/`for2020_all_subfields()` (same shape as
+the existing `for2020_primary_fields()`/`for2020_primary_subfields()`, but over every code, not
+just the primary one) -- these are now the production functions used by `oeuvre_build.py`'s Stage 3
+field filter, `division_mismatch_for2020()`/`division_mismatch_for2020_pairwise()`, and
+`01_prepare_arc.py`'s report labelling. The old primary-only functions are kept, unchanged, for
+whichever caller genuinely wants strictly-primary semantics and for the existing tests asserting
+that behavior -- no production call site uses them anymore. Measured population effect: 73.8% of
+ACIFs show exactly one FOR2020 division under primary-only vs. 34.2% under all-codes -- most
+people's grants carry several FOR codes, and once every code counts, a person doesn't need many
+grants before their union spans multiple divisions almost automatically.
+
+**Discovery Indigenous (DI) scheme dropped from `KEEP_SCHEMES`** (`config/scope.py`). DI
+("Discovery Indigenous Researchers Development") exists specifically to fund Indigenous-focused
+research and develop Indigenous researchers -- every grant under it is exactly the kind of research
+this project already deliberately keeps out of its bibliometric methods (see
+`set_aside_indigenous_research()`, CLAUDE.md history above), so relying on the downstream
+FOR2020-division-45 check to catch DI grants was the wrong mechanism: a grant's own declared
+primary FOR code doesn't always resolve to "Indigenous Studies" even when the scheme and subject
+matter unambiguously are (confirmed on a real case, `DI0347845_DonnaOxenham` -- primary FOR
+"Historical Studies," subject "the Malgana Aboriginal people" -- also flagged separately as an
+`inv_source='announcement'` name that may not match ARC's current register, an unrelated data-
+quality note). `01a_diagnose.py`'s separate, duplicate `SCHEMES_OF_INTEREST` literal was updated to
+match, to avoid the two lists silently drifting apart again.
+
+**`set_aside_indigenous_research()` widened to catch non-primary division-45 codes too**
+(`src/utils/awards_cif.py`). The exclusion trigger itself is unchanged (a division-45 code as
+*primary* -- still 104 AwardsCIF excluded, same as before). New second step: for AwardsCIF that
+are NOT excluded, any non-primary division-45 entries get stripped out of their own aggregated
+`for2020_codes` (1,124 AwardsCIF affected at last run) -- confirmed via keyword-sweeping every FOR
+code actually appearing on any in-scope ARC grant (raw pre-upgrade text across all three vintages,
+RFCD98/FOR2008/FOR2020) for "indigenous," "aboriginal," "torres strait," "māori" (note: real ARC
+data uses proper macron diacritics), "pacific peoples" -- every genuine hit resolves into division
+45, confirming the fix is complete and sufficient; two apparent hits (FOR codes 3904, 4705) are
+false positives, both explicitly *excluding* Indigenous content from their own scope via
+"(excl. ...)" naming, the opposite of what a keyword sweep should flag. Root cause of the leakage:
+FOR2008/RFCD98-vintage grants routinely tagged a substantive discipline as primary and Indigenous-
+relatedness as a secondary code; the upgrade to FOR2020 correctly preserves those original
+primary/non-primary flags, but FOR2020's own convention would have made Indigenous-focus primary
+for that research -- a genuine artifact of two schemes disagreeing about what "primary" means for
+this category of work, not a bug in the upgrade step itself (87.2% of the 1,124 affected AwardsCIF
+have their earliest grant pre-2020, consistent with this mechanism, though not exclusively --
+12.8% are 2020 or later). Considered but NOT adopted: excluding every AwardsCIF with *any*
+division-45 code regardless of primary status (1,228 total) -- rejected because 1,216 of those 1,228
+(99%) mix division 45 with substantial other, non-Indigenous divisions; wholesale exclusion would
+throw away a large amount of legitimate, ordinarily-analyzable research just because of some
+secondary Indigenous-focused work mixed in. Stripping the codes from classification while keeping
+the person in the population was judged the better fix.
+
+**`ACCEPTABLE_DIVISION_PAIRS` re-derivation attempted, NOT adopted -- reverted to the original
+41-pair list.** Full account in `src/utils/cluster_checks.py`'s module docstring. Short version:
+switching `division_mismatch_for2020()` to all-codes divisions (above) meant the 41-pair whitelist
+was now being tested against a broader population than it was calibrated for, so a re-derivation
+was attempted using the same core z-score methodology as the original. Three iterations, each
+surfacing a new problem rather than converging on the original count: (1) first pass landed at
+84-120 pairs, 2-3x the original, unexplained; (2) adding a lift (observed/expected >= 2.0)
+correction barely moved it, ruling out propensity/large-n significance inflation as the main cause;
+(3) running the resulting list through the test suite caught a real regression -- it whitelisted
+`(40, 46)`, the exact division pair from the confirmed `DE230100180_WeiWang` false-merge case this
+whole mechanism was built to catch, because the "confirmed cluster" ground-truth population used
+`orcid_status=='HAS_ORCID'` (only requires no *conflicting* ORCID among records that have one) where
+the original methodology requires ORCID present on 100% of a cluster's own records -- Wei Wang's
+own cluster (9 merged grant records, only 1 carries an ORCID, never actually split, see the
+`is_suspicious_for2020()` history above) satisfied the loose definition and was directly inflating
+the observed count for the pair it falsely merges. Rebuilding the population with a strict 100%-
+coverage check correctly excludes Wei Wang and correctly drops (40,46) back out -- but the overall
+count is *still* 86-92 pairs, not 41, meaning some other, still-unidentified methodological
+difference remains. The original derivation script was never persisted (only its resulting 41-pair
+list was committed), so there's no way to diff against it directly. Decision: stop iterating rather
+than risk shipping a worse whitelist under time pressure -- the original 41 pairs remain in force
+(now applied against all-codes divisions per the fix above, a known, accepted, documented mismatch
+that over-flags for manual review -- the safe failure direction, not a silent one). `resolution_
+status` UNRESOLVED = 733 / 22,920 non-excluded AwardsCIF at last run (up from the historical
+178-231 range documented earlier in this file, entirely due to the primary-to-all-codes division
+switch, not a new problem). Revisiting this needs real, named-case validation from the start
+(the way the original 3 example pairs and Wei Wang as a negative control were used), not aggregate
+statistics alone, which is what let the Wei Wang regression through undetected until the test
+suite caught it.
+
+**Separately found, real, NOT fixed**: a gap in `division_mismatch_for2020()`'s own gating logic,
+independent of whitelist contents entirely -- found tracing `DP230101204_MohammadIslam` (externally
+ORCID-confirmed via ORCID.org as correctly resolved by this pipeline's institution/HEP evidence,
+see the group-level gate section above). His two FOR codes ("Materials engineering," primary;
+"Numerical modelling and mechanical characterisation") both sit in ANZSRC division 40 (Engineering)
+-- only one division, ever -- but resolve to two different OAX fields ("Materials Science" and
+"Engineering"). The function's field-count gate sees 2 fields and doesn't return early, then falls
+through to the division-pair whitelist check, which -- with only one division present -- can never
+form a pair to test, so it unconditionally returns True (mismatch). Confirmed directly: substituting
+an all-inclusive whitelist (every possible division pair) still returns True for Islam's real codes
+-- whitelist contents are provably irrelevant to this failure mode. A legitimate single-division
+researcher can be wrongly flagged whenever OAX_FIELD splits their one ANZSRC division into 2+
+fields. Correct fix is in the function's own gating logic (recognize "only one division present" as
+"nothing to check," return False before the pairwise branch), not in the whitelist -- left for a
+future session.
+
+**Population after all fixes** (full `06_build_oeuvre.py` re-run): 22,920 AwardsCIF built, 104 set
+aside as Indigenous-focused (primary division 45, unchanged), 1,124 had non-primary division-45
+codes stripped from classification, resolution_status 22,187 RESOLVED / 733 UNRESOLVED.

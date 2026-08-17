@@ -67,6 +67,97 @@ genuinely-coherent multi-field careers still not covered by either OAX_FIELD's c
 ACCEPTABLE_DIVISION_PAIRS (e.g. psychology + linguistics, still 2 different OAX fields, no
 division pair for it clears the empirical threshold) -- an accepted, explicit tradeoff, not an
 oversight.
+
+Re-derivation attempted 2026-08-17, ultimately NOT adopted -- reverted back to the original 41
+pairs below after the attempt surfaced a real regression risk and failed to converge, documented
+here in full since the investigation itself surfaced genuine, useful findings even though the
+whitelist itself wasn't changed. Two real, separate problems were found and are already fixed
+independently of the whitelist:
+  1. for2020_all_fields()/for2020_all_subfields() (this module, added 2026-08-17) became the
+     production functions everywhere a FOR2020 code set drives a topic/field decision -- every
+     code ARC recorded is real evidence of a CI's declared discipline mix, and is_primary marks
+     emphasis, not exclusivity, so restricting to primary-only throughout the codebase was
+     discarding real signal. division_mismatch_for2020() switched from for2020_primary_fields()
+     to for2020_all_fields() as part of that same change -- this part IS in production. But the
+     41-pair whitelist below was calibrated against PRIMARY-only division data, so it's now being
+     tested against a broader all-codes division set it was never calibrated for (measured: 73.8%
+     of ACIFs show exactly one division under primary-only vs. 34.2% under all-codes -- most
+     people's grants carry several FOR codes, and once every code counts, a person doesn't need
+     many grants before their union spans multiple divisions almost automatically). This mismatch
+     is real and unresolved -- see "not yet fixed" below.
+  2. Division 45 (Indigenous Studies) leakage: 1,124 of 1,228 AwardsCIF carrying a division-45 code
+     have it as non-primary only -- a real, understood artifact of the FOR2008/RFCD98-to-FOR2020
+     upgrade preserving the OLD scheme's primary/non-primary labelling (which routinely put a
+     substantive discipline primary and Indigenous-relatedness secondary) even though FOR2020's
+     own convention would have made Indigenous-focus primary for that research. This IS fixed, at
+     the source: set_aside_indigenous_research() (src/utils/awards_cif.py) now strips non-primary
+     division-45 codes from the AwardsCIF it keeps in the working population, so 45 no longer
+     leaks into any downstream all-codes division computation, whitelist re-derivation included.
+
+The re-derivation attempt itself (same core methodology as the original: z-score against a null
+model of "two people, each independently drawn from the population's own single-division base
+rate, happened to be merged", now against all-codes divisions, with an added lift requirement
+(observed/expected >= 2.0) since large sample sizes make even a trivial ~20% relative elevation
+look statistically significant by z-score alone) went through three iterations, each surfacing a
+new problem rather than converging:
+  - First pass (all-codes, division-45 already fixed, no lift): 84 pairs (primary-only) / 120
+    pairs (all-codes) -- already 2-3x the original 41, unexplained.
+  - Added lift >= 2.0: barely moved the count (84 -> 83 primary-only) -- ruled out lift/propensity
+    as the main explanation for the gap.
+  - Testing the resulting 99-pair (all-codes + lift) list against the full test suite caught a
+    real regression: it whitelisted (40, 46) -- the exact Engineering/Information-Computing-
+    Sciences division pair from the confirmed DE230100180_WeiWang false-merge case that
+    ACCEPTABLE_DIVISION_PAIRS was originally built to NOT cover (see below). Root cause: the
+    "confirmed cluster" population used orcid_status=='HAS_ORCID', which only requires no
+    CONFLICTING orcid among a cluster's records that happen to have one -- not orcid present on
+    100% of records, as the original derivation's stated methodology requires. DE230100180_WeiWang
+    itself (9 merged grant records, only 1 carries an ORCID -- confirmed directly, has never
+    actually been split, see CLAUDE.md) satisfies the loose definition and was sitting inside the
+    "ground truth" population, directly inflating the observed count for the exact pair it falsely
+    merges. Rebuilding the confirmed population with a strict 100%-orcid-coverage check (via
+    investigators_raw.parquet, not the aggregated orcid_status field) correctly excludes Wei Wang
+    and correctly drops (40,46) back below the lift threshold (lift 1.96, just under 2.0) -- but
+    the overall pair count under this corrected population is STILL 86-92 pairs, not 41. Fixing
+    the population-contamination bug did not converge toward the original number, it just landed
+    on a different wrong number -- strong evidence some other, still-unidentified methodological
+    difference separates this re-derivation from the original.
+
+Decision: NOT adopted. The original derivation script was never persisted, only its resulting
+41-pair list was committed, so there's no way to diff this re-derivation against the original
+methodology directly, and three separate attempts each surfaced a new problem rather than
+converging -- continuing to iterate risked shipping a worse whitelist than the original under time
+pressure, for a component whose only failure mode (see below) is under-flagging genuine problems
+for manual review. The original 41 pairs remain in force. Revisiting this needs a slower, more
+deliberate pass -- ideally starting from real, named case validation (the way the original 3
+example pairs, and Wei Wang as a negative control, were validated) rather than population
+statistics alone, which is what let the Wei Wang regression through undetected until the test
+suite caught it.
+
+Scope of impact if this ever does get revisited: ACCEPTABLE_DIVISION_PAIRS only feeds
+division_mismatch_for2020() -> is_suspicious_for2020() -> AwardsCIF.resolution_status, not Stage
+1/3, piling, or the working oeuvre data itself -- getting it wrong under-flags clusters for manual
+review, it doesn't silently corrupt anything downstream. Current population effect, unchanged
+(41-pair list, but now applied against all-codes divisions after fix #1 above): resolution_status
+UNRESOLVED = 731 / 22,814 non-excluded AwardsCIF, up from the historical baseline documented
+elsewhere in this file's history precisely because of the primary-vs-all-codes mismatch in point 1
+above -- a known, accepted over-flagging (more manual review burden, not missed problems) until a
+properly-validated re-derivation replaces it.
+
+Separately, found while tracing DP230101204_MohammadIslam,
+externally ORCID-confirmed as correctly resolved by this pipeline's institution/HEP evidence): a
+real gap in division_mismatch_for2020()'s own logic, independent of whitelist contents entirely.
+Islam's two FOR codes ("Materials engineering", primary; "Numerical modelling and mechanical
+characterisation") both sit in ANZSRC division 40 (Engineering) -- only one division, ever. But
+they resolve to two different OAX fields ("Materials Science" and "Engineering"), so the function's
+first gate (len(fields) <= 1: return False) doesn't fire, and it falls through to the division-pair
+check -- which, with only one division present, can never form a pair to test against any
+whitelist, so it unconditionally returns True (mismatch). Confirmed directly: substituting an
+all-inclusive whitelist (every possible division pair) into division_mismatch_for2020() for Islam's
+real codes still returns True -- the whitelist's contents are provably irrelevant to this failure
+mode. A legitimate single-division researcher can be wrongly flagged whenever OAX_FIELD splits
+their one ANZSRC division into 2+ fields, and no whitelist size fixes it. Left unfixed (2026-08-17)
+-- the correct fix is in the function's own gating logic (recognize "only one division present" as
+"nothing to check" and return False before ever reaching the pairwise-whitelist branch), not here.
 """
 from collections import Counter
 from typing import Iterable
@@ -86,6 +177,13 @@ INDIGENOUS_DIVISION_PREFIX = "45"  # FOR2020 division 45 "Indigenous Studies" --
 # clusters -- legitimate multi-division careers/assessor-panel-targeting, not false merges.
 # z >= 3.4 (~ Bonferroni-corrected for ~171 possible pairs at 0.05 family-wise). Frozenset of
 # frozensets so lookup is order-independent: frozenset({a, b}) in ACCEPTABLE_DIVISION_PAIRS.
+# A 2026-08-17 re-derivation attempt (against all-codes divisions, with a lift correction) was
+# NOT adopted -- see module docstring for why (it surfaced a real regression, whitelisting the
+# (40,46) pair from the confirmed Wei Wang false-merge case, and never converged on the original
+# count even after fixing that). This 41-pair list, calibrated on primary-only division data, is
+# still what's in force -- now applied against all-codes divisions since division_mismatch_for2020()
+# itself moved to for2020_all_fields() (2026-08-17), a known, accepted mismatch (over-flags for
+# manual review, documented in the module docstring) until a properly-validated replacement exists.
 ACCEPTABLE_DIVISION_PAIRS: frozenset[frozenset[str]] = frozenset(
     frozenset(pair) for pair in [
         ("30", "31"), ("30", "32"), ("30", "34"), ("30", "41"),
@@ -179,7 +277,12 @@ def for2020_primary_fields(codes: list[dict]) -> set[str]:
     01_prepare_arc.py's Phase 1) -- primary-only to stay semantically close to the old
     for_names/for_code (ARC's single declared primary per grant), even though for2020_codes
     itself also carries secondary codes for other purposes (e.g.
-    src/utils/oeuvre_build.py::apply_subfield_filter(), which does use the full list)."""
+    src/utils/oeuvre_build.py::apply_subfield_filter(), which does use the full list).
+
+    Superseded in production by for2020_all_fields() as of 2026-08-17 (see its docstring) --
+    kept here, unchanged, only for whichever caller genuinely wants strictly-primary semantics
+    and for the existing tests asserting that behavior. No production call site uses this
+    function anymore; check before assuming otherwise."""
     fields = {oax_field_name(e["code"]) for e in codes if e.get("is_primary") and e.get("code")}
     return fields - {None}
 
@@ -192,8 +295,32 @@ def for2020_primary_subfields(codes: list[dict]) -> set[str]:
     broad field" from "same specific research area" -- two different real people both working in
     "Social Sciences" pass the field check easily, but rarely share a subfield. Not a new
     resolver: oax_subfield_name() already exists and is already used in production
-    (04_resolve_links.py's _field_score)."""
+    (04_resolve_links.py's _field_score).
+
+    Superseded in production by for2020_all_subfields() as of 2026-08-17 -- see
+    for2020_primary_fields()'s docstring for why this is kept but no longer called in production."""
     subfields = {oax_subfield_name(e["code"]) for e in codes if e.get("is_primary") and e.get("code")}
+    return subfields - {None}
+
+
+def for2020_all_fields(codes: list[dict]) -> set[str]:
+    """OAX FIELD names implied by EVERY entry in a for2020_codes list, not just the primary one --
+    the production function as of 2026-08-17: every FOR2020 code ARC recorded for a grant is real
+    evidence of the CI's own declared discipline mix, and `is_primary` marks emphasis, not
+    exclusivity, so restricting to primary-only (the original for2020_primary_fields() behavior)
+    discarded real signal throughout the pipeline, not just in the pile-to-ACIF channeling use
+    case this was first built for. for2020_primary_fields() is kept, unchanged, for whichever
+    callers still want strictly-primary semantics (currently none in production -- see its own
+    docstring/tests), but this is what Stage 3's field filter, is_suspicious_for2020()/
+    division_mismatch_for2020(), and 01_prepare_arc.py's report labelling all call now."""
+    fields = {oax_field_name(e["code"]) for e in codes if e.get("code")}
+    return fields - {None}
+
+
+def for2020_all_subfields(codes: list[dict]) -> set[str]:
+    """Same as for2020_all_fields(), one level finer-grained -- see its docstring for why this
+    (not for2020_primary_subfields()) is the production function as of 2026-08-17."""
+    subfields = {oax_subfield_name(e["code"]) for e in codes if e.get("code")}
     return subfields - {None}
 
 
@@ -221,11 +348,21 @@ def division_mismatch_for2020(codes: list[dict]) -> bool:
     false-positive pattern (a genuine multi-field researcher); a high grant count is not itself
     evidence of one person either (a common name can accumulate many grants from several real
     people just as easily as one prolific one) -- this check does not replace the rare-name gate,
-    ORCID-based checks, or manual review as ways of actually catching a wrongful merge."""
-    fields = for2020_primary_fields(codes)
+    ORCID-based checks, or manual review as ways of actually catching a wrongful merge.
+
+    Widened again 2026-08-17: `fields` and `divisions` now come from EVERY FOR2020 code on a
+    grant, not just the primary one -- every code is real, ARC-recorded evidence of the CI's own
+    declared research area, and primary only marks emphasis, not exclusivity, so restricting to
+    primary-only was discarding real signal throughout the codebase, not just here. Known
+    consequence, not yet acted on: `ACCEPTABLE_DIVISION_PAIRS` was empirically derived (z-score
+    method, see module docstring) against PRIMARY-only division data -- broadening the division
+    set this function now tests means more clusters will show 3+ divisions than the whitelist was
+    calibrated against, so some genuine multi-field researchers may now get flagged again until
+    the whitelist itself is re-derived against the all-codes division definition."""
+    fields = for2020_all_fields(codes)
     if len(fields) <= 1:
         return False
-    divisions = sorted({e["code"][:2] for e in codes if e.get("is_primary") and e.get("code")})
+    divisions = sorted({e["code"][:2] for e in codes if e.get("code")})
     if len(divisions) < 2:
         return True
     all_pairs_ok = all(
@@ -240,8 +377,8 @@ def division_mismatch_for2020_pairwise(codes1: list[dict], codes2: list[dict]) -
     pairwise check, replaces the old division_mismatch(c1_names + c2_names, div_map, adj) call
     in gap-candidate detection. No mismatch is ever flagged if either side has no primary field
     to compare, matching the old "no mapped reference, don't penalize" behaviour."""
-    d1 = for2020_primary_fields(codes1)
-    d2 = for2020_primary_fields(codes2)
+    d1 = for2020_all_fields(codes1)
+    d2 = for2020_all_fields(codes2)
     if not d1 or not d2:
         return False
     return not (d1 & d2)

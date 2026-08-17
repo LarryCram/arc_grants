@@ -1396,8 +1396,23 @@ def set_aside_indigenous_research(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     culturally important and not well portrayed by the bibliometric methods this project uses,
     so it's deliberately kept out of downstream oeuvre-building/scoring rather than run through
     them -- this is a scope decision about method fit, not a judgement about the research itself.
+
+    Second, separate step (2026-08-17): for AwardsCIF that are NOT excluded (primary division is
+    something other than 45), strip any division-45 entries out of their own for2020_codes union.
+    A person whose primary work is elsewhere but who also carries a non-primary division-45 code
+    stays in the working population (their real research is analyzable by this project's methods),
+    but the 45 code itself should never contribute to any downstream classification that now uses
+    the full for2020_codes list (Stage 3's field filter, division_mismatch_for2020(), pile-to-ACIF
+    channeling) -- confirmed empirically to matter: 1,124 of 1,228 AwardsCIF carrying a division-45
+    code have it as non-primary only (see the whitelist re-derivation investigation), and leaving
+    those 45 entries in generated spurious (45, X) division pairs with very high z-scores purely
+    from volume, not genuine legitimate co-occurrence -- a data-leakage artifact of the FOR2008/
+    RFCD98-to-FOR2020 upgrade preserving the OLD scheme's primary/non-primary labelling (which
+    routinely put a substantive discipline primary and Indigenous-relatedness secondary) even
+    though FOR2020's own convention would have made Indigenous-focus primary for that research.
     """
     n_excluded = 0
+    n_stripped = 0
     for c in clusters:
         triggers = [
             {"grant_code": it.grant_code, "code": e["code"], "name": e["name"]}
@@ -1410,8 +1425,16 @@ def set_aside_indigenous_research(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
             c.excluded_reason = "indigenous"
             c.record_event("excluded_indigenous_research", triggers=triggers)
             n_excluded += 1
+        else:
+            before = len(c.for2020_codes)
+            c.for2020_codes = [
+                e for e in c.for2020_codes if not e["code"].startswith(INDIGENOUS_DIVISION_PREFIX)
+            ]
+            if len(c.for2020_codes) < before:
+                n_stripped += 1
 
     print(f"  Set aside {n_excluded} Indigenous-focused AwardsCIF (FOR2020 division 45 as a primary grant code)")
+    print(f"  Stripped non-primary division-45 codes from {n_stripped} AwardsCIF (kept in population, 45 excluded from classification)")
     return clusters
 
 

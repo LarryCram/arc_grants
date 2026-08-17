@@ -27,7 +27,7 @@ FAIL = "✗"
 INFO = "·"
 
 CO_INV_MIN_SHARED = 1       # B3: minimum shared co-investigators to report
-SCHEMES_OF_INTEREST = ["FF", "FL", "FT", "DE", "DP", "LP", "DI"]
+SCHEMES_OF_INTEREST = ["FF", "FL", "FT", "DE", "DP", "LP"]
 
 
 def _header(label: str) -> None:

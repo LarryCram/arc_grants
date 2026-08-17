@@ -37,7 +37,14 @@ ECR_ROLES = frozenset({
 
 # Grant scheme codes to retain (first two characters of grant_code).
 # Excludes equipment/infrastructure (LE, IE), international mobility (LX, IN, IL),
-# industry hubs (IH), and miscellaneous small schemes.
+# industry hubs (IH), Discovery Indigenous (DI -- dropped 2026-08-17: the scheme exists
+# specifically to fund Indigenous-focused research and develop Indigenous researchers, so
+# every grant under it is exactly the kind of research this project already deliberately keeps
+# out of its bibliometric methods (see set_aside_indigenous_research()) -- relying on that
+# downstream FOR2020-division-45 check to catch DI grants is unreliable, since a grant's own
+# declared primary FOR code doesn't always resolve to "Indigenous Studies" even when the scheme
+# and subject matter unambiguously are (confirmed on a real case, DI0347845_DonnaOxenham, primary
+# FOR "Historical Studies")), and miscellaneous small schemes.
 KEEP_SCHEMES = frozenset({
     "DP",   # Discovery Projects
     "LP",   # Linkage Projects
@@ -45,5 +52,4 @@ KEEP_SCHEMES = frozenset({
     "FT",   # Future Fellowships
     "FL",   # Laureate Fellowships
     "FF",   # Federation Fellowships
-    "DI",   # Discovery Indigenous
 })

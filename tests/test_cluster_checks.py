@@ -103,9 +103,14 @@ class TestDivisionMismatchFor2020:
         codes = [_FISHERIES_30, _ECOLOGY_31, _CHEMENG_40, _ENVIRO_41]
         assert division_mismatch_for2020(codes) is True
 
-    def test_secondary_codes_ignored(self):
+    def test_secondary_codes_now_counted(self):
+        # Changed 2026-08-17: division_mismatch_for2020() moved from for2020_primary_fields()
+        # to for2020_all_fields() -- every FOR2020 code ARC recorded is real evidence of a CI's
+        # declared discipline mix, is_primary marks emphasis not exclusivity, so a secondary
+        # code now counts toward the division set just like a primary one. (34,46) isn't
+        # whitelisted, so this now correctly flags where it previously (wrongly) didn't.
         codes = [_CHEM_34, _for2020("4609", "Information systems", is_primary=False)]
-        assert division_mismatch_for2020(codes) is False
+        assert division_mismatch_for2020(codes) is True
 
 
 class TestAcceptableDivisionPairs:
