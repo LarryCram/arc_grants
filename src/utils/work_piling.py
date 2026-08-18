@@ -1,10 +1,10 @@
 """
 src/utils/work_piling.py
 
-Phase 2 of the candidate-pool prefilter + work-categorical piling design (see
-/home/lc/.claude/plans/drop-into-plan-mode-composed-cat.md, "Candidate-pool prefilter +
-work-categorical piling"). Sibling to oeuvre_build.py -- reads its persisted Stage 3 survivor
-checkpoint as input; never modifies Stage 1/3 themselves.
+Phase 2 of the group-level ACIF-membership gate design (see CLAUDE.md, "Group-level
+ACIF-membership gate design" and "`src/utils/work_piling.py` — Phase 2 piling infrastructure
+built and tested"). Sibling to oeuvre_build.py -- reads its persisted Stage 3 survivor checkpoint
+as input; never modifies Stage 1/3 themselves.
 
 This module's first piece: precomputed IDF-style term-frequency tables for the five feature
 blocks used by Phase 2's clustering -- coauthor, institution, field, subfield, topic. Same
@@ -32,6 +32,8 @@ from scipy.sparse import csr_matrix
 
 from config.settings import OPENALEX_DIR, PROCESSED_DATA, DUCKDB_TMP_DIR
 from src.utils.oeuvre_build import AUTH_GLOB, TOPIC_GLOB, STAGE3_SURVIVORS
+from src.utils.cluster_checks import for2020_all_fields, for2020_all_subfields
+from src.utils.awards_cif import _load_institution_hep_crosswalk
 
 WORK_TF_COAUTHOR    = PROCESSED_DATA / "work_tf_coauthor.parquet"
 WORK_TF_INSTITUTION = PROCESSED_DATA / "work_tf_institution.parquet"
@@ -335,14 +337,284 @@ def cluster_piles_dbscan(distance_matrix: np.ndarray, eps: float = 0.5, min_samp
 
 def cluster_piles_agglomerative(distance_matrix: np.ndarray, distance_threshold: float = 0.5) -> np.ndarray:
     """Agglomerative clustering over a precomputed distance matrix, cut at distance_threshold --
-    no fixed cluster count, discovered from the data (see plan rationale: the true number of
-    distinct real people blended into a pool is exactly what's unknown ahead of time)."""
+    no fixed cluster count, discovered from the data (the true number of distinct real people
+    blended into a pool is exactly what's unknown ahead of time). Confirmed empirically inferior
+    to DBSCAN for this data's chain-like similarity structure -- see CLAUDE.md; kept for
+    completeness/comparison, not the recommended default (use cluster_piles_dbscan)."""
     from sklearn.cluster import AgglomerativeClustering
     model = AgglomerativeClustering(
         metric="precomputed", linkage="average",
         distance_threshold=distance_threshold, n_clusters=None,
     )
     return model.fit_predict(distance_matrix)
+
+
+# --- Step 6: pile-to-ACIF channeling, cross-section development only ---
+
+def fetch_candidate_orcids(cluster_ids: list[str], con: duckdb.DuckDBPyConnection | None = None) -> dict[int, str]:
+    """author_idx -> own OpenAlex orcid (or None), for every candidate across the given
+    cluster_ids. Used by channel_piles()'s ORCID-first check."""
+    own_con = con is None
+    con = con or duckdb.connect()
+    try:
+        ids_sql = ",".join(f"'{c}'" for c in cluster_ids)
+        df = con.execute(f"""
+            SELECT DISTINCT a.author_idx, a.orcid
+            FROM read_parquet('{PROCESSED_DATA}/awards_cif.parquet') c,
+                 UNNEST(c.oax_candidates) AS t(url)
+            JOIN read_parquet('{OPENALEX_DIR}/authors/*.parquet') a ON a.ids.openalex = t.url
+            WHERE c.cluster_id IN ({ids_sql})
+        """).fetchdf()
+        return dict(zip(df["author_idx"], df["orcid"]))
+    finally:
+        if own_con:
+            con.close()
+
+
+def fetch_acif_meta(cluster_ids: list[str], con: duckdb.DuckDBPyConnection | None = None) -> pd.DataFrame:
+    """cluster_id -> orcids, hep_codes, for2020_codes -- the ACIF-side facts channel_piles()
+    corroborates each pile against."""
+    own_con = con is None
+    con = con or duckdb.connect()
+    try:
+        ids_sql = ",".join(f"'{c}'" for c in cluster_ids)
+        return con.execute(f"""
+            SELECT cluster_id, orcids, hep_codes, for2020_codes
+            FROM read_parquet('{PROCESSED_DATA}/awards_cif.parquet')
+            WHERE cluster_id IN ({ids_sql})
+        """).fetchdf().set_index("cluster_id")
+    finally:
+        if own_con:
+            con.close()
+
+
+def channel_piles(
+    cluster_id: str,
+    work_idxs: np.ndarray,
+    labels: np.ndarray,
+    raw: dict[str, pd.DataFrame],
+    arc_orcids: set[str],
+    acif_hep_codes: set[str],
+    acif_fields: set[str],
+    acif_subfields: set[str],
+    candidate_orcid: dict[int, str],
+    hep_crosswalk: dict[int, str],
+) -> dict[int, dict]:
+    """For each pile (a DBSCAN cluster label, excluding noise -1) in one ACIF's clustered
+    work-set, decide whether it's corroborated as belonging to this ACIF -- three signals,
+    checked in the established ORCID-first order:
+      1. Direct ORCID match -- any work in the pile traces to a candidate author_idx whose own
+         OpenAlex orcid matches one of the ACIF's ARC-recorded orcids. Settles identity directly,
+         not an inference from a pattern.
+      2. HEP-institution overlap -- the pile's own (own-candidate) institution history, mapped
+         through the HEP crosswalk, overlaps the ACIF's own hep_codes.
+      3. FOR-grounded field overlap -- the pile's own OAX field union overlaps
+         for2020_all_fields() of the ACIF's own declared FOR2020 codes. Confirmation uses the
+         coarser FIELD level, not subfield (changed 2026-08-18) -- subfield-level matching,
+         while more discriminating in principle (see CLAUDE.md's Hayward/MohammadIslam
+         findings, the reason it was adopted originally), produces real false negatives: e.g.
+         DP0346211_KasperKowalski's declared FOR2020 group "Biochemistry and cell biology"
+         resolves via for_resolve's crosswalk to OAX subfield "Biochemistry" only, missing the
+         adjacent OAX subfield "Molecular Biology" his actual pile's works land in, even though
+         both sides share the exact same OAX FIELD ("Biochemistry, Genetics and Molecular
+         Biology"). subfield_match is still computed and returned (not dropped) for a possible
+         future waterfall (e.g. subfield first for precision, field as a fallback) -- just not
+         what confirmed is based on right now.
+    A pile confirmed by none of the three is excluded from this ACIF's oeuvre, not silently kept.
+    Multiple piles may be independently confirmed for one ACIF -- fragment-splitting (one real
+    person's career split by OAX across several author_idx) is expected, not an error; see
+    CLAUDE.md for why a single "keep pile" that might blend different real people is the wrong
+    design.
+
+    Known, unresolved limitation (documented, not fixed here): this corroborates each pile as a
+    WHOLE, so a pile that's mostly-but-not-entirely the right person (e.g. Hayward's 59%-correct
+    main pile, confirmed 2026-08-17) can still pass the HEP/field checks even though part of it is
+    contamination from a different real person -- catching that needs a finer-than-per-pile check,
+    not yet built.
+    """
+    surv = raw["survivors"]
+    surv = surv[surv["cluster_id"] == cluster_id].set_index("work_idx")
+    smap = surv["source_author_idxs"].to_dict()
+    fmap = surv["field_names"].to_dict()
+    sfmap = surv["subfield_names"].to_dict()
+
+    inst = raw["institution"]
+    inst = inst[inst["cluster_id"] == cluster_id]
+    work_hep: dict[int, set] = {}
+    for row in inst.itertuples():
+        hep = hep_crosswalk.get(row.institution_idx)
+        if hep:
+            work_hep.setdefault(row.work_idx, set()).add(hep)
+
+    results = {}
+    for pile in sorted(set(labels) - {-1}):
+        idxs = [i for i, l in enumerate(labels) if l == pile]
+        pile_works = [work_idxs[i] for i in idxs]
+
+        pile_authors: set = set()
+        pile_fields: set = set()
+        pile_subfields: set = set()
+        pile_hep: set = set()
+        for w in pile_works:
+            pile_authors.update(_safe_list(smap.get(w)))
+            pile_fields.update(_safe_list(fmap.get(w)))
+            pile_subfields.update(_safe_list(sfmap.get(w)))
+            pile_hep.update(work_hep.get(w, set()))
+
+        orcid_match = any(
+            isinstance(candidate_orcid.get(a), str) and any(o in candidate_orcid[a] for o in arc_orcids)
+            for a in pile_authors
+        )
+        hep_match = bool(acif_hep_codes & pile_hep)
+        field_match = bool(acif_fields & pile_fields)
+        subfield_match = bool(acif_subfields & pile_subfields)
+
+        results[pile] = {
+            "n_works": len(pile_works),
+            "source_author_idxs": pile_authors,
+            "orcid_match": orcid_match,
+            "hep_match": hep_match,
+            "field_match": field_match,
+            "subfield_match": subfield_match,
+            "confirmed": orcid_match or hep_match or field_match,
+        }
+    return results
+
+
+# --- Persisted pipeline stage: piling + channeling is a batch stage, not a report-time lookup ---
+# (2026-08-18) -- Dossier() and any other reporting tool read this checkpoint the same way they
+# read arc_persons.parquet/oeuvres.parquet, they never trigger piling computation themselves.
+
+PILING_RESULTS = PROCESSED_DATA / "oeuvre_piling_results.parquet"
+
+
+def persist_piling_results(
+    con: duckdb.DuckDBPyConnection | None = None,
+    out_path: Path = PILING_RESULTS,
+    eps: float = 0.90,
+    batch_size: int = 500,
+    only_fellowships: bool = False,
+) -> None:
+    """Run piling (feature vectors -> cosine distance -> DBSCAN) + channeling
+    (ORCID-first -> HEP-overlap -> FOR-grounded field) across every non-excluded ACIF
+    with 2+ Stage-3 survivor works, and persist one row per (cluster_id, work_idx): pile_id
+    (-1 = noise, never clustered), orcid_match, hep_match, field_match, subfield_match,
+    confirmed (confirmed is orcid_match OR hep_match OR field_match -- subfield_match is
+    persisted alongside for a possible future waterfall but doesn't gate confirmed itself,
+    see channel_piles()'s docstring). ACIFs with
+    fewer than 2 works get a single row with pile_id=-1 and confirmed=NULL (not evaluated, not
+    "evaluated and failed" -- same three-valued discipline as coinvestigator_match elsewhere in
+    this project).
+
+    only_fellowships: when True, restricts to ACIFs holding >=1 grant with
+    investigators_raw.is_fellowship = TRUE (2026-08-18, user-directed scope -- this is the
+    project's own fellowship flag, broader than config/scope.py's ECR_ROLES, which is only the
+    DECRA/APD/APDI early-career subset). A prior run against the full population already exists
+    at PILING_RESULTS -- this flag is for a faster, fellowship-only re-run, not the only mode.
+
+    Processed in batches (default 500 ACIFs) rather than one single fetch_cross_section_raw()
+    call over the whole population -- the largest mega-pools (WeiWang-scale, tens of thousands
+    of works) make a single unbounded feature/distance-matrix pass memory-risky at full
+    population scale (2.55M total Stage-3 survivor rows); batching bounds peak memory to one
+    batch's worth regardless of population size, same rationale as oeuvre_build.py's original
+    OOM fix.
+    """
+    own_con = con is None
+    con = con or duckdb.connect()
+    try:
+        if own_con:
+            con.execute("SET enable_progress_bar = false")
+            con.execute("SET memory_limit = '24GB'")
+            con.execute(f"SET temp_directory = '{DUCKDB_TMP_DIR}'")
+
+        fellowship_join = ""
+        if only_fellowships:
+            fellowship_join = f"""
+                AND cluster_id IN (
+                    SELECT DISTINCT m.cluster_id
+                    FROM read_parquet('{PROCESSED_DATA}/arc_grant_cluster_map.parquet') m
+                    JOIN read_parquet('{PROCESSED_DATA}/investigators_raw.parquet') i
+                        ON m.unique_id = i.unique_id
+                    WHERE i.is_fellowship = TRUE
+                )
+            """
+        all_ids = con.execute(f"""
+            SELECT cluster_id FROM read_parquet('{PROCESSED_DATA}/awards_cif.parquet')
+            WHERE excluded = FALSE
+            {fellowship_join}
+        """).fetchdf()["cluster_id"].tolist()
+        scope_label = "fellowship" if only_fellowships else "non-excluded"
+        print(f"  persist_piling_results: {len(all_ids)} {scope_label} ACIFs", flush=True)
+
+        idf = load_idf_weights(con)
+        hep_crosswalk = _load_institution_hep_crosswalk()
+
+        first_batch = True
+        for start in range(0, len(all_ids), batch_size):
+            batch_ids = all_ids[start:start + batch_size]
+            raw = fetch_cross_section_raw(batch_ids, con)
+            candidate_orcid = fetch_candidate_orcids(batch_ids, con)
+            acif_meta = fetch_acif_meta(batch_ids, con)
+            surv_by_cluster = raw["survivors"].groupby("cluster_id").size()
+
+            rows = []
+            for cid in batch_ids:
+                n = surv_by_cluster.get(cid, 0)
+                if n < 2:
+                    surv = raw["survivors"]
+                    for w in surv[surv["cluster_id"] == cid]["work_idx"]:
+                        rows.append({"cluster_id": cid, "work_idx": int(w), "pile_id": -1,
+                                     "orcid_match": None, "hep_match": None, "field_match": None,
+                                     "subfield_match": None, "confirmed": None})
+                    continue
+
+                work_idxs, matrix, columns = build_feature_matrix(cid, raw, idf)
+                dist = compute_distance_matrix(matrix)
+                labels = cluster_piles_dbscan(dist, eps=eps, min_samples=2)
+
+                meta = acif_meta.loc[cid]
+                arc_orcids = set(_safe_list(meta["orcids"]))
+                acif_hep = set(_safe_list(meta["hep_codes"]))
+                codes = [dict(c) for c in _safe_list(meta["for2020_codes"])]
+                acif_fields = for2020_all_fields(codes)
+                acif_subfields = for2020_all_subfields(codes)
+
+                ch = channel_piles(cid, work_idxs, labels, raw, arc_orcids, acif_hep,
+                                    acif_fields, acif_subfields, candidate_orcid, hep_crosswalk)
+                pile_of_work = dict(zip(work_idxs, labels))
+                for w, pile in pile_of_work.items():
+                    if pile == -1:
+                        rows.append({"cluster_id": cid, "work_idx": int(w), "pile_id": -1,
+                                     "orcid_match": False, "hep_match": False, "field_match": False,
+                                     "subfield_match": False, "confirmed": False})
+                    else:
+                        r = ch[pile]
+                        rows.append({"cluster_id": cid, "work_idx": int(w), "pile_id": int(pile),
+                                     "orcid_match": r["orcid_match"], "hep_match": r["hep_match"],
+                                     "field_match": r["field_match"], "subfield_match": r["subfield_match"],
+                                     "confirmed": r["confirmed"]})
+
+            batch_df = pd.DataFrame(rows)
+            con.register("_batch_df", batch_df)
+            if first_batch:
+                con.execute(f"COPY _batch_df TO '{out_path}' (FORMAT PARQUET)")
+                first_batch = False
+            else:
+                con.execute(f"""
+                    COPY (
+                        SELECT * FROM read_parquet('{out_path}')
+                        UNION ALL BY NAME
+                        SELECT * FROM _batch_df
+                    ) TO '{out_path}' (FORMAT PARQUET)
+                """)
+            con.unregister("_batch_df")
+            print(f"    {min(start + batch_size, len(all_ids))}/{len(all_ids)} ACIFs processed", flush=True)
+
+        n_rows = con.execute(f"SELECT COUNT(*) FROM read_parquet('{out_path}')").fetchone()[0]
+        print(f"  persist_piling_results: {n_rows:,} rows -> {out_path}", flush=True)
+    finally:
+        if own_con:
+            con.close()
 
 
 if __name__ == "__main__":

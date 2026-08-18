@@ -29,12 +29,12 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-from config.settings import OPENALEX_COMPACT_DIR, PROCESSED_DATA, DUCKDB_TMP_DIR
+from config.settings import OPENALEX_COMPACT_DIR, OPENALEX_DIR, PROCESSED_DATA, DUCKDB_TMP_DIR
 from src.utils.awards_cif import (
     AwardsCIF, CandidateWork, _load_coinvestigator_names, _norm_full,
     _load_institution_hep_crosswalk,
 )
-from src.utils.cluster_checks import for2020_primary_fields
+from src.utils.cluster_checks import for2020_all_fields, for2020_primary_fields
 from analysis.utils import dedup, exclusions
 
 AUTH_GLOB  = str(OPENALEX_COMPACT_DIR / "authorships" / "*.parquet")
@@ -643,10 +643,16 @@ def apply_field_filter_stage3(
     path: Path = STAGE3_SURVIVORS,
     exclusions_path: Path = STAGE3_EXCLUSIONS,
     stage1_path: Path = STAGE1_SURVIVORS,
+    orcid_gate_max_candidates: int = 10,
+    small_pool_max_candidates: int = 10,
 ) -> None:
     """Stage 3 of the 2026-08-15 full-scale-OOM fix: reads the Stage 1 survivor set (persisted
     by fetch_and_filter_stage1()) and applies field-match logic -- same
-    cluster_checks.for2020_primary_fields() call, same "no mapped reference, don't penalize"
+    cluster_checks.for2020_all_fields() call (fixed 2026-08-18, was for2020_primary_fields() --
+    a stale gap: CLAUDE.md documented this call site as migrated to the all-codes version, but
+    the code itself still had the primary-only import; found while investigating a real case,
+    Adam Hulme, whose secondary FOR codes don't change the outcome but the mismatch between
+    documentation and code was real regardless), same "no mapped reference, don't penalize"
     guard, same "works with no assigned field are left alone" rule as apply_subfield_filter() --
     entirely in DuckDB (read_parquet -> COPY ... TO parquet), never routing the multi-million-row
     Stage 1 data through a pandas DataFrame (see fetch_and_filter_stage1()'s docstring -- a real
@@ -660,6 +666,34 @@ def apply_field_filter_stage3(
     multi-topic works (64.2% of touched works have >1 distinct field; 14.6% of best-topic-only
     field exclusions had another topic that actually matched the target field).
 
+    ORCID gate (2026-08-18, new): this filter's whole justification is disambiguating a pool of
+    *candidate* author_idx, some of which may be the wrong person -- but Adam Hulme's case
+    (DE240100095) showed it applies uniformly even to a candidate already identity-confirmed by
+    an exact ARC-ORCID match, with no other candidates left to disambiguate against for that
+    specific work. For an ACIF with a recorded ORCID and fewer than `orcid_gate_max_candidates`
+    total candidates, works whose own source_author_idxs include the ORCID-matched candidate
+    bypass the field filter entirely (they still went through Stage 1's quality checks). Works
+    from this same ACIF's *other*, non-ORCID-matched candidates are NOT exempted -- the gate
+    protects only the specific candidate identity has already confirmed, not the whole pool.
+    Explicitly acknowledged as an interim measure, not a durable design: it does nothing for the
+    (likely far more common) case with no ORCID at all, and the </=10 cutoff is a guess, not
+    calibrated -- both flagged for revisiting once piling/channeling's own ORCID-first logic is
+    positioned to take over this role properly.
+
+    Small-pool gate (2026-08-18, broader, no ORCID needed): for a cluster with fewer than
+    `small_pool_max_candidates` total candidates, skip the field filter entirely for every
+    candidate's works, ORCID or not. Reasoning (user-directed): this filter was designed at a
+    point when it was the *only* available tool for pruning a small candidate pool down to the
+    right person -- but Stage 3 now sits upstream of piling/channeling, which does real per-work
+    clustering plus ORCID/HEP/field corroboration on whatever survives here. For a small pool,
+    it's safer to let more Stage-1-quality-passing work through and let piling do the actual
+    discrimination downstream, rather than have this coarse, ACIF-level field filter pre-emptively
+    (and as Hulme showed, sometimes badly) strip real work before piling ever sees it. Kept as a
+    genuinely separate mechanism from the ORCID gate above (not collapsed into one), even though
+    both currently use the same cutoff -- if `small_pool_max_candidates` is ever raised
+    independently, the narrower, ORCID-anchored exemption still stands on its own for pools this
+    one no longer covers.
+
     Exclusion accounting matches Stage 1's shape: a per-(cluster_id, reason='field_mismatch', n)
     summary, not a retained per-work record -- this also runs on a still-large population, so full
     per-work retention would reintroduce real cost (see the plan file's "provenance shape differs
@@ -671,13 +705,23 @@ def apply_field_filter_stage3(
     """
     allowed_rows = []
     no_reference_rows = []
+    orcid_gate_candidate_rows = []  # (cluster_id, oax_candidate_url) -- checked for an ORCID match
+    arc_orcid_rows = []             # (cluster_id, orcid)
+    small_pool_rows = []            # (cluster_id,) -- whole cluster exempt, ORCID irrelevant
     for c in clusters:
-        target_fields = for2020_primary_fields(c.for2020_codes)
+        target_fields = for2020_all_fields(c.for2020_codes)
         if not target_fields:
             no_reference_rows.append((c.cluster_id,))
             continue
         for f in target_fields:
             allowed_rows.append((c.cluster_id, f))
+        if c.orcids and len(c.oax_candidates) < orcid_gate_max_candidates:
+            for url in c.oax_candidates:
+                orcid_gate_candidate_rows.append((c.cluster_id, url))
+            for o in c.orcids:
+                arc_orcid_rows.append((c.cluster_id, o))
+        if len(c.oax_candidates) < small_pool_max_candidates:
+            small_pool_rows.append((c.cluster_id,))
 
     own_con = con is None
     con = con or duckdb.connect()
@@ -694,15 +738,40 @@ def apply_field_filter_stage3(
         if no_reference_rows:
             con.executemany("INSERT INTO _no_ref VALUES (?)", no_reference_rows)
 
+        con.execute("CREATE OR REPLACE TEMP TABLE _orcid_gate_candidates (cluster_id VARCHAR, oax_url VARCHAR)")
+        if orcid_gate_candidate_rows:
+            con.executemany("INSERT INTO _orcid_gate_candidates VALUES (?, ?)", orcid_gate_candidate_rows)
+        con.execute("CREATE OR REPLACE TEMP TABLE _arc_orcids (cluster_id VARCHAR, orcid VARCHAR)")
+        if arc_orcid_rows:
+            con.executemany("INSERT INTO _arc_orcids VALUES (?, ?)", arc_orcid_rows)
+        # contains(), not exact equality -- OpenAlex's own orcid field is a full URL
+        # ("https://orcid.org/0000-..."), ARC's own orcids are bare -- same mismatch, same fix
+        # already used in work_piling.py's channel_piles().
+        con.execute(f"""
+            CREATE OR REPLACE TEMP TABLE _orcid_exempt_authors AS
+            SELECT DISTINCT g.cluster_id, a.author_idx
+            FROM _orcid_gate_candidates g
+            JOIN read_parquet('{OPENALEX_DIR}/authors/*.parquet') a ON a.ids.openalex = g.oax_url
+            JOIN _arc_orcids o ON o.cluster_id = g.cluster_id AND contains(a.orcid, o.orcid)
+        """)
+        con.execute("CREATE OR REPLACE TEMP TABLE _small_pool (cluster_id VARCHAR)")
+        if small_pool_rows:
+            con.executemany("INSERT INTO _small_pool VALUES (?)", small_pool_rows)
+
         path.parent.mkdir(parents=True, exist_ok=True)
         exclusions_path.parent.mkdir(parents=True, exist_ok=True)
 
         match_expr = """
             s.cluster_id IN (SELECT cluster_id FROM _no_ref)
             OR s.field_names IS NULL
+            OR s.cluster_id IN (SELECT cluster_id FROM _small_pool)
             OR EXISTS (
                 SELECT 1 FROM _allowed a
                 WHERE a.cluster_id = s.cluster_id AND list_contains(s.field_names, a.field_name)
+            )
+            OR EXISTS (
+                SELECT 1 FROM _orcid_exempt_authors e
+                WHERE e.cluster_id = s.cluster_id AND list_contains(s.source_author_idxs, e.author_idx)
             )
         """
         con.execute(f"""
@@ -727,7 +796,7 @@ def apply_field_filter_stage3(
     finally:
         # See fetch_and_filter_stage1()'s matching cleanup comment -- same shared-connection
         # accumulation risk applies here.
-        for t in ["_allowed", "_no_ref"]:
+        for t in ["_allowed", "_no_ref", "_orcid_gate_candidates", "_arc_orcids", "_orcid_exempt_authors", "_small_pool"]:
             con.execute(f"DROP TABLE IF EXISTS {t}")
         if own_con:
             con.close()

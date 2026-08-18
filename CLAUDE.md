@@ -553,16 +553,34 @@ Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
   extraction batch. Needs a decision: merge into `compact/`, read alongside it, or leave
   untouched — deferred, revisit before treating any future oeuvres fetch as complete/final.
 - **Group-level ACIF-membership gate for oeuvre_build.py** (2026-08-16 design, 2026-08-17 partial
-  build) -- see "Group-level ACIF-membership gate design" and "`src/utils/work_piling.py` — Phase 2
-  piling infrastructure" below. The IDF-weighted feature/distance/clustering machinery (points (2)
-  and (3)'s within-group-coherence spirit, generalized) is built and cross-section-tested; the
-  ORCID-first check (point 1) and the pile-to-ACIF channeling step (ORCID-first, then HEP-overlap,
-  then FOR-grounded field/subfield) are designed but not yet production code. Two real, unresolved
-  gaps found during cross-section testing: mega-pool false bridging (DBSCAN can merge two confirmed-
-  different people via an indirect chain through *other* candidates in a large pool, even when they
-  aren't directly similar), and within-pile contamination hiding inside a nominally "correct"
-  dominant pile (Hayward's main pile was only 59% the right person). Not wired into any driver
-  script yet.
+  build, **2026-08-18: channeling + persistence + Dossier wiring done**) -- see "Group-level
+  ACIF-membership gate design", "`src/utils/work_piling.py` — Phase 2 piling infrastructure", and
+  "`oeuvre_piling_results.parquet` persisted; Dossier() wired to piling; Stage 3 gates" below.
+  `channel_piles()` (ORCID-first, then HEP-overlap, then FOR-grounded field) is real production
+  code now, `persist_piling_results()` runs it across the full population and persists
+  `PROCESSED_DATA/oeuvre_piling_results.parquet`, and `Dossier()` reads it directly. Two real,
+  unresolved gaps found during cross-section testing remain open: mega-pool false bridging (DBSCAN
+  can merge two confirmed-different people via an indirect chain through *other* candidates in a
+  large pool, even when they aren't directly similar -- HDBSCAN identified as the likely fix,
+  not yet tried, see below), and within-pile contamination hiding inside a nominally "correct"
+  dominant pile (Hayward's main pile was only 59% the right person, not re-investigated since).
+- **HDBSCAN vs DBSCAN systematic comparison** (2026-08-18, requested, not yet done) -- test
+  `sklearn.cluster.HDBSCAN` (built into scikit-learn ≥1.3, no new dependency) against the same
+  cross-section used to validate DBSCAN (Hessel for "does it still unify a clean career", WeiWang/
+  MohammadIslam for "does it stop mega-pool false bridging"). User-deferred until other in-flight
+  work finishes; not started.
+- **"Multi-pile, 2+ confirmed" growth needs a spot-check** (2026-08-18): the Stage 3 ORCID/
+  small-pool gates (see below) roughly doubled this bucket population-wide (ECR cohort alone:
+  1,133 → 1,413 after the field-level channeling fix, then 1,413 → 2,094 after the Stage 3 gates) --
+  plausibly genuine fragment-splitting now visible because more real data reaches piling, but could
+  also be over-permissive corroboration letting wrong piles through (the same failure mode
+  subfield-level matching was originally adopted to prevent). Not checked either way.
+- **Person-relative implausible-year filter** (2026-08-18, suggested, not built): Stage 1's
+  `implausible_year` check only catches globally-implausible years (outside 1950-2026) -- it can't
+  catch a work whose year is merely impossible *for this specific person* (see Adam Hulme below,
+  where 1960-2002 works sit comfortably inside the global range). Flagged as possibly as effective
+  as field-based filtering, and safer (a wrong-decade work is a much cleaner signal than a
+  wrong-field one). Not implemented.
 - **`ACCEPTABLE_DIVISION_PAIRS` re-derivation** (2026-08-17, see the matching CLAUDE.md section and
   `cluster_checks.py`'s module docstring) -- attempted, not adopted, reverted to the original
   41-pair list after three iterations each surfaced a new problem (unexplained 2-3x inflation, a
@@ -999,3 +1017,227 @@ future session.
 **Population after all fixes** (full `06_build_oeuvre.py` re-run): 22,920 AwardsCIF built, 104 set
 aside as Indigenous-focused (primary division 45, unchanged), 1,124 had non-primary division-45
 codes stripped from classification, resolution_status 22,187 RESOLVED / 733 UNRESOLVED.
+
+## `oeuvre_piling_results.parquet` persisted; Dossier() wired to piling; Stage 3 field-filter gates (2026-08-18)
+
+Three connected pieces of work, in the order they actually happened: persisting piling as a real
+pipeline checkpoint, a bug fix in channeling's own field-match logic, wiring `Dossier()` to read
+piling output directly (with a "show the whole person" correction along the way), and -- triggered
+by manually reviewing real Dossiers -- two real, complementary bugs found in Stage 3's field filter
+and fixed.
+
+### Piling persisted as its own checkpoint, not merged into `AwardsCIF`
+
+`src/utils/work_piling.py::persist_piling_results()` runs piling (feature vectors -> cosine
+distance -> DBSCAN) + channeling (ORCID -> HEP -> field) across every non-excluded ACIF with 2+
+Stage-3 survivor works, and persists one row per `(cluster_id, work_idx)`:
+`pile_id, orcid_match, hep_match, field_match, subfield_match, confirmed` to
+`PROCESSED_DATA/oeuvre_piling_results.parquet`. Architecture decision, reached by direct
+back-and-forth rather than a single clean derivation: piling output is a **separate, persisted
+work-level table**, matching the existing Stage1/Stage3/subfield_hep_signals precedent -- never
+merged into `awards_cif.parquet` itself. `Dossier()`/any other reporting tool reads it the same way
+it reads `arc_persons.parquet`/`oeuvres.parquet` -- it never triggers piling computation itself.
+When piling surfaces something that contradicts an upstream ACIF fact, the right mechanism is the
+project's existing manual-override pattern (`manual_splits.csv` etc.) -- a human-confirmed
+correction applied upstream, then a forward re-run -- not a live feedback loop between piling and
+the ACIF it reads from.
+
+Batched (500 ACIFs/batch, DuckDB `COPY ... UNION ALL BY NAME` append pattern) to bound peak memory
+regardless of population size, same rationale as the original Stage1/3 OOM fix. First full run:
+22,816 non-excluded ACIFs, 2,549,619 rows, ~3 minutes wall-clock (batch_size=500; an earlier
+attempt at batch_size=50, plus piping through `tail -40` which swallows all output until exit,
+looked hung for over an hour before being killed and relaunched correctly -- lesson: never pipe a
+long background run through `tail` without `-f`, and prefer the tool's own background-task output
+file over ad hoc piping).
+
+### `channel_piles()` bug: `field_match` was actually computing a subfield-level check
+
+Found while manually tracing why `DP0346211_KasperKowalski` (a real ECR case, small oeuvre) wasn't
+corroborated despite an apparently on-topic pile. Both `pile_fields` and `pile_subfields` were
+already being computed inside `channel_piles()`'s loop, but only `pile_subfields` was ever used --
+the variable *named* `field_match` was computing `bool(acif_subfields & pile_subfields)`, i.e. a
+subfield-level check, while `pile_fields` sat unused. Confirmed concretely on Kowalski: his
+declared FOR2020 codes (3101 "Biochemistry and cell biology", 5105 "Biological physics") resolve to
+OAX **field** `Biochemistry, Genetics and Molecular Biology` (exact match with his pile's own
+field) but OAX **subfield** `Biochemistry` -- his pile's subfield is the adjacent, un-mapped
+`Molecular Biology` (the FOR2020 group's crosswalk picks one subfield even though "cell biology" is
+in the group's own name) -- so the old code found no subfield overlap and marked it unconfirmed,
+even though the field-level match was clean.
+
+**Fix**: `field_match` now correctly computes `bool(acif_fields & pile_fields)`; the old
+subfield-level check is kept as a new, separate `subfield_match` field (not dropped -- persisted
+alongside, for a possible future waterfall, e.g. subfield-first for precision with field as a
+fallback) but no longer gates `confirmed`. `confirmed = orcid_match or hep_match or field_match`.
+`persist_piling_results()` and its output schema updated to carry `subfield_match` as its own
+column. Population-wide effect on the ECR cohort (DECRA/APD/APDI): "clean uncorroborated" (1 pile,
+0 confirmed) dropped from 31 to 0, "fully ambiguous" (2+ piles, 0 confirmed) dropped from 5 (ECR
+subset) to 0, but "multi-pile, 2+ confirmed" rose from 1,133 to 1,413 -- flagged, not yet checked
+either way, as a possible reintroduction of the over-permissive-field-matching failure mode
+subfield-level checking was originally adopted to prevent (see "Next Priority" above).
+
+### `Dossier()`/`dossier_build.py` hardwired to piling, ACIF fields/subfields/institutions, and the whole person's award history
+
+Triggered by direct user feedback: ad hoc scratch scripts building one-off HTML/markdown reports
+were "frustratingly brief" -- the user's own field selection was rarely what was actually needed,
+and rebuilding a bespoke report generator each time wasted the cheap part (Dossier already computes
+almost everything) while never fixing the real problem (curation). Direction: make `to_markdown()`
+itself fuller by default, hardwired as real project code, not scratch scripts re-derived per
+question. Also established this session: **plain markdown published via the Artifact tool is now
+the default reporting medium** for anything beyond a couple of cases -- Artifact renders `.md`
+files natively with no HTML/CSS authoring step, so `Dossier.to_markdown()`'s output can be
+concatenated and published directly at near-zero marginal cost over what already prints to the
+terminal; the custom-styled HTML treatment (sparklines, status chips, TOC) is reserved for a
+finished, repeatedly-browsed, or shared deliverable, not the default.
+
+Concrete additions to `analysis/utils/dossier.py`:
+- New `PileDiagnostic` frozen dataclass: `pile_id, n_works, orcid_match, hep_match, field_match,
+  subfield_match, confirmed, pile_fields, pile_subfields, coauthor_names` (coauthors exclude the
+  ACIF's own candidate `author_idx`(s)). `bool | None` match fields -- `None` means not evaluated
+  (e.g. no ARC-recorded ORCID to check), not "evaluated, no match" -- same three-valued discipline
+  used throughout this project.
+- `AwardContext.other_investigators: list[str]` -- every other ARC investigator on that specific
+  grant ("First Last (role_code)"), and `AwardContext.role_code` (this person's own role on that
+  grant) -- added earlier this session, see below.
+- `Dossier.acif_fields` / `.acif_subfields` -- OAX fields/subfields implied by this ACIF's own
+  declared FOR2020 codes (`cluster_checks.for2020_all_fields()`/`for2020_all_subfields()`), i.e.
+  exactly what piling's `field_match`/`subfield_match` are checked against.
+- `Dossier.acif_institutions` -- this ACIF's own HEP institutions (`awards_cif.parquet`'s
+  `hep_codes`, the union across every grant's eligible orgs, not just the administering one),
+  resolved to full names via `admin_orgs.csv` ("Name (CODE)"), falling back to the bare code if
+  unmapped. What piling's `hep_match` is checked against.
+- `Dossier.piles: list[PileDiagnostic]` -- this ACIF's own piling result, empty if not yet piled or
+  fewer than 2 candidate works (not evaluated, not "evaluated and found nothing" -- the same
+  distinction almost got collapsed in an early draft of the `to_markdown()` render before being
+  caught and fixed).
+- `to_markdown()` renders all of the above: `other_investigators` under each award, a new
+  "## OpenAlex candidate piling" section per person.
+
+`dossier_build.py` gained matching fetch functions (`_fetch_acif_fields_subfields()`,
+`_fetch_acif_institutions()`, `_fetch_piling_diagnostics()`), all reading already-persisted
+checkpoints (`awards_cif.parquet`, `oeuvre_piling_results.parquet`, `oeuvre_stage3_survivors.parquet`,
+raw OpenAlex `authorships`/`authors`), never triggering computation. A module-level
+`HEP_CODE_TO_NAME` dict is built once from `admin_orgs.csv` at import time (42 real mappings).
+
+**`_fetch_award_contexts()` no longer scoped to `ECR_ROLES`** (2026-08-18, direct user correction:
+"the ACIF is about a person, not an award... I would not expect this interpretation"). Found via
+Andrew Burrow (`DP0665744_AndrewBurrow`): his real grant `DP0985878` (RMIT, "Ethics and aesthetics
+as criteria for innovation") was silently missing from his Dossier's Awards section because his
+role on it is `CI`, not an ECR role -- the function used to filter `role_code IN ECR_ROLES` outright.
+Fixed: it now returns *every* grant the cluster holds any role on; an ECR-specific view should
+filter on `award_year`/`career_age_at_award` instead of hiding non-ECR-role grants. `arc_grant_
+cluster_map` confirmed the grant was always correctly linked -- this was a display/filtering bug,
+not a linkage one.
+
+### `analysis/07_analyse_ecr_fellowships.py::build_cohort()` stale `for_codes` gap
+
+Found via Amanda Macdonald (`DP0346551_AmandaMacdonald`): her Dossier's "FOR codes" line showed
+only `4702`, but `awards_cif.parquet`'s own `for2020_codes` has two entries, `4702` (Cultural
+studies, primary) and `4703` (French language, secondary) -- confirmed correct by hand-resolving
+her raw `field-of-research` block (`raw_json.csv`: `2002/FOR08` "Cultural Studies" primary,
+`420106/RFCD98` "French", `420302/RFCD98` "Cultural Theory", `420306/RFCD98` "Postcolonial and
+Global Cultural Studies") through `for_resolve.resolve_arc_for_entry()` by hand and getting exactly
+`{4702, 4703}` back. Root cause: `arc_persons.parquet` carries **two** different FOR-code columns --
+`for_codes` (legacy, primary-only) and `for2020_codes` (full, correctly-resolved list, same as
+`awards_cif.parquet`) -- and `build_cohort()` was still reading the legacy `for_codes` column,
+a gap the 2026-08-17 "use all FOR codes, not just primary" migration never reached. Fixed:
+`build_cohort()` now selects `p.for2020_codes` and derives the plain code list from it
+(`for2020_codes` is already ordered primary-first, so no re-sorting needed); `add_for_division_
+panel()`'s downstream logic (`upgrade_for_code()` on each code, FOR2020 passthrough) needed no
+change.
+
+### Adam Hulme (`DE240100095`): an ORCID-confirmed candidate with OpenAlex-side-only contamination
+
+Investigated after the user pasted Hulme's real ORCID profile (PhD 2014-2017, Federation
+University) alongside his Dossier's implausible `first_pub_year: 1960` / `career_age_at_award: 64`.
+Sequence of findings, each checked directly rather than assumed:
+
+- **ORCID confirms the right person, not a linking error.** `awards_cif.parquet`'s ARC-recorded
+  ORCID for this cluster (`0000-0002-3305-8538`) exactly matches OpenAlex candidate `A5077201705`'s
+  own `orcid` field (confirmed both via our local snapshot and a live OpenAlex API pull the user
+  provided). This is genuinely Adam Hulme, not a wrong-candidate link.
+- **The contamination is inside OpenAlex's own author record.** Fetched his real ORCID publication
+  list directly (`mcp__alex-mcp__get_orcid_publications`, 203 works) -- every single one dated
+  2015-2026, none before. But a direct join of our local `OPENALEX_COMPACT_DIR/authorships` +
+  `works` tables for `author_idx=5077201705` shows works dated 1960, 1971, 1985, 1989, 2001, 2002 --
+  OpenAlex's own per-work authorship disambiguation has misattributed someone else's older work
+  onto this ORCID-verified author bucket. Not an ARC<->OpenAlex linkage problem on our side.
+- **Raw-row-count gotcha, resolved**: the raw authorships join returned 153 rows for this
+  author_idx against `authors.parquet`'s own `works_count=125` -- traced to 22 duplicate
+  `(author_idx, work_idx)` rows in the authorships extract; `COUNT(DISTINCT work_idx)` gives 125,
+  matching the dimension table exactly. Not evidence of additional contamination beyond the
+  confirmed pre-2015 works -- a data-extraction duplication artifact, noted for awareness, not
+  investigated further this session.
+- **Why piling never caught it**: his Stage-3 candidate pool had collapsed to exactly **1** survivor
+  work (of 58 Stage-1-quality-passing works) -- DBSCAN needs 2+ works to form a pile at all, so this
+  wasn't "evaluated and missed," it was structurally unable to attempt evaluation. Traced the
+  funnel precisely: 58 Stage-1 survivors -> Stage 3's field filter dropped 57 of them. His declared
+  FOR2020 codes (3505 "Human resources and industrial relations", 3507 "Strategy, management and
+  organisational behaviour", 4203 "Health services and systems") resolve to OAX fields `Business,
+  Management and Accounting` + `Medicine` only. Verified `4203`'s own resolution precisely:
+  `4203 -> OAX subfield "Public Health, Environmental and Occupational Health" -> OAX field
+  "Medicine"` (confirmed correct against real `work_topics` data -- that subfield genuinely sits
+  under Medicine in OpenAlex's own taxonomy, not a crosswalk bug). The real gap is that his actual
+  papers mostly land on OAX field `Health Professions` (31 of 108 works) -- a field none of his
+  three FOR codes reach at all -- a genuine breadth gap, not a resolver error.
+- **The conceptual bug this exposed**: Hulme has 4 OpenAlex candidates in his pool, not 1 -- but
+  ORCID already resolves which one is correct before Stage 3 ever runs. Stage 3's field filter
+  builds one target-field set per ACIF and applies it uniformly to *every* pooled work from *every*
+  candidate, with no awareness that a specific candidate's identity is already settled. Its
+  original justification -- "disambiguate a pool with several possibly-wrong candidates" -- doesn't
+  apply once ORCID has already answered that question for one of them; applying it anyway can only
+  ever remove that person's real work, never help.
+
+### Stage 3 fixes: stale `for2020_primary_fields()` import, ORCID gate, small-pool gate
+
+`src/utils/oeuvre_build.py::apply_field_filter_stage3()` was still importing and calling
+`for2020_primary_fields()`, contradicting CLAUDE.md's own documentation that this call site had
+been migrated to the all-codes version -- a real stale gap between docs and code (didn't change
+Hulme's outcome, his primary and secondary codes resolve to the same two fields either way, but the
+mismatch was real). Fixed: now calls `for2020_all_fields()`. The old, superseded
+`apply_subfield_filter()` function still legitimately imports `for2020_primary_fields()` too -- both
+stay imported, only the Stage 3 call site changed.
+
+Two new, explicitly interim gates added to the same function (both parameterized, both flagged in
+their own docstrings as needing revisiting once piling/channeling's ORCID-first logic is
+positioned to take over this role properly -- not a durable design):
+
+- **ORCID gate** (`orcid_gate_max_candidates=10`): for an ACIF with a recorded ORCID and fewer than
+  10 total candidates, works whose own `source_author_idxs` include the specific ORCID-matched
+  candidate bypass the field filter entirely -- protects only that one already-confirmed
+  candidate's works, not the whole pool. Resolves the OpenAlex `orcid` field's known ARC-orcid
+  bare-string-vs-URL mismatch via `contains()`, same fix already used in `channel_piles()`.
+- **Small-pool gate** (`small_pool_max_candidates=10`, user-directed, broader): for *any* ACIF with
+  fewer than 10 total candidates, skip the field filter entirely for every candidate's works, ORCID
+  or not. Reasoning: this filter predates piling and was originally the *only* tool available for
+  pruning a small candidate pool -- but Stage 3 now sits upstream of piling/channeling, which does
+  real per-work clustering and ORCID/HEP/field corroboration on whatever survives here. For a small
+  pool it's safer to let more Stage-1-quality-passing work through and let piling do the actual
+  discrimination downstream. Kept as a genuinely separate mechanism from the ORCID gate (not
+  collapsed into one) even though both currently share the same cutoff -- if the small-pool
+  threshold is ever raised independently, the narrower ORCID-anchored exemption still stands on its
+  own for pools it no longer covers.
+
+Smoke-tested in isolation on Hulme's cluster only (scratch output paths, never pointed at the real
+`STAGE3_SURVIVORS` path) before the full rerun -- confirmed his own survivor count jumped from 1 to
+58 (the full Stage-1 set), as expected from either gate firing.
+
+**Full population rerun** (`06_build_oeuvre.py` -> IDF tables -> `persist_piling_results()`, ~20
+minutes total): 22,918 AwardsCIF built; Stage 1: 7,285,909 survivors (unchanged logic, minor count
+drift from upstream data); **Stage 3: 4,499,176 survivors** (up from 2,570,763 pre-session baseline
+and ~2.55M just before these gates -- 2,786,733 excluded for `field_mismatch`, down from ~4.75M);
+piling: **4,485,777 rows** (up from 2,549,619). ECR cohort (DECRA/APD/APDI) piling-bucket shift,
+before -> after the Stage 3 gates:
+
+| bucket | before | after |
+|---|---|---|
+| n_piles==0 (nothing to pile) | 96 | 16 |
+| clean, confirmed (1 pile, 1 confirmed) | 2,543 | 1,668 |
+| clean, uncorroborated (1 pile, 0 confirmed) | 0 | 6 |
+| fully ambiguous (2+ piles, 0 confirmed) | 0 | 2 |
+| multi-pile, 1 confirmed | 10 | 343 |
+| multi-pile, 2+ confirmed | 1,413 | 2,094 |
+| missing piling row | 100 | 33 |
+
+The `n_piles==0` bucket dropping from 96 to 16 is the gates working as intended (most were
+filter-starved, not genuinely unpileable). The growth in multi-pile buckets is a real, honest
+side effect flagged above under "Next Priority", not yet checked either way.

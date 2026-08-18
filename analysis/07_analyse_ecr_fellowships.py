@@ -74,7 +74,7 @@ def build_cohort(con: duckdb.DuckDBPyConnection, roles=ECR_ROLES, linked_only=Tr
             FROM mapped m LEFT JOIN read_parquet('{GRANTS_FLAT}') g ON m.grant_code = g.grant_code
             GROUP BY 1
         )
-        SELECT p.cluster_id, p.full_names, p.for_names, p.for_codes,
+        SELECT p.cluster_id, p.full_names, p.for_names, p.for2020_codes,
                py.award_year, l.oax_id
         FROM read_parquet('{ARC_PERSONS}') p
         JOIN person_year py ON p.cluster_id = py.cluster_id
@@ -86,6 +86,13 @@ def build_cohort(con: duckdb.DuckDBPyConnection, roles=ECR_ROLES, linked_only=Tr
 
     df["name"] = df["full_names"].apply(lambda x: x[0] if len(x) else "")
     df["for_field"] = df["for_names"].apply(lambda x: " / ".join(x))
+    # for2020_codes is the full per-grant FOR2020 code list (every code ARC recorded, not just
+    # the primary one -- see CLAUDE.md "Scope and FOR-code fixes"); arc_persons.parquet's own
+    # plain `for_codes` column is a stale, primary-only field that this function used to read
+    # instead, silently dropping every secondary code (found 2026-08-18, Amanda Macdonald's
+    # dossier showing only 4702 when her ACIF has both 4702 and 4703). Already ordered
+    # primary-first by awards_cif.py/01_prepare_arc.py, so no re-sorting needed here.
+    df["for_codes"] = df["for2020_codes"].apply(lambda entries: [e["code"] for e in entries])
     df["award_year"] = df["award_year"].astype("Int64")
     return df[["cluster_id", "name", "oax_id", "award_year", "for_field", "for_codes"]]
 

@@ -104,6 +104,8 @@ class AwardContext:
     scheme: str  # e.g. "DECRA"
     award_year: int
     career_age_at_award: int | None  # award_year - Dossier.first_pub_year
+    role_code: str | None = None  # this person's role on this specific grant (CI, DECRA, APD, ...)
+    other_investigators: list[str] = field(default_factory=list)  # "First Last (role_code)" for every other ARC investigator on this same grant
     coauthor_track_record: list[CoauthorRecord] = field(default_factory=list)
     percentiles: dict[str, Percentile] = field(default_factory=dict)  # vs peers of the same scheme/award_year
 
@@ -112,6 +114,28 @@ class AwardContext:
         return Counter(
             c.coauthor_country_code for c in self.coauthor_track_record if c.coauthor_country_code
         )
+
+
+@dataclass(frozen=True)
+class PileDiagnostic:
+    """One work-piling result (src/utils/work_piling.py) for this person's OpenAlex candidate
+    pool -- a cluster of works that piled together, and whether ORCID/HEP/field/subfield
+    corroborate it as genuinely belonging to this ACIF. A person can have zero (not yet piled,
+    or fewer than 2 candidate works -- not evaluated, not the same as "evaluated and rejected"),
+    one, or several confirmed piles (fragment-splitting across OpenAlex author_idx is expected,
+    not an error -- see CLAUDE.md). match fields are bool | None: None means not evaluated
+    (e.g. this ACIF has no ARC-recorded ORCID to check against), not "evaluated, no match"."""
+
+    pile_id: int
+    n_works: int
+    orcid_match: bool | None
+    hep_match: bool | None
+    field_match: bool | None  # OAX field-level overlap -- what `confirmed` is actually based on
+    subfield_match: bool | None  # finer OAX subfield-level overlap -- diagnostic only, not load-bearing for confirmed (see work_piling.py's channel_piles())
+    confirmed: bool | None
+    pile_fields: list[str] = field(default_factory=list)
+    pile_subfields: list[str] = field(default_factory=list)
+    coauthor_names: list[str] = field(default_factory=list)  # excludes this ACIF's own OpenAlex candidate(s)
 
 
 @dataclass(frozen=True)
@@ -124,6 +148,10 @@ class Dossier:
     panel: str | None = None  # BSB / EIC / HCA / MPCE / SBE, from data_persisted/for_panels_2020.csv
     oax_id: str | None = None  # human-facing string form ("https://openalex.org/A..."), not author_idx
     ecr_roles: list[str] = field(default_factory=list)  # role_code(s) qualifying this person for the ECR cohort -- DECRA/APD/APDI (analysis.07_analyse_ecr_fellowships.ECR_ROLES); can hold >1 across different grants
+    acif_fields: list[str] = field(default_factory=list)  # OAX fields implied by this ACIF's own declared FOR2020 codes (cluster_checks.for2020_all_fields) -- what piling's field_match is checked against
+    acif_subfields: list[str] = field(default_factory=list)  # finer OAX subfields, same source (for2020_all_subfields)
+    acif_institutions: list[str] = field(default_factory=list)  # HEP institutions ARC recorded across this person's grants ("Name (CODE)") -- awards_cif.parquet's hep_codes, resolved via admin_orgs.csv; what piling's hep_match is checked against
+    piles: list[PileDiagnostic] = field(default_factory=list)  # this person's OpenAlex candidate pool, piled and channeled (see PileDiagnostic) -- empty if not yet piled
 
     works: list[Work] = field(default_factory=list)
     annual_series: list[YearRecord] = field(default_factory=list)
@@ -196,6 +224,7 @@ class Dossier:
         lines.append(f"- FOR codes: {', '.join(self.for_codes) or '(none)'}")
         lines.append(f"- ECR fellowship: {', '.join(self.ecr_roles) or '(unknown)'}")
         lines.append(f"- OpenAlex: {self.oax_id or '(unlinked)'}")
+        lines.append(f"- ACIF institutions: {', '.join(self.acif_institutions) or '(none)'}")
         lines.append(f"- first publication year: {self.first_pub_year or '(unknown)'}")
         lines.append("")
 
@@ -203,8 +232,10 @@ class Dossier:
         if not self.award_contexts:
             lines.append("(none found)")
         for ac in self.award_contexts:
-            lines.append(f"- **{ac.scheme} {ac.award_year}** (`{ac.grant_id}`) -- career age at award: "
+            role = f", {ac.role_code}" if ac.role_code else ""
+            lines.append(f"- **{ac.scheme} {ac.award_year}** (`{ac.grant_id}`{role}) -- career age at award: "
                          f"{ac.career_age_at_award if ac.career_age_at_award is not None else '(unknown)'}")
+            lines.append(f"  - other ARC investigators: {', '.join(ac.other_investigators) if ac.other_investigators else '(solo award)'}")
             if ac.coauthor_track_record:
                 lines.append(f"  - {len(ac.coauthor_track_record)} co-authors on record, "
                              f"countries: {dict(ac.coauthor_countries)}")
@@ -238,5 +269,22 @@ class Dossier:
             lines.append("|---|---|---|---|---|")
             for yr in self.annual_series:
                 lines.append(f"| {yr.year} | {yr.n_pubs} | {yr.h_index} | {yr.n_works_cumul} | {yr.total_citations_cumul:.0f} |")
+        lines.append("")
+
+        lines.append("## OpenAlex candidate piling")
+        lines.append(f"- ACIF declared fields: {', '.join(self.acif_fields) or '(none)'}")
+        lines.append(f"- ACIF declared subfields: {', '.join(self.acif_subfields) or '(none)'}")
+        if not self.piles:
+            lines.append("(not yet piled, or fewer than 2 candidate works -- not evaluated)")
+        for p in self.piles:
+            def _fmt(v):
+                return "match" if v else ("no match" if v is False else "n/a")
+            lines.append(f"- **pile {p.pile_id}** ({p.n_works} works) -- "
+                         f"{'CONFIRMED' if p.confirmed else ('not confirmed' if p.confirmed is False else 'not evaluated')}")
+            lines.append(f"  - orcid: {_fmt(p.orcid_match)} / hep: {_fmt(p.hep_match)} / "
+                         f"field: {_fmt(p.field_match)} / subfield: {_fmt(p.subfield_match)}")
+            lines.append(f"  - pile fields: {', '.join(p.pile_fields) or '(none)'}")
+            lines.append(f"  - pile subfields: {', '.join(p.pile_subfields) or '(none)'}")
+            lines.append(f"  - coauthors on piled works: {', '.join(p.coauthor_names) if p.coauthor_names else '(none)'}")
 
         return "\n".join(lines)
