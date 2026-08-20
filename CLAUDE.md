@@ -193,6 +193,49 @@ succeeded, the remaining 7,010 cached as `confidence='error'`.
   ORCID's daily quota to reset, re-run `00b_enrich_orcid.py` to finish the remaining ~7,010
   searches, then re-run `01→03→04` once more.
 
+### 2026-08-20 full rebuild — name-parsing fixes + completed ORCID enrichment promoted end-to-end
+Full `01→02→03→04→06_build_oeuvre.py→`piling rebuild, to actually apply everything landed this
+session (see "ORCID Public API integration..." below for the name-parsing fixes themselves) rather
+than leave it sitting in code with stale persisted output. Also finally promotes the completed
+`orcid_enrichment.parquet` search phase (7,010/7,010, zero errors, see the follow-up above) into
+production — the 73.1%-ORCID-coverage baseline this file has referenced as a target since
+2026-06-17 was never actually reached until this run.
+
+**Real pre-existing bug found and fixed along the way**: `02_prepare_oax.py`'s `oax_names` DuckDB
+UDF registration declared a 2-field `STRUCT(first_names, family_names)` return type, never updated
+when `oax_name_arrays()` gained `family_names_display`/`family_names_alt` (2026-08-18) — meant the
+script has been unable to complete a real run since that date (`InvalidInputException` on the
+first row past whichever author happened to have alternates). Fixed by widening the registered
+STRUCT to all 4 fields and persisting `family_names_display`/`family_names_alt` as real columns on
+`openalex_authors_prep.parquet` (they'd only ever existed as an in-memory intermediate before).
+
+**Results**:
+- `01_prepare_arc.py`: **22,820 persons** (down from 23,049/22,942 in prior baselines — mainly
+  enrichment-driven merges: 6,485 enriched ORCIDs promoted via `_apply_enriched_orcids`, 174 more
+  via low-confidence ERA-FOR matching).
+- `02_prepare_oax.py`: 2,779,882 AU-context authors reparsed with the fixed name logic.
+- `03_link_arc_oax.py`: 22,401/22,820 (98.2%) got ≥1 high-confidence match; 150,829 candidate
+  pairs ≥0.5.
+- `04_resolve_links.py`: **22,303/22,820 resolved (97.7%)** — `orcid`-bucket resolutions jumped to
+  **8,048** (previous documented baselines: 5,108–6,594), the direct, intended payoff of finally
+  promoting the completed enrichment. Overall resolved rate sits modestly below the most recent
+  prior baseline (98.4%), plausibly from blocking-key shifts caused by the y-vowel/postnominal/
+  diacritic name-parsing fixes changing some `family_name_main`/`first_initial` values — not
+  investigated further, flagged as an open question rather than assumed benign.
+- `06_build_oeuvre.py`: 22,916 AwardsCIF; Stage 1 → 5,874,508 survivors; Stage 3 → 3,769,100
+  survivors; subfield/HEP signals recomputed (`group_coherent` 3,655,188 True).
+- Full piling rerun (IDF tables regenerated over the fresh Stage-3 population, including the
+  year-bucket block, then `persist_piling_results()` run unscoped across all 22,812 non-excluded
+  ACIFs): **3,769,100 rows** persisted (up from 2,549,619 pre-session).
+
+**A pre-existing, unrelated test gap caught by the first full `pytest` run since 2026-08-18**:
+`tests/test_oeuvre_build.py::test_mismatched_field_excluded_with_count` silently stopped testing
+anything real once the small-pool Stage-3 gate (`<10` candidates skips the field filter entirely)
+was added — the test's `_cluster()` helper defaults to 0 `oax_candidates`, so the gate suppressed
+the filter and the test's "mismatched field gets excluded" assertion passed only because nothing
+was actually being filtered. Fixed: `_cluster()` gained an `oax_candidates` param; the test now
+gives its cluster 11 candidates so the gate doesn't mask the behavior under test. 307/307 passing.
+
 ## OpenAlex Snapshot Migration (2026-08-08)
 Migrated the OpenAlex data source from an old "Feb26" extract (built from OpenAlex's now
 discontinued gzipped-JSON dumps) to a "Jul26" extract of OpenAlex's own native parquet
@@ -531,6 +574,43 @@ larger source.
 Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
 
 **Pending code TODOs:**
+- **Stop collapsing `family_name_main` to a single scalar for Splink blocking — block on set
+  overlap instead** (2026-08-20, high priority, found via two independently-confirmed real cases:
+  `DE220100680_SarahMonazamErfani` and `DE130100970_TraceyClarke`). Root cause: OpenAlex's
+  `display_name_alternatives` is sometimes contaminated with an unrelated co-author's name (Clarke's
+  own record carries 7 genuine "Clarke" variants plus exactly 1 contaminant, `'Mariano
+  Campoy-Quiles'` — a real, different researcher, plausibly pulled in from a shared-paper byline
+  parsing error). `family_name_main = max_by_len(family_names)` (the combined display+alternatives
+  set) picks by raw string length with zero semantic justification, so a longer contaminant beats
+  the true, shorter surname outright — Clarke's own blocking key ends up `'campoy-quiles'`, Erfani's
+  ends up `'montague'`, and the record silently generates zero Splink candidate pairs against its
+  own correct ARC cluster (indistinguishable from a genuinely OpenAlex-absent person — no score, no
+  flag, nothing surfaces it). The same `max_by_len()`-on-combined-list pattern is repeated ~13 times
+  across `01_prepare_arc.py`/`02_prepare_oax.py`/`03_link_arc_oax.py`/`awards_cif.py` (both ARC-side
+  and OAX-side, all mirrored pairs) — this is systemic, not a one-off. **Scale, measured via a
+  standing diagnostic** (does an OAX record's own `family_name_main` even appear in its own
+  `family_names_display`?): 318,858 of 2,779,559 AU-context OAX records (11.5%) are self-inconsistent
+  this way; 4,636 non-excluded ACIFs (≈20% of the population) have ≥1 *candidate* affected (a
+  different, milder harm — a wrong/contaminated record polluting a pool it shouldn't be in); the
+  Erfani/Clarke-pattern harm (a *correct* record structurally missing from its own person's pool)
+  turns out **not measurable by a cheap query** — tried twice (a loose token-overlap join and a
+  tight exact-family-name+shared-initial join), both landed at ~12,500 ARC clusters / ~1.9M pairs,
+  which is suspiciously close to reproducing Splink's own raw *blocking*-pool scale (9.6M pairs
+  population-wide per this session's earlier baseline) rather than a real match count — blocking
+  is deliberately loose (generates every plausible pair for scoring to narrow down), and no SQL
+  join can substitute for Splink's actual probabilistic scoring step. Sizing this side properly
+  requires actually building fix (1) below and re-running Splink, not a diagnostic query.
+  Two fixes discussed, not yet built, in order of robustness: (1) cheap — replace `max_by_len()`
+  with a frequency/plurality pick (count how many alternates resolve to each candidate surname,
+  take the majority — Clarke's 7:1 would resolve trivially), with `family_names_display` preferred
+  as an exact-tie fallback; fixes all ~13 call sites at once since they're the same operation.
+  (2) deeper, more robust against any *future* contamination pattern — change the Splink blocking
+  rule itself to match on "shares ≥1 family-name token with the *set* of candidate names" rather
+  than exact-equality on one collapsed representative string; removes the "need to choose somehow"
+  step entirely at the point it actually causes harm, since ARC's own side (`family_names`) is
+  already multi-valued and only the OAX side currently forces a lossy reduction. Not yet decided
+  which to build first; (1) is a pure data-prep change, (2) touches Splink's actual comparison/
+  blocking configuration.
 - 03 Splink inst comparison: when all ARC grants are single-org (`all_single_org` bool in arc_persons), give strong negative weight to inst_arr mismatch (requires conditioning Splink comparison level weights on this flag)
 - ~~6-digit FOR → OAX topic field score~~ — **dropped, not applicable**: `research_classification`
   explicitly refuses FOR-family → `OAX_TOPIC` (raises `ValueError`; the finest reachable from a
@@ -1237,6 +1317,81 @@ before -> after the Stage 3 gates:
 | multi-pile, 1 confirmed | 10 | 343 |
 | multi-pile, 2+ confirmed | 1,413 | 2,094 |
 | missing piling row | 100 | 33 |
+
+## ORCID Public API integration; name-parsing bugs found via ORCID-vs-OAX comparison (2026-08-19/20)
+
+**`src/utils/orcid_client.py`** — a registered ORCID Public API client (OAuth client-credentials
+flow, `ORCID_CLIENT_ID`/`ORCID_CLIENT_SECRET` in `.env`, ~20-year token validity) replacing
+anonymous requests, clearing the daily quota wall the 2026-08-08 `00b_enrich_orcid.py` run hit (see
+above). `00b_enrich_orcid.py` patched to send `Authorization` headers when a client is registered,
+falling back to anonymous behavior otherwise. **diskcache gotcha**: the default `size_limit` is
+1GiB with silent eviction on overflow (no error, no log) — fixed via `cache.reset("size_limit",
+value)` on an *existing* cache (passing `size_limit=` to the constructor alone doesn't resize one
+that already exists on disk). With this, the deferred search-phase run from 2026-08-08 was
+completed in full: remaining 7,010/7,010 searches, zero errors — `orcid_enrichment.parquet`,
+11,960 rows total (4,988 high, 1,613 au_match, 62+18 wildcard, 1,743 low, 1,712 too_common, 1,824
+not_found). Promoted into production in the 2026-08-20 rebuild above.
+
+**Name-comparison investigation**: joined ORCID's own API-returned name for a known ORCID against
+OpenAlex's `display_name` for the same ORCID, as a sanity check on name-matching quality — and used
+it to find and fix four real, separate production bugs in `src/utils/names.py`, all reached at
+every one of its 4 `HumanName()` call sites (`names.py::parse_given`, `02_prepare_oax.py`,
+`01_prepare_arc.py`, `awards_cif.py`):
+
+1. **`credit-name` wrongly prioritized over `given-names`+`family-name`** in an early draft of
+   `orcid_names()` — ORCID's `credit-name` is a self-chosen short/nickname display form (e.g. "Rob"
+   for "Robert Norman"), not more authoritative than the structured given+family fields. Caught via
+   a user-provided real ORCID page (Rob/Robert Norman) showing all three fields distinctly. Fixed:
+   given+family is now the primary comparison; credit-name/other-names are checked separately as
+   alternates, never substituted in as the primary form.
+2. **Curly apostrophe (U+2019) vs straight (U+0027) silently dropped, not just mismatched** —
+   `strip_diacriticals()`'s NFD-normalize-then-ascii-encode approach discards U+2019 entirely (same
+   failure class as the already-known ø/ł/œ drop-to-nothing bug, since it has no NFD canonical
+   decomposition), so an apostrophe-bearing surname could carry two different normalized forms
+   purely depending on which apostrophe character the source system used (OpenAlex's own
+   `display_name` uses curly; ARC/ORCID data typically uses straight). New
+   `canonicalize_name_punctuation()` preprocessor collapses every apostrophe/hyphen variant to a
+   canonical ASCII form *before* `HumanName()` parses the string (not just after, on already-split
+   parts — `HumanName`'s own splitting decisions depend on the punctuation already being uniform).
+3. **Bare, unpunctuated initials treated as real given names** (e.g. "PG" for P.G., "MJ" for M.J.)
+   — new `_split_bare_initials()`, gated on vowel presence: a 2-4 letter alpha token with no vowel
+   is split into individual letters, one with a vowel is left whole. Empirically validated against
+   616 real OAX 2-character first names before shipping (genuine names like "yu"/"li"/"mo" all
+   contain a vowel; the vowel-less combinations actually present — mj/dj/aj/jm/pj/rj/sj/cj — are
+   absent from genuine usage). **"y" had to be added to the vowel set after directly checking real
+   ARC first-name data** (user-directed, not assumed): without it, 171 real people with genuine
+   Welsh-pattern names (Lyn 54, Rhys 42, Lynn 38, Kym 11, Gwyn 11, Glyn 4, Bryn 2) would have been
+   wrongly shredded into individual letters.
+4. **Polish ł (U+0142) silently dropped**, same no-NFD-decomposition failure as ø/ß — added to
+   `_DIACRITIC_VARIANTS` (`"Włodkowic"` was becoming `"wodkowic"`, missing the L entirely, not just
+   losing the diacritic mark).
+5. **Postnominal letters beyond AC/AO/AM/OAM leaking into the parsed family name** —
+   `strip_postnominals()` already existed (with a broader letter list: FAA/FAHMS/FTSE/FASSA/FAHA/
+   FRS/CBE/OBE/MBE/KBE/DBE) but was never actually chained before `HumanName()` parsing at any call
+   site; only the narrower `CONSTANTS.suffix_acronyms` (AC/AO/AM/OAM only) was registered. Fixed by
+   calling `strip_postnominals()` in sequence with `canonicalize_name_punctuation()` before every
+   `HumanName()` call; `FAHMS` also added to `strip_postnominals()`'s own list (found missing when
+   "Aleksandra Filipovska FAA FAHMS" still parsed to family="fahms" after the first fix pass).
+
+**Result**: the diagnostic comparison itself needed a fix too, once these landed — comparing only
+the single "longest" family-name variant (`max_by_len`) discarded genuine matches whenever a bare
+ASCII source spelling matched a *non-longest* member of an umlaut-expanded set (e.g. `"Grün"` →
+`{"gruen","grun"}`, and ORCID's own bare `"Grun"` only matches the shorter one) — fixed to compare
+the full variant set instead of one representative. Final count: **87 → 48 → 31** genuinely
+unexplained ORCID/OAX name mismatches (of 6,680 compared pairs), 99.3% matching on primary name by
+the end. The remaining 31 split into given/family order swaps, a bogus OAX `display_name`
+("R. A. F."), several likely-wrong-ORCID red flags (Hagan/Hebblewhite, Jakeman/Grun, Hopper/
+Kientz), and small one-off typos — none safe to fix with a shared rule.
+
+**This investigation is what surfaced the systemic `family_name_main` "longest string wins" bug**
+documented under "Next Priority" above (`max_by_len()` over the *combined* display+alternatives
+list, used ~13 times project-wide) — found via two independently-confirmed real cases where a
+correct OpenAlex identity exists in the AU-context pool but never became a Splink candidate because
+its own blocking key was corrupted by a contaminating name pulled from `display_name_alternatives`
+(`DE220100680_SarahMonazamErfani` → `"montague"`; `DE130100970_TraceyClarke` → `"campoy-quiles"`,
+7 genuine "Clarke" variants against exactly 1 contaminant). See "Next Priority" for the fix options
+and population-wide scale (318,858 of 2,779,559 AU-context records, 11.5%, are self-inconsistent
+this way; 4,636 ACIFs, ≈20% of the population, carry ≥1 affected candidate) — not yet built.
 
 The `n_piles==0` bucket dropping from 96 to 16 is the gates working as intended (most were
 filter-starved, not genuinely unpileable). The growth in multi-pile buckets is a real, honest

@@ -55,13 +55,15 @@ def _item(unique_id, grant_code=None, full_name="John Smith") -> AwardCIFItem:
     )
 
 
-def _cluster(cluster_id, inst_arr=None, for2020_codes=None, items=None, hep_codes=None) -> AwardsCIF:
+def _cluster(cluster_id, inst_arr=None, for2020_codes=None, items=None, hep_codes=None,
+             oax_candidates=None) -> AwardsCIF:
     return AwardsCIF(
         cluster_id=cluster_id,
         items=items or [_item(f"{cluster_id}_G1")],
         inst_arr=inst_arr or [],
         for2020_codes=for2020_codes or [],
         hep_codes=hep_codes or [],
+        oax_candidates=oax_candidates or [],
     )
 
 
@@ -618,7 +620,12 @@ class TestApplyFieldFilterStage3:
         assert len(exclusions_df) == 0
 
     def test_mismatched_field_excluded_with_count(self, tmp_path):
-        c = _cluster("A", for2020_codes=[_for2020("3705", "Geology")])
+        # oax_candidates deliberately > small_pool_max_candidates (10, the function's default) --
+        # a small pool bypasses the field filter entirely (2026-08-18 interim gate, see
+        # apply_field_filter_stage3()'s docstring), so this test needs a large-enough pool to
+        # actually exercise the filtering logic it's testing.
+        c = _cluster("A", for2020_codes=[_for2020("3705", "Geology")],
+                      oax_candidates=[f"https://openalex.org/A{i}" for i in range(11)])
         rows = [_survivor_row("A", 1, field_names=["Psychology"])]
         survivors, exclusions_df = self._run(tmp_path, [c], rows)
         assert len(survivors) == 0

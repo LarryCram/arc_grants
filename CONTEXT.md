@@ -61,7 +61,8 @@ mislabeled). Don't duplicate the list here; it drifts.
 - Add dependencies without discussion
 - Solve edge cases before the common case is working
 - Change scope lists (`KEEP_ROLES`, `KEEP_SCHEMES`, `ECR_ROLES`) without discussion
-- Use Dropbox paths — working data is always on `/home/lc/m/`
+- Use Dropbox paths — working data is always on `/home/lc/k/` (moved from `/home/lc/m/` 2026-08-14
+  drive consolidation — see `CLAUDE.md`'s "Key Paths")
 - Apply institution filter as a gate — it is always a tiebreaker
 - Let this file or any other doc duplicate numbers/architecture detail that `CLAUDE.md` already
   owns — link to it instead, so there's one source of truth to keep current

@@ -26,7 +26,10 @@ from nameparser import HumanName
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import OAX_AUTHORS, PROCESSED_DATA
-from src.utils.names import max_by_len, name_part_tokens, parse_given, strip_diacriticals
+from src.utils.names import (
+    canonicalize_name_punctuation, expand_diacritic_variants, max_by_len, name_part_tokens,
+    parse_given, strip_diacriticals, strip_postnominals,
+)
 
 PROC = PROCESSED_DATA
 
@@ -34,36 +37,55 @@ PROC = PROCESSED_DATA
 def oax_name_arrays(display_name: str, alts: list[str]) -> dict:
     # Use dicts (insertion-ordered) instead of sets so first_names preserves
     # left-to-right token order (first before middle, display_name before alts).
+    #
+    # family_names_display / family_names_alt (2026-08-18, provenance-flagged, not merged
+    # unlabelled): display_name is OpenAlex's own curated canonical spelling -- higher trust.
+    # alternatives are every other spelling OpenAlex has seen attributed to this author,
+    # genuinely useful (this is how the real Frank Grutzner/Grützner match becomes reachable at
+    # all -- see expand_diacritic_variants()'s docstring) but also the field CLAUDE.md already
+    # documents as sometimes contaminated with co-author names from OAX disambiguation errors.
+    # Keeping the two sources in separate fields (not collapsed into one family_names list, a
+    # boolean "flag" column would do the same job less legibly) lets a consumer validate
+    # display_name-derived candidates first (e.g. against ORCID) before trusting
+    # alternatives-derived ones -- the two are different kinds of evidence, not one.
     first_toks: dict[str, None] = {}
-    family_toks: dict[str, None] = {}
+    family_from_display: dict[str, None] = {}
+    family_from_alts: dict[str, None] = {}
 
-    def _parse_name(n: str) -> None:
+    def _parse_name(n: str, family_target: dict[str, None]) -> None:
         if not n:
             return
-        hn = HumanName(n)
+        hn = HumanName(strip_postnominals(canonicalize_name_punctuation(n)))
         if not hn.last and hn.first:
             hn.last = hn.first
         for ft in name_part_tokens(hn.first) + name_part_tokens(hn.middle):
             first_toks[ft] = None
             first_toks[ft[0]] = None
-        fam_norm = strip_diacriticals(hn.last).lower().strip() if hn.last else ""
-        if fam_norm:
-            family_toks[fam_norm] = None
+        if hn.last:
+            # Both bare (ü→u) and digraph (ü→ue) forms -- real conventions, not one "correct"
+            # one; see expand_diacritic_variants()'s docstring for why both are kept.
+            for variant in expand_diacritic_variants(hn.last):
+                family_target[variant] = None
 
-    _parse_name(display_name)
+    _parse_name(display_name, family_from_display)
+    # Always parsed now, not fallback-only (2026-08-18, user-directed) -- alternatives are a
+    # real, distinct source of evidence, not just an emergency backstop for when display_name
+    # fails to parse at all.
+    for alt in (alts or []):
+        _parse_name(alt, family_from_alts)
 
-    # Fallback: only use alternatives when display_name yields no family name.
-    # Alternatives are contaminated with co-author names (OAX disambiguation errors).
-    if not family_toks and alts:
-        for alt in alts:
-            _parse_name(alt)
-
+    family_toks: dict[str, None] = {**family_from_display, **family_from_alts}
     if not first_toks:
         for fam in family_toks:
             if fam:
                 first_toks[fam[0]] = None
 
-    return {"first_names": list(first_toks), "family_names": list(family_toks)}
+    return {
+        "first_names": list(first_toks),
+        "family_names": list(family_toks),
+        "family_names_display": list(family_from_display),
+        "family_names_alt": list(family_from_alts),
+    }
 
 
 def main():
@@ -151,7 +173,8 @@ def main():
     print(f"[2/3] Parsing names → {out_oax}...")
     con.create_function("oax_names", oax_name_arrays,
                         ['VARCHAR', 'VARCHAR[]'],
-                        'STRUCT(first_names VARCHAR[], family_names VARCHAR[])')
+                        'STRUCT(first_names VARCHAR[], family_names VARCHAR[], '
+                        'family_names_display VARCHAR[], family_names_alt VARCHAR[])')
 
     con.execute(f"""
         COPY (
@@ -175,6 +198,8 @@ def main():
                 list_filter(parsed.first_names, x -> len(x) = 1)           AS first_initials,
                 list_filter(parsed.first_names, x -> len(x) > 1)           AS first_name_full,
                 parsed.family_names                                         AS family_names,
+                parsed.family_names_display                                 AS family_names_display,
+                parsed.family_names_alt                                     AS family_names_alt,
                 orcid,
                 inst_ids,
                 topic_names,

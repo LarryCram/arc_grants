@@ -6,9 +6,14 @@ ACIF-membership gate design" and "`src/utils/work_piling.py` — Phase 2 piling 
 built and tested"). Sibling to oeuvre_build.py -- reads its persisted Stage 3 survivor checkpoint
 as input; never modifies Stage 1/3 themselves.
 
-This module's first piece: precomputed IDF-style term-frequency tables for the five feature
-blocks used by Phase 2's clustering -- coauthor, institution, field, subfield, topic. Same
-(value, tf=count/n) shape as the existing oax_tf_*.parquet tables in 02_prepare_oax.py.
+This module's first piece: precomputed IDF-style term-frequency tables for the six feature
+blocks used by Phase 2's clustering -- coauthor, institution, field, subfield, topic, and year
+(added 2026-08-19 -- the five original blocks are all categorical; year was the one signal
+already sitting on every Stage-3 survivor row, unused, despite being exactly the kind of
+independent evidence that would have caught the Adam Hulme contamination case directly, see
+CLAUDE.md). Same (value, tf=count/n) shape as the existing oax_tf_*.parquet tables in
+02_prepare_oax.py; year is bucketed (YEAR_BUCKET_WIDTH-year width) rather than treated as one
+column per exact year, so two works from one real, continuous career still share a feature.
 
 Source population: Stage 3 survivors (quality- AND field-filtered), not Stage 1 (quality-filtered
 only) -- computing "how common is this value" over the same population Phase 2's clustering
@@ -40,6 +45,24 @@ WORK_TF_INSTITUTION = PROCESSED_DATA / "work_tf_institution.parquet"
 WORK_TF_FIELD       = PROCESSED_DATA / "work_tf_field.parquet"
 WORK_TF_SUBFIELD    = PROCESSED_DATA / "work_tf_subfield.parquet"
 WORK_TF_TOPIC       = PROCESSED_DATA / "work_tf_topic.parquet"
+WORK_TF_YEAR        = PROCESSED_DATA / "work_tf_year.parquet"
+
+YEAR_BUCKET_WIDTH = 5  # e.g. 2020 -> "2020-2024" -- coarse enough that two works from one
+                       # real, continuous career fall in the same or adjacent bucket (reinforcing
+                       # cohesion), fine enough that a genuinely disjoint-era work (e.g. the
+                       # Adam Hulme case -- 1960s works mixed into a 2015+ career) shares no
+                       # bucket with the rest and gets pushed toward noise/a separate pile.
+
+
+def _year_bucket(year) -> str | None:
+    if year is None:
+        return None
+    try:
+        y = int(year)
+    except (TypeError, ValueError):
+        return None
+    lo = (y // YEAR_BUCKET_WIDTH) * YEAR_BUCKET_WIDTH
+    return f"{lo}-{lo + YEAR_BUCKET_WIDTH - 1}"
 
 
 def compute_and_persist_idf_tables(
@@ -48,9 +71,9 @@ def compute_and_persist_idf_tables(
     auth_glob: str = AUTH_GLOB,
     topic_glob: str = TOPIC_GLOB,
 ) -> None:
-    """Persist five (value, tf) term-frequency tables -- work_tf_coauthor/institution/field/
-    subfield/topic.parquet -- over the full Stage-3 survivor population (every candidate in every
-    AwardsCIF's oax_candidates, not a Phase-1-pruned subset).
+    """Persist six (value, tf) term-frequency tables -- work_tf_coauthor/institution/field/
+    subfield/topic/year.parquet -- over the full Stage-3 survivor population (every candidate in
+    every AwardsCIF's oax_candidates, not a Phase-1-pruned subset).
 
     n is the total number of (cluster_id, work_idx) survivor rows in oeuvre_stage3_survivors.parquet
     -- the natural counting unit, since institution is inherently a per-(cluster, work) fact (the
@@ -83,6 +106,25 @@ def compute_and_persist_idf_tables(
             """)
             n_vals = con.execute(f"SELECT COUNT(*) FROM read_parquet('{out_path}')").fetchone()[0]
             print(f"  {out_path.name}: {n_vals:,} unique values")
+
+        # year -- publication_year is already on every survivor row; bucket in SQL directly
+        # (YEAR_BUCKET_WIDTH-year width), matching _year_bucket()'s own logic exactly so the
+        # per-work feature-construction step and this frequency table agree on bucket boundaries.
+        con.execute(f"""
+            COPY (
+                SELECT
+                    (FLOOR(publication_year / {YEAR_BUCKET_WIDTH})::BIGINT * {YEAR_BUCKET_WIDTH})::VARCHAR
+                        || '-' || (FLOOR(publication_year / {YEAR_BUCKET_WIDTH})::BIGINT * {YEAR_BUCKET_WIDTH} + {YEAR_BUCKET_WIDTH - 1})::VARCHAR
+                        AS value,
+                    COUNT(*)::DOUBLE / {n} AS tf
+                FROM read_parquet('{survivors_path}')
+                WHERE publication_year IS NOT NULL
+                GROUP BY value
+                ORDER BY tf DESC
+            ) TO '{WORK_TF_YEAR}' (FORMAT PARQUET)
+        """)
+        n_vals = con.execute(f"SELECT COUNT(*) FROM read_parquet('{WORK_TF_YEAR}')").fetchone()[0]
+        print(f"  {WORK_TF_YEAR.name}: {n_vals:,} unique values")
 
         # topic -- not persisted on the survivor rows at all (only subfield-level and up), so a
         # fresh join against work_topics restricted to the touched-work set is needed.
@@ -146,13 +188,14 @@ def compute_and_persist_idf_tables(
 
 CROSS_SECTION_CSV = PROCESSED_DATA / "piling_cross_section.csv"
 
-_BLOCKS = ("coauthor", "institution", "field", "subfield", "topic")
+_BLOCKS = ("coauthor", "institution", "field", "subfield", "topic", "year")
 _TF_PATHS = {
     "coauthor": WORK_TF_COAUTHOR,
     "institution": WORK_TF_INSTITUTION,
     "field": WORK_TF_FIELD,
     "subfield": WORK_TF_SUBFIELD,
     "topic": WORK_TF_TOPIC,
+    "year": WORK_TF_YEAR,
 }
 
 
@@ -214,7 +257,7 @@ def fetch_cross_section_raw(
         ids_sql = ",".join(f"'{c}'" for c in cluster_ids)
 
         survivors = con.execute(f"""
-            SELECT cluster_id, work_idx, source_author_idxs, field_names, subfield_names
+            SELECT cluster_id, work_idx, source_author_idxs, field_names, subfield_names, publication_year
             FROM read_parquet('{survivors_path}')
             WHERE cluster_id IN ({ids_sql})
         """).fetchdf()
@@ -271,6 +314,9 @@ def build_feature_matrix(
     for row in surv.itertuples():
         per_work[row.work_idx]["field"].update(_safe_list(row.field_names))
         per_work[row.work_idx]["subfield"].update(_safe_list(row.subfield_names))
+        bucket = _year_bucket(row.publication_year)
+        if bucket is not None:
+            per_work[row.work_idx]["year"].add(bucket)
 
     coa = raw["coauthors"]
     coa = coa[coa["cluster_id"] == cluster_id]
@@ -494,6 +540,7 @@ def persist_piling_results(
     eps: float = 0.90,
     batch_size: int = 500,
     only_fellowships: bool = False,
+    max_candidates: int | None = None,
 ) -> None:
     """Run piling (feature vectors -> cosine distance -> DBSCAN) + channeling
     (ORCID-first -> HEP-overlap -> FOR-grounded field) across every non-excluded ACIF
@@ -511,6 +558,11 @@ def persist_piling_results(
     project's own fellowship flag, broader than config/scope.py's ECR_ROLES, which is only the
     DECRA/APD/APDI early-career subset). A prior run against the full population already exists
     at PILING_RESULTS -- this flag is for a faster, fellowship-only re-run, not the only mode.
+
+    max_candidates: when set, restricts to ACIFs with len(oax_candidates) <= this value
+    (2026-08-19) -- combines with only_fellowships (both AND'd) for a fast, bounded validation
+    run (e.g. fellowships with a small candidate pool) before committing to a full-population
+    rerun, same rationale as scoping to a cross-section before trusting a change population-wide.
 
     Processed in batches (default 500 ACIFs) rather than one single fetch_cross_section_raw()
     call over the whole population -- the largest mega-pools (WeiWang-scale, tens of thousands
@@ -538,12 +590,19 @@ def persist_piling_results(
                     WHERE i.is_fellowship = TRUE
                 )
             """
+        candidates_filter = f"AND len(oax_candidates) <= {max_candidates}" if max_candidates is not None else ""
         all_ids = con.execute(f"""
             SELECT cluster_id FROM read_parquet('{PROCESSED_DATA}/awards_cif.parquet')
             WHERE excluded = FALSE
             {fellowship_join}
+            {candidates_filter}
         """).fetchdf()["cluster_id"].tolist()
-        scope_label = "fellowship" if only_fellowships else "non-excluded"
+        scope_bits = []
+        if only_fellowships:
+            scope_bits.append("fellowship")
+        if max_candidates is not None:
+            scope_bits.append(f"<={max_candidates} candidates")
+        scope_label = " & ".join(scope_bits) or "non-excluded"
         print(f"  persist_piling_results: {len(all_ids)} {scope_label} ACIFs", flush=True)
 
         idf = load_idf_weights(con)

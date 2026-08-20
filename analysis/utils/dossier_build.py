@@ -25,7 +25,7 @@ from config.scope import KEEP_SCHEMES
 from analysis.utils.dossier import AwardContext, Dossier, PileDiagnostic, Work, YearRecord
 from analysis.utils.dedup import create_deduped_works, count_exclusions
 from src.utils.oeuvre_build import AUTH_GLOB, STAGE3_SURVIVORS
-from src.utils.work_piling import PILING_RESULTS
+from src.utils.work_piling import PILING_RESULTS, _safe_list
 from src.utils.cluster_checks import for2020_all_fields, for2020_all_subfields
 from importlib import import_module
 
@@ -110,6 +110,17 @@ def _fetch_acif_fields_subfields(cluster_id: str, con: duckdb.DuckDBPyConnection
     return sorted(for2020_all_fields(codes)), sorted(for2020_all_subfields(codes))
 
 
+def _fetch_acif_orcids(cluster_id: str, con: duckdb.DuckDBPyConnection) -> list[str]:
+    """This ACIF's own ARC-recorded ORCID(s) (awards_cif.parquet's orcids) -- what piling's
+    orcid_match is checked against."""
+    row = con.execute(
+        f"SELECT orcids FROM read_parquet('{AWARDS_CIF}') WHERE cluster_id = ?", [cluster_id]
+    ).fetchone()
+    if not row or row[0] is None:
+        return []
+    return list(row[0])
+
+
 def _fetch_acif_institutions(cluster_id: str, con: duckdb.DuckDBPyConnection) -> list[str]:
     """This ACIF's own HEP institutions (awards_cif.parquet's hep_codes -- union across every
     grant's eligible_orgs, not just the administering org), resolved to full names via
@@ -150,7 +161,7 @@ def _fetch_piling_diagnostics(cluster_id: str, con: duckdb.DuckDBPyConnection) -
     """, [cluster_id]).fetchdf()
 
     surv = con.execute(f"""
-        SELECT work_idx, field_names, subfield_names, source_author_idxs
+        SELECT work_idx, field_names, subfield_names, source_author_idxs, publication_year
         FROM read_parquet('{STAGE3_SURVIVORS}')
         WHERE cluster_id = ?
     """, [cluster_id]).fetchdf().set_index("work_idx")
@@ -175,14 +186,14 @@ def _fetch_piling_diagnostics(cluster_id: str, con: duckdb.DuckDBPyConnection) -
     out = []
     for row in piles.itertuples():
         pw = work_pile[work_pile["pile_id"] == row.pile_id]["work_idx"].tolist()
-        pfields, psub = set(), set()
+        pfields, psub, pyears = set(), set(), set()
         for w in pw:
             if w in surv.index:
-                fn, sn = surv.loc[w, "field_names"], surv.loc[w, "subfield_names"]
-                if fn is not None:
-                    pfields.update(list(fn))
-                if sn is not None:
-                    psub.update(list(sn))
+                fn, sn, yr = surv.loc[w, "field_names"], surv.loc[w, "subfield_names"], surv.loc[w, "publication_year"]
+                pfields.update(_safe_list(fn))
+                psub.update(_safe_list(sn))
+                if pd.notna(yr):
+                    pyears.add(int(yr))
         coauthor_names = sorted(coa[coa["work_idx"].isin(pw)]["display_name"].dropna().unique().tolist())
         out.append(PileDiagnostic(
             pile_id=int(row.pile_id), n_works=int(row.n_works),
@@ -190,7 +201,7 @@ def _fetch_piling_diagnostics(cluster_id: str, con: duckdb.DuckDBPyConnection) -
             field_match=row.field_match, subfield_match=row.subfield_match,
             confirmed=row.confirmed,
             pile_fields=sorted(pfields), pile_subfields=sorted(psub),
-            coauthor_names=coauthor_names,
+            coauthor_names=coauthor_names, pub_years=sorted(pyears),
         ))
     return out
 
@@ -253,11 +264,22 @@ def build_dossier(cohort_row: pd.Series, con: duckdb.DuckDBPyConnection) -> Doss
 
     annual_series, first_pub_year = _fetch_annual_series(cluster_id, con)
     works, excluded_work_counts = _fetch_works(cluster_id, con)
-    award_contexts = _fetch_award_contexts(cluster_id, con, first_pub_year)
     ecr_roles = _fetch_ecr_roles(cluster_id, con)
     acif_fields, acif_subfields = _fetch_acif_fields_subfields(cluster_id, con)
     acif_institutions = _fetch_acif_institutions(cluster_id, con)
+    orcids = _fetch_acif_orcids(cluster_id, con)
     piles = _fetch_piling_diagnostics(cluster_id, con)
+
+    # Prefer the accepted (confirmed) pile's own earliest year over oeuvres.parquet's unfiltered
+    # one, when a confirmed pile exists (2026-08-19 -- see Adam Hulme, first_pub_year=1960 from
+    # OpenAlex's own uncritiqued attribution vs. his real, piling-confirmed 2015 start).
+    confirmed_years = sorted({y for p in piles if p.confirmed for y in p.pub_years})
+    first_pub_year_source = "oeuvre"
+    if confirmed_years:
+        first_pub_year = confirmed_years[0]
+        first_pub_year_source = "confirmed_pile"
+
+    award_contexts = _fetch_award_contexts(cluster_id, con, first_pub_year)
 
     return Dossier(
         arc_id=cluster_id,
@@ -267,6 +289,7 @@ def build_dossier(cohort_row: pd.Series, con: duckdb.DuckDBPyConnection) -> Doss
         for_division=cohort_row.get("for_division"),
         panel=cohort_row.get("panel"),
         oax_id=cohort_row["oax_id"],
+        orcids=orcids,
         ecr_roles=ecr_roles,
         acif_fields=acif_fields,
         acif_subfields=acif_subfields,
@@ -275,6 +298,7 @@ def build_dossier(cohort_row: pd.Series, con: duckdb.DuckDBPyConnection) -> Doss
         works=works,
         annual_series=annual_series,
         first_pub_year=first_pub_year,
+        first_pub_year_source=first_pub_year_source,
         excluded_work_counts=excluded_work_counts,
         award_contexts=award_contexts,
     )

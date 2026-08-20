@@ -39,7 +39,7 @@ import splink.comparison_level_library as cll
 
 from config.settings import PROCESSED_DATA, ADMIN_ORGS_CSV, GRANT_SUMMARIES_CSV, ARC_GRANTS_CSV, DISKCACHE_DIR, OAX_AUTHORS, TOP_CUT, DUCKDB_TMP_DIR
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
-from src.utils.names import make_expanded_for_tokens, name_part_tokens, strip_diacriticals, for_name_tokens
+from src.utils.names import canonicalize_name_punctuation, make_expanded_for_tokens, name_part_tokens, strip_diacriticals, strip_postnominals, for_name_tokens
 from src.utils.for_resolve import upgrade_for_code, upgrade_for_name, resolve_arc_for_entry
 from src.utils.cluster_checks import (
     first_names_compatible,
@@ -248,7 +248,7 @@ def _name_forms(first_name: str, family_name: str) -> tuple[list[str], list[str]
     """Mirrors 01_prepare_arc.py's arc_name_arrays(): given-name tokens (+ their initials)
     and a single normalized family-name form, from ARC's raw first_name/family_name fields."""
     full = f"{first_name or ''} {family_name or ''}".strip()
-    hn = HumanName(full)
+    hn = HumanName(strip_postnominals(canonicalize_name_punctuation(full)))
     if not hn.last and hn.first:
         hn.last = hn.first
 

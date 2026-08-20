@@ -27,7 +27,7 @@ import splink.comparison_level_library as cll
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import PROCESSED_DATA, ADMIN_ORGS_CSV, GRANT_SUMMARIES_CSV, DISKCACHE_DIR
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
-from src.utils.names import make_expanded_for_tokens, name_part_tokens, strip_diacriticals, for_name_tokens
+from src.utils.names import canonicalize_name_punctuation, make_expanded_for_tokens, name_part_tokens, strip_diacriticals, strip_postnominals, for_name_tokens
 
 import diskcache
 from src.utils.for_resolve import upgrade_for_code, upgrade_for_name
@@ -58,7 +58,7 @@ def _initials(toks: list[str]) -> list[str]:
 
 def arc_name_arrays(first_name: str, family_name: str) -> dict:
     full = f"{first_name or ''} {family_name or ''}".strip()
-    hn = HumanName(full)
+    hn = HumanName(strip_postnominals(canonicalize_name_punctuation(full)))
 
     if not hn.last and hn.first:
         hn.last = hn.first

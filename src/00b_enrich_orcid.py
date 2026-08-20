@@ -48,15 +48,25 @@ from src.utils.names import strip_diacriticals, name_part_tokens
 from src.utils.io import setup_stdout_utf8
 from src.utils.orcid_cache import orcid_addresses, orcid_external_ids, orcid_works_count
 from src.utils.era_journals import load_era_lookup, orcid_for_codes
+from src.utils.orcid_client import get_access_token, ORCID_CLIENT_ID
 
 PROJECT_DATA = Path(__file__).resolve().parents[1] / "data_persisted"
 
 ORCID_API          = "https://pub.orcid.org/v3.0"
 ORCID_SEARCH       = f"{ORCID_API}/search/"
-HEADERS            = {"Accept": "application/json"}
-RATE_RECORD_SEC    = 0.1   # /record fetches — low fanout, safe to be fast
-RATE_SEARCH_SEC    = 0.5   # search queries — each may trigger multiple /record fetches
+# Authenticated (registered client, 2026-08-18) when credentials are configured -- clears the
+# anonymous daily quota that stalled this script's original run (CLAUDE.md, "2026-08-08
+# follow-up"). Falls back to anonymous, unauthenticated headers otherwise so this script still
+# runs (at the old, quota-limited rate) in an environment without ORCID_CLIENT_ID/SECRET set.
+RATE_RECORD_SEC    = 0.05 if ORCID_CLIENT_ID else 0.1   # /record fetches — low fanout, safe to be fast
+RATE_SEARCH_SEC    = 0.2  if ORCID_CLIENT_ID else 0.5   # search queries — each may trigger multiple /record fetches
 TOO_COMMON         = 10
+
+
+def _headers() -> dict:
+    if ORCID_CLIENT_ID:
+        return {"Accept": "application/json", "Authorization": f"Bearer {get_access_token()}"}
+    return {"Accept": "application/json"}
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +103,7 @@ def fetch_record(orcid: str, record_cache: diskcache.Cache,
         data = record_cache[orcid]
     else:
         try:
-            r = requests.get(f"{ORCID_API}/{orcid}/record", headers=HEADERS, timeout=10)
+            r = requests.get(f"{ORCID_API}/{orcid}/record", headers=_headers(), timeout=10)
             data = r.json() if r.status_code == 200 else {"_error": r.status_code}
         except Exception as e:
             data = {"_error": str(e)}
@@ -124,7 +134,7 @@ def _candidate_meta(orcid: str, rec: dict) -> dict:
 def _query_orcid(q: str) -> dict | None:
     try:
         r = requests.get(ORCID_SEARCH, params={"q": q, "rows": TOO_COMMON + 1},
-                         headers=HEADERS, timeout=10)
+                         headers=_headers(), timeout=10)
         r.raise_for_status()
         return r.json()
     except Exception:

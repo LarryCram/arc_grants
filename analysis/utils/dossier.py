@@ -105,6 +105,7 @@ class AwardContext:
     award_year: int
     career_age_at_award: int | None  # award_year - Dossier.first_pub_year
     role_code: str | None = None  # this person's role on this specific grant (CI, DECRA, APD, ...)
+    is_fellowship: bool = False  # investigators_raw.is_fellowship for this person on this specific grant -- broader than ECR_ROLES (DECRA/APD/APDI); covers every fellowship type (Laureate, DORA, APF, ...)
     other_investigators: list[str] = field(default_factory=list)  # "First Last (role_code)" for every other ARC investigator on this same grant
     coauthor_track_record: list[CoauthorRecord] = field(default_factory=list)
     percentiles: dict[str, Percentile] = field(default_factory=dict)  # vs peers of the same scheme/award_year
@@ -136,6 +137,7 @@ class PileDiagnostic:
     pile_fields: list[str] = field(default_factory=list)
     pile_subfields: list[str] = field(default_factory=list)
     coauthor_names: list[str] = field(default_factory=list)  # excludes this ACIF's own OpenAlex candidate(s)
+    pub_years: list[int] = field(default_factory=list)  # distinct publication years of this pile's own works -- basis for Dossier's piling-derived first_pub_year (2026-08-19)
 
 
 @dataclass(frozen=True)
@@ -147,6 +149,7 @@ class Dossier:
     for_division: str | None = None
     panel: str | None = None  # BSB / EIC / HCA / MPCE / SBE, from data_persisted/for_panels_2020.csv
     oax_id: str | None = None  # human-facing string form ("https://openalex.org/A..."), not author_idx
+    orcids: list[str] = field(default_factory=list)  # ARC-recorded ORCID(s) for this cluster (awards_cif.parquet's own orcids) -- usually one, but MULTI_ORCID clusters exist; what piling's orcid_match is checked against
     ecr_roles: list[str] = field(default_factory=list)  # role_code(s) qualifying this person for the ECR cohort -- DECRA/APD/APDI (analysis.07_analyse_ecr_fellowships.ECR_ROLES); can hold >1 across different grants
     acif_fields: list[str] = field(default_factory=list)  # OAX fields implied by this ACIF's own declared FOR2020 codes (cluster_checks.for2020_all_fields) -- what piling's field_match is checked against
     acif_subfields: list[str] = field(default_factory=list)  # finer OAX subfields, same source (for2020_all_subfields)
@@ -156,6 +159,7 @@ class Dossier:
     works: list[Work] = field(default_factory=list)
     annual_series: list[YearRecord] = field(default_factory=list)
     first_pub_year: int | None = None
+    first_pub_year_source: Literal["confirmed_pile", "oeuvre"] | None = None  # 2026-08-19: prefer the accepted (confirmed) pile's own earliest year over the old, unfiltered oeuvres.parquet-derived one when a confirmed pile exists -- see the Adam Hulme case (first_pub_year=1960 from unfiltered OpenAlex attribution) for why this matters
     excluded_work_counts: dict[str, int] = field(default_factory=dict)  # reason (analysis/utils/exclusions.py) -> count; works already filtered out of `works`, kept here for transparency
 
     @property
@@ -224,8 +228,10 @@ class Dossier:
         lines.append(f"- FOR codes: {', '.join(self.for_codes) or '(none)'}")
         lines.append(f"- ECR fellowship: {', '.join(self.ecr_roles) or '(unknown)'}")
         lines.append(f"- OpenAlex: {self.oax_id or '(unlinked)'}")
+        lines.append(f"- ORCID: {', '.join(self.orcids) or '(none recorded)'}")
         lines.append(f"- ACIF institutions: {', '.join(self.acif_institutions) or '(none)'}")
-        lines.append(f"- first publication year: {self.first_pub_year or '(unknown)'}")
+        fpy_source = f" ({self.first_pub_year_source})" if self.first_pub_year_source else ""
+        lines.append(f"- first publication year: {self.first_pub_year or '(unknown)'}{fpy_source}")
         lines.append("")
 
         lines.append("## Awards")
@@ -262,13 +268,24 @@ class Dossier:
         lines.append("")
 
         lines.append("## Annual trajectory")
-        if not self.annual_series:
+        series = self.annual_series
+        if self.first_pub_year is not None:
+            series = [r for r in series if r.year >= self.first_pub_year]
+        if not series:
             lines.append("(none)")
         else:
-            lines.append("| year | n_pubs | h_index | n_works_cumul | total_citations_cumul |")
-            lines.append("|---|---|---|---|---|")
-            for yr in self.annual_series:
-                lines.append(f"| {yr.year} | {yr.n_pubs} | {yr.h_index} | {yr.n_works_cumul} | {yr.total_citations_cumul:.0f} |")
+            max_pubs = max((r.n_pubs for r in series), default=0) or 1
+            bar_width = 30
+            year_w = max(len(str(r.year)) for r in series)
+            lines.append("```")
+            for r in series:
+                bar_len = round(r.n_pubs / max_pubs * bar_width) if r.n_pubs else 0
+                bar = "#" * bar_len
+                lines.append(f"{r.year:>{year_w}} | {bar:<{bar_width}} {r.n_pubs}")
+            lines.append("```")
+            last = series[-1]
+            lines.append(f"- as of {last.year}: h-index {last.h_index if last.h_index is not None else '(n/a)'}, "
+                         f"{last.n_works_cumul} works, {last.total_citations_cumul:.0f} citations")
         lines.append("")
 
         lines.append("## OpenAlex candidate piling")

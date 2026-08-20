@@ -48,11 +48,11 @@ and flags this as a known source of missing works.
 ## Output Location
 
 All data outputs go to `PROCESSED_DATA.parent / "analysis"` →
-`/home/lc/m/working/WORKING_ARC_PROJECT/analysis/` (fast SSD, not in the git repo).
+`/home/lc/k/WORKING_ARC_PROJECT/analysis/` (fast SSD, not in the git repo).
 Scripts live under `analysis/` in the project tree.
 
 ```
-/home/lc/m/working/WORKING_ARC_PROJECT/analysis/
+/home/lc/k/WORKING_ARC_PROJECT/analysis/
   samples.parquet              # arc_id sample flags: in_sample_10, in_sample_1000
   oeuvres.parquet              # arc_id, work_idx, publication_year, cited_by_count,
                                # type, doi, title, topic_idx, subfield_name,

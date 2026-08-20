@@ -52,3 +52,8 @@ OPENALEX_COMPACT_DIR = OPENALEX_DIR / "compact"
 # OpenAlex API (required since March 2026)
 OPENALEX_EMAIL   = os.getenv("OPENALEX_EMAIL", "")
 OPENALEX_API_KEY = os.getenv("OPENALEX_API_KEY", "")
+
+# ORCID Public API (registered client -- higher rate limit than anonymous access, which hit
+# ORCID's daily quota during 00b_enrich_orcid.py's original run, see CLAUDE.md 2026-08-08)
+ORCID_CLIENT_ID     = os.getenv("ORCID_CLIENT_ID", "")
+ORCID_CLIENT_SECRET = os.getenv("ORCID_CLIENT_SECRET", "")
