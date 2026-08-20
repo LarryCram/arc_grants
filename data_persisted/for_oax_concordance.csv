@@ -1,0 +1,103 @@
+for_2digit;for_division;oax_field
+01;Mathematical Sciences;Mathematics
+02;Physical Sciences;Physics and Astronomy
+03;Chemical Sciences;Chemistry
+03;Chemical Sciences;Chemical Engineering
+04;Earth Sciences;Earth and Planetary Sciences
+04;Earth Sciences;Environmental Science
+05;Environmental Sciences;Environmental Science
+05;Environmental Sciences;Earth and Planetary Sciences
+06;Biological Sciences;Agricultural and Biological Sciences
+06;Biological Sciences;Biochemistry, Genetics and Molecular Biology
+07;Agricultural and Veterinary Sciences;Agricultural and Biological Sciences
+07;Agricultural and Veterinary Sciences;Veterinary
+08;Information and Computing Sciences;Computer Science
+09;Engineering;Engineering
+09;Engineering;Chemical Engineering
+09;Engineering;Energy
+09;Engineering;Materials Science
+10;Technology;Engineering
+10;Technology;Computer Science
+10;Technology;Materials Science
+11;Medical and Health Sciences;Medicine
+11;Medical and Health Sciences;Health Professions
+11;Medical and Health Sciences;Nursing
+11;Medical and Health Sciences;Dentistry
+11;Medical and Health Sciences;Pharmacology, Toxicology and Pharmaceutics
+11;Medical and Health Sciences;Immunology and Microbiology
+11;Medical and Health Sciences;Neuroscience
+11;Medical and Health Sciences;Biochemistry, Genetics and Molecular Biology
+12;Built Environment and Design;Engineering
+12;Built Environment and Design;Social Sciences
+13;Education;Social Sciences
+14;Economics;Economics, Econometrics and Finance
+15;Commerce Management Tourism and Services;Business, Management and Accounting
+15;Commerce Management Tourism and Services;Decision Sciences
+15;Commerce Management Tourism and Services;Economics, Econometrics and Finance
+16;Studies in Human Society;Social Sciences
+17;Psychology and Cognitive Sciences;Psychology
+17;Psychology and Cognitive Sciences;Neuroscience
+18;Law and Legal Studies;Social Sciences
+19;Studies in Creative Arts and Writing;Arts and Humanities
+20;Language Communication and Culture;Arts and Humanities
+20;Language Communication and Culture;Social Sciences
+21;History and Archaeology;Arts and Humanities
+21;History and Archaeology;Social Sciences
+22;Philosophy and Religious Studies;Arts and Humanities
+23;Mathematical Sciences;Mathematics
+24;Physical Sciences;Physics and Astronomy
+25;Chemical Sciences;Chemistry
+25;Chemical Sciences;Chemical Engineering
+26;Earth Sciences;Earth and Planetary Sciences
+26;Earth Sciences;Environmental Science
+27;Biological Sciences;Agricultural and Biological Sciences
+27;Biological Sciences;Biochemistry, Genetics and Molecular Biology
+28;Information and Computing Sciences;Computer Science
+29;Engineering;Engineering
+29;Engineering;Chemical Engineering
+29;Engineering;Energy
+29;Engineering;Materials Science
+30;Agricultural Veterinary and Food Sciences;Agricultural and Biological Sciences
+30;Agricultural Veterinary and Food Sciences;Veterinary
+31;Environmental Sciences;Environmental Science
+31;Environmental Sciences;Earth and Planetary Sciences
+32;Biomedical and Clinical Sciences;Medicine
+32;Biomedical and Clinical Sciences;Biochemistry, Genetics and Molecular Biology
+32;Biomedical and Clinical Sciences;Neuroscience
+32;Biomedical and Clinical Sciences;Immunology and Microbiology
+32;Biomedical and Clinical Sciences;Pharmacology, Toxicology and Pharmaceutics
+33;Built Environment and Design;Engineering
+33;Built Environment and Design;Social Sciences
+34;Chemical Sciences;Chemistry
+34;Chemical Sciences;Chemical Engineering
+35;Commerce Management Tourism and Services;Business, Management and Accounting
+35;Commerce Management Tourism and Services;Decision Sciences
+35;Commerce Management Tourism and Services;Economics, Econometrics and Finance
+36;Creative Arts and Writing;Arts and Humanities
+37;Earth Sciences;Earth and Planetary Sciences
+37;Earth Sciences;Environmental Science
+38;Economics;Economics, Econometrics and Finance
+39;Education;Social Sciences
+40;Engineering;Engineering
+40;Engineering;Energy
+40;Engineering;Materials Science
+41;Environmental Sciences;Environmental Science
+41;Environmental Sciences;Earth and Planetary Sciences
+42;Health Sciences;Medicine
+42;Health Sciences;Health Professions
+42;Health Sciences;Nursing
+42;Health Sciences;Pharmacology, Toxicology and Pharmaceutics
+43;History Heritage and Archaeology;Arts and Humanities
+43;History Heritage and Archaeology;Social Sciences
+44;Human Society;Social Sciences
+45;Indigenous Studies;Social Sciences
+45;Indigenous Studies;Arts and Humanities
+46;Information and Computing Sciences;Computer Science
+47;Language Communication and Culture;Arts and Humanities
+47;Language Communication and Culture;Social Sciences
+48;Law and Legal Studies;Social Sciences
+49;Mathematical Sciences;Mathematics
+50;Philosophy and Religious Studies;Arts and Humanities
+51;Physical Sciences;Physics and Astronomy
+52;Psychology;Psychology
+52;Psychology;Neuroscience
