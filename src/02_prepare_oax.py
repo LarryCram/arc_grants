@@ -251,6 +251,20 @@ def main():
         tf.to_parquet(PROCESSED_DATA / fname, index=False)
         print(f"  {fname}: {len(tf):,} unique values")
 
+    # Per-variant TF, not per-collapsed-scalar TF: each author's own family_names list
+    # (family_names_display ∪ family_names_alt, deduped) is exploded so every spelling
+    # variant gets its own population frequency -- feeds the name-SET Splink comparison's
+    # tf_adjustment_column (via a per-record "rarest variant" lookup computed downstream in
+    # 01_prepare_arc.py/03_link_arc_oax.py), replacing the old approach of computing rarity
+    # only for whichever single variant max_by_len happened to pick.
+    exploded = df[["family_names"]].explode("family_names").dropna(subset=["family_names"])
+    variant_counts = exploded["family_names"].value_counts()
+    tf_variant = variant_counts.reset_index()
+    tf_variant.columns = ["family_name_variant", "tf_family_name_variant"]
+    tf_variant["tf_family_name_variant"] = tf_variant["tf_family_name_variant"] / n
+    tf_variant.to_parquet(PROCESSED_DATA / "oax_tf_family_name_variant.parquet", index=False)
+    print(f"  oax_tf_family_name_variant.parquet: {len(tf_variant):,} unique values")
+
     print("OAX prep complete.")
 
 

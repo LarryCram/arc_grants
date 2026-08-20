@@ -26,7 +26,8 @@ The Splink pipeline replaces the entire old multi-layer pipeline, archived at
 - **`data_persisted/`** (repo root, git-tracked): every file that represents costly manual
   work or a hard-to-reacquire external source — hand-curated matching/override CSVs
   (`manual_resolutions.csv`, `manual_splits.csv`, `manual_splits_hand_counts.csv`,
-  `manual_orcids.csv`, `manual_merges.csv`, `manual_name_corrections.csv`, `enrichment_blocklist.csv`,
+  `manual_orcids.csv`, `manual_merges.csv`, `manual_name_corrections.csv`, `manual_orcid_corrections.csv`,
+  `enrichment_blocklist.csv`,
   `for_concordance.csv`, `for_divisions.csv`, `for_adjacent_divisions.csv`) plus the ANZSRC/Scopus/OpenAlex/ERA source
   `.xlsx` reference files. Previously split across `config/*.csv` (some git-tracked but
   unlabelled as precious) and `data/*.xlsx` (entirely gitignored, i.e. genuinely unrecoverable
@@ -574,6 +575,105 @@ larger source.
 Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
 
 **Pending code TODOs:**
+- **No standalone `AwardsCIF` merge() operator exists — under-merge is structurally
+  undetectable today** (2026-08-20, found while auditing the 76 ARC clusters with 2+ distinct
+  `family_names` values). `awards_cif.py` has a low-level `_merge_awards_cifs(canonical,
+  absorbed, event, **details)` primitive, but every call site (`merge_by_orcid`,
+  `merge_persons_by_orcid`, `apply_manual_merges`, `merge_same_grant_coinvestigators`) fires
+  from one fixed, early-pipeline sequence inside `refine_clusters()`, before OAX candidates
+  exist, let alone oeuvre-building or piling. Nothing downstream (`04_resolve_links.py`,
+  `oeuvre_build.py`, `work_piling.py`, `dossier.py`) can invoke a merge based on evidence
+  discovered later (e.g. piling noticing two separate ACIFs' candidate pools both dominated by
+  the same OAX author). This matters because the 76-cluster audit could only ever see
+  **over-merge** risk (two records *did* get connected, so there's something to check) — the
+  **under-merge** case (two ACIFs that are really one person, e.g. a pre-2012 grant with no
+  ORCID at all paired with a post-name-change grant under a different/new ORCID never
+  retroactively applied to the old one) produces two perfectly ordinary-looking, single-surname
+  ACIFs with nothing connecting them. Even `gap_candidates` doesn't help here — it also only
+  groups on shared surname (soon shared `family_names` overlap, per the Stage 1 rework below),
+  so a genuine name-change case with zero surname or ORCID overlap is invisible to every
+  mechanism currently in this pipeline. Needs: a real `merge(acif_a, acif_b, evidence) ->
+  AwardsCIF` operator, callable post-hoc from any pipeline stage, plus something to actually
+  *propose* candidate pairs to feed it (cross-ACIF similarity via shared OAX candidates, shared
+  coauthors, or similar) — neither exists yet.
+- **Three confirmed candidate wrong-merges found via a full-population same-grant/same-ORCID
+  screen, needing human review via `manual_splits.csv`** (2026-08-20). Method that actually
+  worked, after two false starts: naive raw-string comparison of `first_name + family_name`
+  across same-grant/same-ORCID investigator rows found 980 "different name" groups population-
+  wide, almost all noise (`"R Corkish"` vs `"Richard Corkish"`, `"Anthony Thomas"` vs `"Anthony
+  Thomas AC"` — postnominal/abbreviation formatting, not identity). Re-running with actual
+  parsing (`arc_name_arrays()` + `cluster_checks.first_names_compatible()`, both already built)
+  collapsed it to 19 rows / 8 distinct ORCIDs. Of those 8: **3 are real, confirmed conflicts**
+  (below); **5 are genuine same-person cases**, each independently confirmed via that ORCID's own
+  self-reported `other_names` (`Preethichandra Gamage`/`Daluwathu Mulla Gamage Preethichandra`;
+  `Pathegama Ranjith`/`Ranjith Pathegama`; `Kashem Muttaqi`/`Mohammad Kashem` — the weakest of the
+  three, no direct ORCID corroboration, but recurs identically across 4 independent grants, which
+  argues against a one-off data-entry error) or via the announcement/current snapshot structure
+  itself (`Vu To`/`Joseph Tonien` — a single APD-role slot renamed between snapshots, not two
+  people in one snapshot; `Kotagiri Ramamohanarao`/`Ramamohanarao Kotagiri` — externally verified
+  by the user directly against the real ORCID page).
+
+  The three real conflicts, all with the same signature (two different, real, externally-verified
+  people, same grant, same ORCID, different first names — the one signature a genuine name change
+  can't produce):
+  - `DP1095466_WenhuiDuan` — recurs across **5 grants**, not 1 as first found:
+    `DP110101095`, `DP130100109`, `DP160100119`, `DP170104546`, `IH150100006`. `Chien Ming Wang`
+    (UQ, TMR Chair Professor in Structural Engineering, real published specialty in floating
+    breakwater structures — externally confirmed, a precise topical fit for `DP170104546`'s
+    "Floating Forest" breakwater project) and `Wenhui Duan` (Monash, steel/composites structural
+    engineering) both carry ORCID `0000-0002-8147-7673`. Recurring across 5 independent
+    applications makes a one-off copy-paste less likely than a persistently-wrong record in
+    ARC's own investigator database.
+  - `DP240100968_AlexandraLasczik` — grant `DP240100968` (Southern Cross University, Indigenous
+    child/youth climate-education project): `Tracey Bunda` (CI) and `Alexandra Lasczik` (CI) both
+    carry ORCID `0000-0001-7013-2090`. Both real, distinct people (Tracey Bunda a known Indigenous-
+    studies scholar; Lasczik's own ORCID only ever shows "Alexandra"/"Lexi Cutcher" forms, never
+    Bunda).
+  - Georgia Curran's cluster — grant `LP220200211` (Warlpiri cultural-heritage/songlines project,
+    University of Sydney admin): `Georgia Curran` (CI) and `Enid Gallagher` (PI, community-partner
+    role) both carry ORCID `0000-0003-4290-9186`. Externally confirmed as two distinct real people
+    via a co-authored publication with separate institutional emails
+    (`georgia.curran@sydney.edu.au` / `enid.gallagher1@education.nt.gov.au`). **User confirmed
+    Gallagher has no ORCID of her own at all** — unlike the other two cases (where both people
+    plausibly have genuine ORCIDs and the question is which belongs on which row), this one is
+    unambiguous: her `orcid` field should simply be null, not corrected to a different value.
+    Likely mechanism: ARC's application form may require an ORCID for every investigator, and a
+    community-partner PI without one had the CI's copied onto her row — worth watching for as a
+    pattern on other Indigenous-community-engaged grants, not confirmed beyond this one case.
+
+  All of this traced against ARC's own raw NCGP API JSON (`raw/raw_json.csv`, the authoritative
+  source — `investigators_raw.parquet` is this pipeline's own extraction of it and was confirmed
+  faithful, not the source of the error) and cross-checked against the ORCID Public API
+  (`src/utils/orcid_client.py`) for each ORCID's own self-reported name(s). Everything else in the
+  original 76-cluster population (`family_names` with 2+ values) checked out as genuine name
+  variation (maiden/married names, compound surnames, diminutives, one explicit `"(nee X)"`
+  marker) — confirmed via each grant's own announcement-vs-current investigator snapshot (same
+  first name on the same grant_code = genuine name change; different first name on the same
+  grant/ORCID = the red flag), not external lookup, once that became the reliable check.
+
+  **Two small, unrelated postnominal-parsing bugs found and fixed along the way**
+  (`src/utils/names.py`'s `_POSTNOMINALS`/`strip_postnominals()`): `"OL"` (Officer of the Order of
+  Logohu, PNG — plausible given Glenn Summerhayes' PNG-focused archaeology work) wasn't in the
+  postnominal list at all, leaking `"ol"` into his parsed family name; `"Anthony Kinloch FRS,
+  FREng"` wasn't stripped because `FREng` wasn't in the list *and* the old regex only handled
+  whitespace-separated stacking, not commas. Fixed: `OL`/`FREng` added, separator widened from
+  `\s+` to `[\s,]+`. Verified against both real cases plus the existing `"Anthony Thomas AC FAA"`
+  regression case; `tests/test_names.py`/`tests/test_prepare_arc_udfs.py` (48 tests) still pass.
+
+  **A genuinely distinct, unfixed issue surfaced by the same investigation, not a data error**:
+  reversed given-name/family-name order is a real cultural naming-convention feature for some
+  names (Kotagiri Ramamohanarao / Ramamohanarao Kotagiri — Telugu; Pathegama Ranjith / Ranjith
+  Pathegama — Sri Lankan), not something with a "correct" order to normalize toward — ARC's
+  database forces every name into fixed `firstName`/`familyName` fields regardless of whether
+  that convention applies. This breaks strict slot-respecting matching (family-to-family,
+  given-to-given) silently: if every ARC record for someone uses one order and OAX's own
+  `display_name` uses the other, the shared token sits in `family_names` on one side and
+  `first_names` on the other, and no comparison that only ever compares matching slots would see
+  them as related at all — same silent-failure shape as the Clarke contamination bug, from
+  ordering rather than collapsing. Needs an order-agnostic supplementary comparison/blocking rule
+  (pool `first_names ∪ family_names` per side, check for overlap regardless of slot) alongside,
+  not instead of, the slot-respecting comparison — not yet designed in detail or scheduled against
+  the Stage 1/Stage 2 rework below.
 - **Stop collapsing `family_name_main` to a single scalar for Splink blocking — block on set
   overlap instead** (2026-08-20, high priority, found via two independently-confirmed real cases:
   `DE220100680_SarahMonazamErfani` and `DE130100970_TraceyClarke`). Root cause: OpenAlex's

@@ -45,9 +45,15 @@ def canonicalize_name_punctuation(s: str) -> str:
     s = _EXOTIC_HYPHENS.sub("-", s)
     return s
 
-# Trailing Australian / British post-nominal awards (handles stacking: "AO FAA")
+# Trailing Australian / British post-nominal awards (handles stacking: "AO FAA" or "FRS, FREng").
+# OL (Officer of the Order of Logohu, PNG) and FREng (Fellow of the Royal Academy of Engineering)
+# added 2026-08-20 -- found via a same-grant/same-ORCID duplicate-name screen: "Glenn Summerhayes
+# OL OAM" was leaking "ol" into the parsed family name (Summerhayes is a PNG-focused archaeologist,
+# explaining the honour), and "Anthony Kinloch FRS, FREng" wasn't stripped at all because (a)
+# FREng wasn't in the list and (b) the comma before it didn't match the old whitespace-only
+# separator. Separator widened from `\s+` to `[\s,]+` to handle comma-separated stacking too.
 _POSTNOMINALS = re.compile(
-    r"(?:\s+(?:AO|AM|OAM|AC|AK|FAA|FAHMS|FTSE|FASSA|FAHA|FRS|CBE|OBE|MBE|KBE|DBE))+\s*$",
+    r"(?:[\s,]+(?:AO|AM|OAM|AC|AK|OL|FAA|FAHMS|FTSE|FASSA|FAHA|FRS|FREng|CBE|OBE|MBE|KBE|DBE))+\s*$",
     re.IGNORECASE,
 )
 
@@ -55,7 +61,7 @@ _POSTNOMINALS = re.compile(
 def strip_postnominals(name: str) -> str:
     """Remove trailing post-nominal awards from a name string.
 
-    Handles stacked awards: "Raston AO FAA" → "Raston".
+    Handles stacked awards: "Raston AO FAA" → "Raston", "Kinloch FRS, FREng" → "Kinloch".
 
     Must run in sequence with canonicalize_name_punctuation(), BEFORE HumanName() parses the
     string -- CONSTANTS.suffix_acronyms (registered above) only covers AC/AO/AM/OAM, so anything
