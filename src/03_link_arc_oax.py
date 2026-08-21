@@ -2,7 +2,7 @@
 src/03_link_arc_oax.py
 
 Link ARC person clusters to OpenAlex (OAX) Australian authors.
-Splink link_only: arc_persons.parquet → openalex_authors_prep.parquet.
+Splink link_only: awards_cif.parquet → openalex_authors_prep.parquet.
 
 Output: arc_oax_links.parquet
     arc_id, oax_id, match_probability, high_confidence
@@ -21,9 +21,29 @@ import splink.comparison_level_library as cll
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import PROCESSED_DATA
 from src.utils.names import max_by_len, parse_given
+from src.utils.pipeline_freshness import assert_fresh
 
 PREDICT_THRESHOLD = 0.5
 LINK_THRESHOLD    = 0.9
+
+_DATA_PERSISTED = Path(__file__).resolve().parents[1] / "data_persisted"
+# Every file build_awards_cif_population() reads that could change awards_cif.parquet's
+# content -- raw ARC data, every manual override CSV, and for_concordance.csv (feeds
+# for_name_tokens via make_expanded_for_tokens() -- free-text FOR-name fuzzy bridging for
+# Splink's own comparison scoring, NOT FOR-code resolution, which goes exclusively through
+# for_resolve.py/Resolver() and isn't file-based here). admin_orgs.csv/grant_summaries.csv
+# omitted -- genuinely static reference data this project's own source, not user-edited.
+_AWARDS_CIF_INPUTS = [
+    PROCESSED_DATA / "investigators_raw.parquet",
+    PROCESSED_DATA / "grants_flat.parquet",
+    _DATA_PERSISTED / "manual_name_corrections.csv",
+    _DATA_PERSISTED / "manual_orcid_corrections.csv",
+    _DATA_PERSISTED / "manual_orcids.csv",
+    _DATA_PERSISTED / "manual_merges.csv",
+    _DATA_PERSISTED / "manual_splits.csv",
+    _DATA_PERSISTED / "enrichment_blocklist.csv",
+    _DATA_PERSISTED / "for_concordance.csv",
+]
 
 
 def _make_full_name_key(df):
@@ -75,9 +95,16 @@ def _prep_oax(con: duckdb.DuckDBPyConnection, path: Path) -> pd.DataFrame:
 
 
 def main():
-    arc_path = PROCESSED_DATA / "arc_persons.parquet"
+    arc_path = PROCESSED_DATA / "awards_cif.parquet"
     oax_path = PROCESSED_DATA / "openalex_authors_prep.parquet"
     out_path = PROCESSED_DATA / "arc_oax_links.parquet"
+
+    # Refuse to link against a stale ARC-side population -- e.g. a manual_*.csv edited, or
+    # investigators_raw.parquet refreshed, since awards_cif.parquet was last built. This is
+    # exactly the class of bug this project hit twice in one session (2026-08-21): a wired-in
+    # correction that never actually reached production, and a diagnostic run against a
+    # population that predated the fix it was meant to verify.
+    assert_fresh("03_link_arc_oax (awards_cif.parquet)", outputs=[arc_path], inputs=_AWARDS_CIF_INPUTS)
 
     con = duckdb.connect()
 

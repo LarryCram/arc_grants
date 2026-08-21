@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.utils.cluster_checks import (
     for2020_primary_fields, for2020_primary_subfields,
     division_mismatch_for2020, is_suspicious_for2020, ACCEPTABLE_DIVISION_PAIRS,
-    RARE_NAME_TF,
+    RARE_NAME_TF, first_names_compatible,
 )
 
 
@@ -170,3 +170,43 @@ class TestIsSuspiciousFor2020:
         # so the division check still applies rather than silently exempting unknown names.
         codes = [_CIVIL_40, _INFOSYS_46]
         assert is_suspicious_for2020("some unseen name", codes, {}) is True
+
+
+class TestFirstNamesCompatible:
+    def test_initial_matches_full_name_in_s(self):
+        # T has only initial; S has matching full name -> initial matches first char
+        assert first_names_compatible(["james", "j"], ["j"]) is True
+
+    def test_initial_no_match_in_s(self):
+        # T initial 'm'; S has 'james' (initial 'j') -> no match
+        assert first_names_compatible(["james", "j"], ["m"]) is False
+
+    def test_exact_full_name_match(self):
+        assert first_names_compatible(["james", "j"], ["james", "j"]) is True
+
+    def test_different_full_names_same_initial_compatible(self):
+        # jennifer vs james share initial 'j' -> permissively compatible
+        assert first_names_compatible(["james", "j"], ["jennifer", "j"]) is True
+
+    def test_different_initial_incompatible(self):
+        # maria vs james -- no overlap at any level
+        assert first_names_compatible(["james", "j"], ["maria", "m"]) is False
+
+    def test_empty_t_returns_false(self):
+        assert first_names_compatible(["james", "j"], []) is False
+
+    def test_empty_s_returns_false(self):
+        assert first_names_compatible([], ["james", "j"]) is False
+
+    def test_both_bare_initials_matching(self):
+        assert first_names_compatible(["j"], ["j"]) is True
+
+    def test_both_bare_initials_not_matching(self):
+        assert first_names_compatible(["j"], ["m"]) is False
+
+    def test_full_name_in_t_against_bare_initial_in_s(self):
+        # S has only 'j'; T has full name 'james' -> james[0] == 'j' in s_inits
+        assert first_names_compatible(["j"], ["james", "j"]) is True
+
+    def test_full_name_in_t_against_non_matching_bare_initial_in_s(self):
+        assert first_names_compatible(["m"], ["james", "j"]) is False

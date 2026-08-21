@@ -48,6 +48,7 @@ def _item(
     for_code=None,
     institution_oax_id=None,
     full_name_key=None,
+    for2020_codes=None,
 ) -> AwardCIFItem:
     return AwardCIFItem(
         unique_id=unique_id,
@@ -65,7 +66,12 @@ def _item(
         first_names=first_names or [],
         family_names=family_names or [],
         full_name_key=full_name_key,
+        for2020_codes=for2020_codes or [],
     )
+
+
+def _for2020(code: str, name: str, is_primary: bool = True, confidence: float = 1.0) -> dict:
+    return {"code": code, "name": name, "is_primary": is_primary, "confidence": confidence}
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +84,21 @@ class TestNameForms:
         assert "john" in first_names
         assert "j" in first_names
         assert family_names == ["smith"]
+
+    def test_initial_only(self):
+        first_names, family_names = _name_forms("J", "Smith")
+        assert "j" in first_names
+        assert family_names == ["smith"]
+
+    def test_middle_name_included(self):
+        first_names, _ = _name_forms("John Paul", "Smith")
+        assert "john" in first_names
+        assert "paul" in first_names
+
+    def test_postnominal_stripped_from_family(self):
+        _, family_names = _name_forms("Barry", "Jones AC")
+        assert family_names == ["jones"]
+        assert "ac" not in family_names
 
     def test_diacritical_stripped_from_family(self):
         _, family_names = _name_forms("Hans", "Müller")
@@ -188,6 +209,23 @@ class TestMergeByOrcid:
         b = _build_awards_cif("cluster_B", [_item("G2_Y", orcid="0000-0002-0002-0002")])
         out = merge_by_orcid([a, b])
         assert len(out) == 2
+
+    def test_already_same_cluster_unchanged(self):
+        # Both items already assigned to the same cluster -- no cross-cluster ORCID to act on.
+        cif = _build_awards_cif("cluster_A", [
+            _item("G1_Trevor", orcid="0000-0001-0001-0001"),
+            _item("G1_David", orcid="0000-0001-0001-0001"),
+        ])
+        out = merge_by_orcid([cif])
+        assert len(out) == 1
+        assert out[0].cluster_id == "cluster_A"
+
+    def test_different_family_names_still_merged_on_orcid(self):
+        # Murphy/Paton-Walsh case: family name differs but ORCID is authority.
+        a = _build_awards_cif("cluster_A", [_item("G1_Murphy", orcid="0000-0003-0003-0003", family_names=["murphy"])])
+        b = _build_awards_cif("cluster_B", [_item("G1_PatonWalsh", orcid="0000-0003-0003-0003", family_names=["paton-walsh"])])
+        out = merge_by_orcid([a, b])
+        assert len(out) == 1
 
     def test_no_orcid_clusters_unchanged(self):
         a = _build_awards_cif("cluster_A", [_item("G1_X")])
@@ -392,6 +430,54 @@ class TestComputeGapCandidates:
         a = _build_awards_cif("A", [_item("G1_A", first_names=["alice", "a"], family_names=["jones"])])
         out = compute_gap_candidates([a])
         assert out[0].gap_candidates == []
+
+    # Division check uses real FOR2020 codes resolved to OAX fields (see
+    # src/utils/cluster_checks.py's module docstring) -- fixtures use real codes/names, not
+    # placeholder division labels. "Geology" (3705) and "Geophysics" (3706) both resolve to OAX
+    # field "Earth and Planetary Sciences" (same field -- compatible); "Organic chemistry" (3405)
+    # resolves to "Chemistry" (different field -- incompatible with either).
+
+    def test_division_mismatch_excluded(self):
+        a = _build_awards_cif("A", [_item("G1_A", first_names=["j"], family_names=["smith"],
+                                           for2020_codes=[_for2020("3705", "Geology")])])
+        b = _build_awards_cif("B", [_item("G1_B", first_names=["j"], family_names=["smith"],
+                                           for2020_codes=[_for2020("3405", "Organic chemistry")])])
+        out = compute_gap_candidates([a, b])
+        by_id = {c.cluster_id: c for c in out}
+        assert by_id["A"].gap_candidates == []
+        assert by_id["B"].gap_candidates == []
+
+    def test_same_oax_field_different_for2020_code_compatible(self):
+        a = _build_awards_cif("A", [_item("G1_A", first_names=["j"], family_names=["smith"],
+                                           for2020_codes=[_for2020("3705", "Geology")])])
+        b = _build_awards_cif("B", [_item("G1_B", first_names=["j"], family_names=["smith"],
+                                           for2020_codes=[_for2020("3706", "Geophysics")])])
+        out = compute_gap_candidates([a, b])
+        by_id = {c.cluster_id: c for c in out}
+        assert "B" in by_id["A"].gap_candidates
+        assert "A" in by_id["B"].gap_candidates
+
+    def test_gap2_cross_initial_compatible(self):
+        # "T J Smith" vs "J Smith": different first initial but 'j' appears in both
+        # first_names sets -> Gap 2 candidate (surname-group only, not blocked by initial)
+        a = _build_awards_cif("A", [_item("G1_A", first_names=["thomas", "john", "t", "j"], family_names=["smith"])])
+        b = _build_awards_cif("B", [_item("G1_B", first_names=["john", "j"], family_names=["smith"])])
+        out = compute_gap_candidates([a, b])
+        by_id = {c.cluster_id: c for c in out}
+        assert "B" in by_id["A"].gap_candidates
+        assert "A" in by_id["B"].gap_candidates
+
+    def test_three_clusters_partial_compatibility(self):
+        # A and B: compatible (same initial, no FOR conflict). A and C, B and C: incompatible
+        # (different initial).
+        a = _build_awards_cif("A", [_item("G1_A", first_names=["john", "j"], family_names=["smith"])])
+        b = _build_awards_cif("B", [_item("G1_B", first_names=["j"], family_names=["smith"])])
+        c = _build_awards_cif("C", [_item("G1_C", first_names=["mary", "m"], family_names=["smith"])])
+        out = compute_gap_candidates([a, b, c])
+        by_id = {x.cluster_id: x for x in out}
+        assert by_id["A"].gap_candidates == ["B"]
+        assert by_id["B"].gap_candidates == ["A"]
+        assert by_id["C"].gap_candidates == []
 
 
 # ---------------------------------------------------------------------------
