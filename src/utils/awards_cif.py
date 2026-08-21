@@ -40,7 +40,9 @@ import splink.comparison_level_library as cll
 from config.settings import PROCESSED_DATA, ADMIN_ORGS_CSV, GRANT_SUMMARIES_CSV, ARC_GRANTS_CSV, DISKCACHE_DIR, OAX_AUTHORS, TOP_CUT, DUCKDB_TMP_DIR
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
 from src.utils.names import canonicalize_name_punctuation, make_expanded_for_tokens, name_part_tokens, strip_diacriticals, strip_postnominals, for_name_tokens
-from src.utils.for_resolve import upgrade_for_code, upgrade_for_name, resolve_arc_for_entry
+from src.utils.for_resolve import (
+    upgrade_for_code, upgrade_for_name, resolve_arc_for_entry, for2020_group_name,
+)
 from src.utils.cluster_checks import (
     first_names_compatible,
     RARE_NAME_TF as _CLUSTER_CHECKS_RARE_NAME_TF,
@@ -57,6 +59,7 @@ _FOR_CONCORDANCE_CSV = _DATA_PERSISTED / "for_concordance.csv"
 _MANUAL_NAME_CORRECTIONS_CSV = _DATA_PERSISTED / "manual_name_corrections.csv"
 _MANUAL_ORCID_CORRECTIONS_CSV = _DATA_PERSISTED / "manual_orcid_corrections.csv"
 _MANUAL_SPLITS_CSV = _DATA_PERSISTED / "manual_splits.csv"
+_MANUAL_SPLITS_BY_GRANT_CSV = _DATA_PERSISTED / "manual_splits_by_grant.csv"
 _MANUAL_ORCIDS_CSV = _DATA_PERSISTED / "manual_orcids.csv"
 _MANUAL_MERGES_CSV = _DATA_PERSISTED / "manual_merges.csv"
 _ENRICHMENT_BLOCKLIST_CSV = _DATA_PERSISTED / "enrichment_blocklist.csv"
@@ -64,8 +67,9 @@ _MANUAL_RESOLUTIONS_CSV = _DATA_PERSISTED / "manual_resolutions.csv"
 
 CLUSTER_THRESHOLD = 0.9  # same value as 01_prepare_arc.py -- high precision, prefer splitting over merging
 RARE_NAME_TF = 2e-6  # OAX full_name_key TF below this -> rare name (tier 2 vs 3). Distinct from
-                      # cluster_checks.RARE_NAME_TF (5e-5), which governs is_suspicious()'s own
-                      # rare-name carve-out -- same constant name, same value as 01_prepare_arc.py,
+                      # cluster_checks.RARE_NAME_TF (1e-5 as of 2026-08-21, was 5e-5), which
+                      # governs is_suspicious()'s own rare-name carve-out -- same constant name,
+                      # same value as 01_prepare_arc.py,
                       # different meaning/module than cluster_checks's.
 
 
@@ -377,6 +381,14 @@ def load_grant_for2020_codes() -> dict[str, list[dict]]:
                 continue
             code20, name, confidence = resolved
             code4 = code20[:4]
+            # 2026-08-21 fix: `name` may be a finer-precision (6-digit field) label if the
+            # original ARC entry resolved at field precision -- truncating the CODE to group
+            # precision without also re-deriving the NAME left a mismatched label (e.g. code
+            # "5004" carrying field 500405's name "Religion, society and culture" instead of
+            # group 5004's own "Religious studies"). Only re-resolve when truncation actually
+            # happened; skip the extra lookup when code20 was already 4-digit.
+            if code20 != code4:
+                name = for2020_group_name(code4) or name
             is_primary = bool(f.get("isPrimary"))
 
             existing = out[grant_code].get(code4)
@@ -515,6 +527,7 @@ def load_award_cif_items(
                 ON g.admin_org = o.organisationName_alias
             WHERE i.role_code IN ({roles_sql})
               AND substring(i.grant_code, 1, 2) IN ({schemes_sql})
+            ORDER BY i.unique_id
         """).fetchall()
         col_names = [d[0] for d in con.description]
     finally:
@@ -775,7 +788,17 @@ def cluster_items(
         tf = pd.read_parquet(PROCESSED_DATA / fname)
         linker.table_management.register_term_frequency_lookup(tf, col)
 
-    linker.training.estimate_u_using_random_sampling(max_pairs=1_000_000)
+    # seed=42: pins u-probability random sampling (matches this project's existing seed
+    # convention, 00_samples.py's reservoir sampling). 2026-08-21: confirmed this alone does
+    # NOT make the pipeline fully deterministic -- a direct double-run test (with this seed AND
+    # a stable ORDER BY on the base items query) still showed ~40/22,927 clusters differing
+    # between runs. Root cause is deeper in Splink's own EM training/clustering internals
+    # (suspected parallel floating-point summation order), not input-row ordering or this
+    # sampling step alone. Accepted as a known, small (~0.1-0.2%) residual per user decision --
+    # matches this file's own prior documented precedent ("~99.15% field-for-field agreement,
+    # attributed to Splink's own run-to-run clustering stochasticity, not a logic gap"). This
+    # seed is kept anyway since it removes one real, understood source, even though incomplete.
+    linker.training.estimate_u_using_random_sampling(max_pairs=1_000_000, seed=42)
     linker.training.estimate_probability_two_random_records_match(
         [block_on("family_name_main")],
         recall=0.8,
@@ -840,8 +863,9 @@ def _union_oeuvre_by_work_idx(everyone: list[AwardsCIF]) -> list["CandidateWork"
     """Union oeuvre across merging clusters, keyed on work_idx -- two clusters both reaching the
     same OpenAlex work get one CandidateWork with source_author_idxs unioned, not a duplicate
     entry. In every real call site today `oeuvre` is empty (populated later, by oeuvre_build.py,
-    long after build_awards_cif_population() runs) -- this exists for merge()'s post-hoc case
-    (Phase 3), where a caller may merge two ACIFs that already have real oeuvre attached."""
+    long after the ARC-only/OAX-enriched population is built) -- this exists for merge()'s
+    post-hoc case (Phase 3), where a caller may merge two ACIFs that already have real oeuvre
+    attached."""
     by_work: dict[int, "CandidateWork"] = {}
     for c in everyone:
         for w in c.oeuvre:
@@ -1159,10 +1183,33 @@ def split_multi_name_clusters(
     return out
 
 
+def _load_manual_splits_by_grant() -> dict[str, dict[str, str]]:
+    """data_persisted/manual_splits_by_grant.csv -- cluster_id -> {unique_id: split_label}, an
+    explicit finer-than-institution split assignment. 2026-08-21: added after a confirmed real
+    case (DE250100317_LIANGWANG) where institution-based splitting is structurally a no-op --
+    both real people (an early-career chemical engineer, DE250100317, and an unrelated
+    religious-studies scholar sharing only the name, DP200100524) are administered by the same
+    institution (Monash), so grouping by institution_oax_id would put them straight back
+    together. Rows not covering every item in a cluster are fine -- any unlisted unique_id falls
+    back to its own singleton group, same semantics as the institution-based path's own
+    no-institution fallback."""
+    if not _MANUAL_SPLITS_BY_GRANT_CSV.exists():
+        return {}
+    out: dict[str, dict[str, str]] = defaultdict(dict)
+    with open(_MANUAL_SPLITS_BY_GRANT_CSV, newline="") as f:
+        for row in csv.DictReader(f):
+            cid, uid, label = row["cluster_id"].strip(), row["unique_id"].strip(), row["split_label"].strip()
+            if cid and uid and label:
+                out[cid][uid] = label
+    return dict(out)
+
+
 def apply_manual_splits(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     """Split clusters confirmed as containing 2+ different people in
-    data_persisted/manual_splits.csv, dividing by institution_oax_id -- mirrors
-    _apply_manual_splits()."""
+    data_persisted/manual_splits.csv. Dividing key: an explicit per-unique_id assignment from
+    data_persisted/manual_splits_by_grant.csv when the cluster has one (any item not covered by
+    it falls back to its own singleton group), else institution_oax_id (original behaviour) --
+    mirrors _apply_manual_splits()."""
     if not _MANUAL_SPLITS_CSV.exists():
         return clusters
     split_ids: set[str] = set()
@@ -1172,15 +1219,20 @@ def apply_manual_splits(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
                 split_ids.add(row["cluster_id"])
     if not split_ids:
         return clusters
+    by_grant = _load_manual_splits_by_grant()
 
     out = []
     for c in clusters:
         if c.cluster_id not in split_ids:
             out.append(c)
             continue
+        grant_assignments = by_grant.get(c.cluster_id)
         groups: dict[str, list[AwardCIFItem]] = defaultdict(list)
         for it in c.items:
-            key = it.institution_oax_id or f"__singleton__{it.unique_id}"
+            if grant_assignments is not None:
+                key = grant_assignments.get(it.unique_id, f"__singleton__{it.unique_id}")
+            else:
+                key = it.institution_oax_id or f"__singleton__{it.unique_id}"
             groups[key].append(it)
         for its in groups.values():
             new_id = min(it.unique_id for it in its)
@@ -1900,21 +1952,36 @@ def compute_reliability(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     return clusters
 
 
-# ── population-level construction: build_awards_cif_population, persistence ─────────
+# ── population-level construction: build_arc_only_population, enrich_with_oax_candidates,
+#    persistence ─────────────────────────────────────────────────────────────────────────
+#
+# 2026-08-21: split from a single build_awards_cif_population() after a real architectural
+# bug was found -- that one function bundled two genuinely different concerns (ARC/ORCID-only
+# identity resolution, and OAX-candidate population that reads arc_oax_links.parquet, i.e.
+# 03_link_arc_oax.py's OWN output) into one call, so "01_prepare_arc.py" (meant to produce
+# checkable, OAX-independent output) was silently depending on 03 having already run. The two
+# halves below are genuinely sequential (build_arc_only_population's output is 03's input;
+# enrich_with_oax_candidates needs 03's output), never bundled again. See CLAUDE.md's
+# "Bind them together..." session notes for the full incident.
 
 AWARDS_CIF_PARQUET = PROCESSED_DATA / "awards_cif.parquet"
+ARC_ONLY_PARQUET = PROCESSED_DATA / "awards_cif_arc_only.parquet"
 
 
-def build_awards_cif_population(con: duckdb.DuckDBPyConnection | None = None) -> list[AwardsCIF]:
-    """Composes the full step-1 chain in order -- the AwardsCIF-side equivalent of
-    01_prepare_arc.py end to end, not previously composed anywhere as a single function
-    (each stage has always been called manually by whoever needed it, e.g. tests or ad hoc
-    validation runs). Mirrors refine_clusters()'s and oeuvre_build.py's build_oeuvre()'s own
-    "compose the small single-responsibility functions in order" style.
+def build_arc_only_population(con: duckdb.DuckDBPyConnection | None = None) -> list[AwardsCIF]:
+    """The genuinely ARC/ORCID-only half of identity resolution -- no OpenAlex data read or
+    required. This is what 01_prepare_arc.py calls and persists to awards_cif_arc_only.parquet:
+    a checkable, inspectable checkpoint that exists and is complete BEFORE any connection to
+    OAX is made (03_link_arc_oax.py reads this file, never the OAX-enriched one, closing off
+    the circularity that motivated this split).
 
     load_award_cif_items -> cluster_items -> refine_clusters -> set_aside_indigenous_research
-    -> populate_oax_candidates -> dedup_oax_candidates -> compute_orcid_for
-    -> compute_gap_candidates -> compute_reliability
+    -> compute_orcid_for -> compute_gap_candidates -> compute_reliability
+
+    compute_orcid_for() reads only the local ORCID diskcache (00b_enrich_orcid.py's own output,
+    not OAX); compute_gap_candidates()/compute_reliability() operate purely on fields already
+    populated by the steps above them (family_names, for2020_codes, orcids) -- confirmed by
+    direct code read, not assumed, before this split was made.
     """
     own_con = con is None
     con = con or duckdb.connect()
@@ -1927,14 +1994,31 @@ def build_awards_cif_population(con: duckdb.DuckDBPyConnection | None = None) ->
         clusters = cluster_items(items, corrections, orcid_corrections)
         clusters = refine_clusters(clusters)
         clusters = set_aside_indigenous_research(clusters)
-        clusters = populate_oax_candidates(clusters, con)
-        clusters = dedup_oax_candidates(clusters, con)
         clusters = compute_orcid_for(clusters)
         clusters = compute_gap_candidates(clusters)
         clusters = compute_reliability(clusters)
     finally:
         if own_con:
             con.close()
+    return clusters
+
+
+def enrich_with_oax_candidates(
+    clusters: list[AwardsCIF],
+    con: duckdb.DuckDBPyConnection | None = None,
+) -> list[AwardsCIF]:
+    """The genuinely OAX-dependent half: populates oax_candidates by reading
+    arc_oax_links.parquet (03_link_arc_oax.py's own output) and cleans it up. Must run AFTER
+    03_link_arc_oax.py, on the ARC-only population build_arc_only_population() produced (either
+    freshly built, or reloaded via load_awards_cif(ARC_ONLY_PARQUET) -- both populate_oax_candidates
+    and dedup_oax_candidates only ever touch cluster_id/family_names/oax_candidates/provenance,
+    all of which round-trip correctly through persist/load, so a loaded, items-less population is
+    a valid input here).
+
+    populate_oax_candidates -> dedup_oax_candidates
+    """
+    clusters = populate_oax_candidates(clusters, con)
+    clusters = dedup_oax_candidates(clusters, con)
     return clusters
 
 

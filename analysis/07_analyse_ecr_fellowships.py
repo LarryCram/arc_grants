@@ -43,7 +43,7 @@ ECR_ROLES = ("DECRA", "APD", "APDI")  # APF excluded -- see module docstring
 ANALYSIS_OUT = OUTPUT_ROOT / "analysis" / "ecr_fellowships"
 PANEL_MAP_CSV = Path(__file__).parent.parent / "data_persisted" / "for_panels_2020.csv"
 
-ARC_PERSONS  = str(PROCESSED_DATA / "arc_persons.parquet")
+ARC_PERSONS  = str(PROCESSED_DATA / "awards_cif.parquet")
 INV_RAW      = str(PROCESSED_DATA / "investigators_raw.parquet")
 GRANT_MAP    = str(PROCESSED_DATA / "arc_grant_cluster_map.parquet")
 GRANTS_FLAT  = str(PROCESSED_DATA / "grants_flat.parquet")

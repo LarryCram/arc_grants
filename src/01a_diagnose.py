@@ -1,7 +1,7 @@
 """
 src/01a_diagnose.py
 
-Quality diagnostics for arc_persons.parquet — the output of 01_prepare_arc.py.
+Quality diagnostics for awards_cif_arc_only.parquet — the output of 01_prepare_arc.py.
 
 Tests three propositions:
   (A) No false positives  — no two distinct people merged into one cluster
@@ -19,7 +19,6 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import PROCESSED_DATA
-from config.scope import KEEP_ROLES, KEEP_SCHEMES
 from src.utils.cluster_checks import is_suspicious_for2020
 from src.utils.awards_cif import load_award_cif_items
 
@@ -54,17 +53,16 @@ def _show_clusters(df: pd.DataFrame, n: int = 10) -> None:
 def _load() -> tuple:
     # AwardsCIF is the sole core (2026-08-21 consolidation) -- arc_persons.parquet and
     # arc_investigators_prep.parquet are retired; both of this function's former direct-parquet
-    # reads of those two files are replaced by awards_cif.parquet and load_award_cif_items()
-    # respectively.
-    persons = pd.read_parquet(PROCESSED_DATA / "awards_cif.parquet")
+    # reads of those two files are replaced by load_award_cif_items() and awards_cif_arc_only.
+    # parquet respectively. Reads the ARC-only checkpoint deliberately, not the OAX-enriched
+    # awards_cif.parquet -- every check in this file (A/B/C below) operates purely on ARC-
+    # internal fields (orcid_status, family_names, for2020_codes, full_name_key, grant/co-
+    # investigator structure), never oax_candidates, so this file can run immediately after
+    # 01_prepare_arc.py without waiting on 03/03b, and can't be misled by a stale OAX
+    # enrichment the way reading awards_cif.parquet could.
+    persons = pd.read_parquet(PROCESSED_DATA / "awards_cif_arc_only.parquet")
 
     gmap = pd.read_parquet(PROCESSED_DATA / "arc_grant_cluster_map.parquet")
-
-    inv = pd.read_parquet(PROCESSED_DATA / "investigators_raw.parquet")
-    inv_f = inv[
-        inv["role_code"].isin(KEEP_ROLES)
-        & inv["grant_code"].str[:2].isin(KEEP_SCHEMES)
-    ][["unique_id", "grant_code", "orcid"]].copy()
 
     # arc_investigators_prep.parquet's `first_initials` was an array (list_filter(...,
     # len(x)==1)); every real consumer below only ever took its first element as a scalar --
@@ -72,6 +70,20 @@ def _load() -> tuple:
     items, _corrections, _orcid_corrections = load_award_cif_items()
     prep = pd.DataFrame([
         {"unique_id": it.unique_id, "family_names": it.family_names, "first_initials": [it.first_initial] if it.first_initial else []}
+        for it in items
+    ])
+
+    # inv_f: derived from load_award_cif_items()'s own returned items, NOT an independent
+    # re-filter of investigators_raw.parquet. 2026-08-21 fix -- the old version reimplemented
+    # role_code/grant_code scope filtering by hand here, which silently drifted from
+    # load_award_cif_items()'s actual scope (that function ALSO drops non-HEP-admin_org records,
+    # a filter this file's own hand-rolled version never applied) -- C1 was wrongly flagging 186
+    # correctly-excluded CSIRO-administered (non-HEP) DECRA records as a coverage gap. Deriving
+    # from the same items list load_award_cif_items() already returns makes drift structurally
+    # impossible: there is exactly one place scope is decided, and every check in this file reads
+    # from it.
+    inv_f = pd.DataFrame([
+        {"unique_id": it.unique_id, "grant_code": it.grant_code, "orcid": it.orcid}
         for it in items
     ])
 

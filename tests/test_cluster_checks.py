@@ -103,6 +103,18 @@ class TestDivisionMismatchFor2020:
         codes = [_FISHERIES_30, _ECOLOGY_31, _CHEMENG_40, _ENVIRO_41]
         assert division_mismatch_for2020(codes) is True
 
+    def test_single_division_multi_field_no_mismatch(self):
+        # 2026-08-21 fix regression: two real codes, both ANZSRC division 31, that resolve to
+        # two DIFFERENT OAX fields (Agricultural and Biological Sciences / Biochemistry,
+        # Genetics and Molecular Biology) -- confirmed via the real Timothy Connallon case,
+        # same failure class already documented for Mohammad Islam (division 40). A single
+        # ANZSRC division is administratively self-consistent regardless of how OAX's finer
+        # crosswalk happens to split it; this must NOT flag, and previously did (the old code
+        # treated "no division pair to test" as "therefore suspicious").
+        codes = [_for2020("3104", "Evolutionary biology"),
+                 _for2020("3105", "Genetics not elsewhere classified", is_primary=False)]
+        assert division_mismatch_for2020(codes) is False
+
     def test_secondary_codes_now_counted(self):
         # Changed 2026-08-17: division_mismatch_for2020() moved from for2020_primary_fields()
         # to for2020_all_fields() -- every FOR2020 code ARC recorded is real evidence of a CI's
@@ -161,15 +173,22 @@ class TestIsSuspiciousFor2020:
         tf_lookup = {"common name": 1.0}
         assert is_suspicious_for2020("common name", [_CHEMENG_40], tf_lookup) is False
 
-    def test_missing_full_name_key_still_evaluates_division(self):
+    def test_missing_full_name_key_not_suspicious(self):
+        # No full_name_key at all -> nothing to check against the population, treated as rare
+        # (no evidence of commonness), not flagged. Same reasoning as the lookup-miss case below.
         codes = [_CIVIL_40, _INFOSYS_46]
-        assert is_suspicious_for2020(None, codes, {}) is True
+        assert is_suspicious_for2020(None, codes, {}) is False
 
-    def test_full_name_key_not_in_tf_lookup_defaults_common(self):
-        # tf_lookup.get(key, 1.0) -- an unknown name defaults to "common" (1.0), not rare,
-        # so the division check still applies rather than silently exempting unknown names.
+    def test_full_name_key_not_in_tf_lookup_defaults_rare(self):
+        # 2026-08-21 fix: a key ABSENT from tf_lookup now defaults to rare, not common --
+        # empirically justified (see is_suspicious_for2020's own docstring): tf_lookup is built
+        # from 2.78M real OAX authors, so a genuinely common name essentially always appears:
+        # absence is itself evidence of rarity, not an absence of evidence. Measured real-world
+        # effect: the old "assume common" default meant 99.2% of currently-UNRESOLVED clusters
+        # were flagged purely because their name was missing from the table (often due to an
+        # unrelated OAX-side full_name_key corruption bug), not because they were actually common.
         codes = [_CIVIL_40, _INFOSYS_46]
-        assert is_suspicious_for2020("some unseen name", codes, {}) is True
+        assert is_suspicious_for2020("some unseen name", codes, {}) is False
 
 
 class TestFirstNamesCompatible:

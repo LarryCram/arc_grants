@@ -1,0 +1,10 @@
+cluster_id,unique_id,split_label,notes
+DP0209460_DavidMILLER,LP160101508_DavidMiller,coral_biologist,"David J Miller, ORCID 0000-0003-0291-9531, coral/evo-devo biology, JCU/ANU/OIST career since 1992"
+DP0209460_DavidMILLER,DP250103482_DavidMiller,coral_biologist,"same, JCU, co-investigators David Bourne/Laura Rix/Sen-Lin Tang"
+DP0209460_DavidMILLER,DP240102310_DavidMiller,coral_biologist,"same, JCU, co-investigators Mia Hoogenboom/Ira Cooke/Kate Quigley/Timothy Ravasi"
+DP0209460_DavidMILLER,DP170104734_DavidMiller,coral_biologist,"same, JCU, co-investigators Aurelie Moya/David Bourne/Thomas Bosch"
+DP0209460_DavidMILLER,DP1095343_DavidMiller,coral_biologist,"same, JCU, co-investigators Eldon Ball/Sylvain Foret/Thomas Bosch/Forest Rohwer/Rebecca Thurber/Noriyuki Satoh"
+DP0209460_DavidMILLER,DP0344483_DavidMiller,coral_biologist,"same, ANU, co-investigator Eldon Ball"
+DP0209460_DavidMILLER,DP0209460_DavidMiller,coral_biologist,"same, JCU, co-investigators Eldon Ball/Walter Gehring/Gerhard Technau (Pax6/eyeless discoverers -- evo-devo)"
+DP0209460_DavidMILLER,DP0209460_DavidMILLER,coral_biologist,"same grant DP0209460, name-case variant of the row above (announcement/current), same person"
+DP0209460_DavidMILLER,DP0664031_DavidMiller,philosophy_of_science,"a different, unrelated David Miller -- UNSW, sole investigator (no co-investigators at all), primary FOR 2202/370601 History and Philosophy of Science and Technology -- zero institutional or topical overlap with the coral biologist's 8 other grants"

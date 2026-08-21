@@ -54,7 +54,7 @@ def main(test: bool = False):
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     deferred = pd.read_parquet(PROCESSED_DATA / "arc_ambiguous_deferred.parquet")
-    arc      = pd.read_parquet(PROCESSED_DATA / "arc_persons.parquet")
+    arc      = pd.read_parquet(PROCESSED_DATA / "awards_cif_arc_only.parquet")
     oax_prep = pd.read_parquet(PROCESSED_DATA / "openalex_authors_prep.parquet")
 
     if test:

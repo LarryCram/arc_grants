@@ -571,6 +571,252 @@ larger source.
   (was stale from a 2026-06-15 run against the old Feb26 snapshot).
 - **Conclusion: no data-quality regression from the OpenAlex migration.**
 
+## ARC-only/OAX-enriched pipeline split; six real correctness bugs found and fixed via 01a_diagnose.py (2026-08-21)
+
+Triggered by a direct challenge to the previous session's "AwardsCIF is the sole core" consolidation:
+"YOU MUST SEPARATE THE ARC processing produce checkable output BEFORE connecting with OAX."
+Investigation found this wasn't a true circular dependency (user's own correction) but real
+over-bundling: `build_awards_cif_population()` mixed 7 genuinely ARC/ORCID-only steps with 2
+OAX-dependent ones (`populate_oax_candidates`/`dedup_oax_candidates`, both reading
+`arc_oax_links.parquet` — 03's own output) into one function, and `01_prepare_arc.py` and
+`06_build_oeuvre.py` both wrote to the same `awards_cif.parquet` path, so `06` silently
+overwrote `01`'s output on every full run — no genuinely ARC-only, checkable-before-OAX artifact
+ever existed on disk despite the file layout suggesting otherwise.
+
+**Fix**: `build_awards_cif_population()` split into `build_arc_only_population()` (the 7
+ARC-only steps) and `enrich_with_oax_candidates()` (the 2 OAX-dependent steps). Three distinct,
+separately freshness-gated files: `awards_cif_arc_only.parquet` (01_prepare_arc.py's output —
+the genuine checkable-before-OAX checkpoint), `arc_oax_links.parquet` (03_link_arc_oax.py,
+reads the arc-only file, unchanged otherwise), `awards_cif.parquet` (new
+`src/03b_enrich_awards_cif.py`, runs after 03, the final OAX-enriched population everything
+downstream consumes). `06_build_oeuvre.py` no longer rebuilds the whole population from scratch
+— it just loads 03b's output. `04_resolve_links.py`/`05_orcid_assist.py`/`01a_diagnose.py`/
+`00a_analyse_arc.py` repointed to the arc-only file (all their reads are ARC-internal fields,
+confirmed by checking every query, not assumed); `analysis/00_samples.py`/`02_accuracy_check.py`/
+`05_explore.py`/`07_analyse_ecr_fellowships.py`/`dossier_build.py` repointed to the enriched
+file instead — checked directly that every one of these already joins against
+`arc_oax_resolved.parquet`/`oeuvres.parquet`/`arc_oax_links.parquet` as its real source (i.e.
+they already presuppose OAX resolution happened), so the enriched file is the semantically
+correct one for them, not the arc-only file (an earlier pass wrongly repointed these to the
+arc-only file first; corrected after the user's own observation "it looks like analysis is post
+OAX/ARC merge"). `analysis/03_annual_metrics.py`'s own `PERSONS` constant was dead code (never
+actually read) — removed rather than repointed.
+
+Also added `seed=42` to both `estimate_u_using_random_sampling()` calls (Splink's own
+u-probability random sampling — the one documented source of run-to-run clustering
+nondeterminism). **Confirmed empirically this is NOT sufficient alone**: a direct double-run
+test (seed set, plus a stable `ORDER BY unique_id` added to `load_award_cif_items()`'s base
+query, tried as a second candidate fix) still showed ~40/22,927 clusters differing between runs.
+Root cause is deeper in Splink's own EM training/clustering internals (suspected parallel
+floating-point summation order) — investigated only as far as ruling out input-row ordering and
+the random-sampling step, not pursued further into Splink's internals per explicit user decision
+("stop here, keep the seed fix, accept residual drift"). Both fixes kept (real, understood,
+partial improvements); the residual is accepted, matching this file's own prior documented
+precedent for the same phenomenon.
+
+### Four real ORCID-collision cases found via `01a_diagnose.py`'s B1 check, all individually verified against live ORCID records
+
+Immediately after the pipeline split, a fresh `01a_diagnose.py` run surfaced B1 (ORCID appearing
+in 2+ clusters, hard fail) at 4 — every case investigated via the ORCID Public API/local cache,
+none assumed:
+- **`DP0209045_FrankPate`/`LP0219387_DonaldPate`** — same person, same grant (`LP0219387`,
+  Flinders University archaeology project): announcement snapshot lists "A/Prof Donald Pate
+  (CI)", current lists "Prof Frank Pate (CI)", same co-investigators both snapshots. ORCID
+  `0000-0002-0238-0217`'s own name variants: "F. Donald Pate / Donald Pate / Frank Donald Pate."
+  Never auto-merged because `merge_persons_by_orcid()` correctly skips first-initial-mismatched
+  pairs (D vs F) as a safety guard — recorded to `manual_merges.csv`.
+- **`LP0347702_JMcDonald`** — an `au_match`-confidence enrichment search for "J/John McDonald"
+  incorrectly matched a different real person's ORCID (`0000-0002-5735-960X` = Michael J.
+  McDonald, Professor, Monash Biological Sciences — no "John" anywhere on record; user
+  independently confirmed a real, distinct Professor John McDonald, Sociology, Executive Dean at
+  Charles Sturt/Federation University, no findable ORCID). Recorded to `enrichment_blocklist.csv`
+  (this is the wrong-enrichment-match failure mode that file exists for, not a raw-data error —
+  the raw `i.orcid` field was never set for this cluster, so `manual_orcid_corrections.csv`'s
+  mechanism, which corrects `i.orcid` pre-clustering, doesn't apply here).
+- **`DP0663938_AlexanderAdelaar`/`DP0663938_KarlAdelaar`** — same person, same grant, recorded
+  twice under different given-name forms. ORCID `0000-0002-6269-4146` resolves to given-names
+  "Karl Alexander" family "Adelaar" (Austronesian-languages linguist, University of Melbourne) —
+  his real given name literally contains both search terms independently used by enrichment.
+  Grant snapshot directly confirms: announcement "Dr Karl Adelaar (CI)", current "A/Prof
+  Alexander Adelaar (CI)", same co-investigator (Michael Ewing), same institution both
+  snapshots. Recorded to `manual_merges.csv`.
+- **`LP130101008_AndrewBell`/`LP0560400_ColinBell`** — same person. ORCID `0000-0003-2731-9858`
+  resolves to given="Colin" family="Bell", with `other-names` explicitly listing "Andrew Colin
+  Bell" (Head of School, Deakin University) — the record itself confirms both given-name forms.
+  Recorded to `manual_merges.csv`.
+
+A fifth, related case (the pipeline's sole live `MULTI_ORCID`, A1) surfaced as a *downstream
+effect* of an already-confirmed historical merge: `DP0345542_JeffreyRichardson`/
+`DP0345542_JeffRichardson` (Jeff/Jeffrey nickname variant, already in `manual_merges.csv` from
+an earlier session) each independently picked up a *different* enrichment ORCID before that
+merge combined them. `0000-0002-4248-4280` (given="Jeff", other-names=["Jeffrey RJ
+Richardson"], employment=Monash University — matching all 6 of the cluster's grants, all
+Monash-administered) is the real match: the well-known Monash health economist Jeffrey RJ
+Richardson. `0009-0005-3968-9073` (high-confidence enrichment match, but zero employment/
+other-names data, and a newly-issued `0009-` prefix ORCID) is almost certainly an unrelated,
+sparsely-populated account sharing only the name — blocklisted.
+
+### `is_suspicious_for2020`/`division_mismatch_for2020`: two real bugs found investigating why UNRESOLVED count didn't drop as expected, one RARE_NAME_TF recalibration
+
+User pushback ("we have not agreed" to leave the whitelist gap alone; "I have no idea what the
+problem is - they all look OK to me") drove a from-first-principles re-investigation rather than
+re-attempting the already-3x-failed `ACCEPTABLE_DIVISION_PAIRS` re-derivation.
+
+1. **Single-division gating bug** (`division_mismatch_for2020()`): when 2+ OAX fields exist but
+   only 1 ANZSRC division, the old code did `if len(divisions) < 2: return True` — treating "no
+   division pair to test" as "therefore suspicious," backwards from the intent already documented
+   in this same function's docstring. A single ANZSRC division is administratively self-consistent
+   regardless of how OAX's finer content-based crosswalk happens to split it into multiple OAX
+   fields (the already-known Mohammad Islam case, division 40 splitting into two OAX fields).
+   Confirmed live on Timothy Connallon (single division 31, but 2 OAX fields from codes 3104/3105).
+   Fixed: `return False` instead. Resolved 184 of 1,625 UNRESOLVED clusters on its own.
+2. **Rare-name-lookup default backwards** (`is_suspicious_for2020()`): `tf_lookup.get(key, 1.0)`
+   defaulted an ABSENT full_name_key to "common" (1.0), on the reasoning "don't silently exempt a
+   name we have no data on" — sound in the abstract, empirically backwards in practice. Measured:
+   16.8% of ALL ARC full_name_keys are missing from `oax_tf_full_name.parquet` (built from 2.78M
+   AU/HEP-context OAX authors), but **99.2% of currently-UNRESOLVED clusters'** keys were missing
+   — i.e. the "common name" exemption was providing almost no protection for exactly the
+   population it exists to protect. Root cause of many individual misses: the already-documented
+   `family_name_main`/`max_by_len` OAX-side contamination bug (CLAUDE.md's own "Next Priority") —
+   spot-checked directly on Ann Williamson, whose real linked OAX candidate's own `full_name_key`
+   is corrupted to `"williamson_williamson"`, not `"ann_williamson"`, so her correct key never had
+   a chance to match. Fixed: an absent key now returns not-suspicious (absence from a 2.78M-row
+   population is itself strong evidence of rarity, not an absence of evidence — a genuinely common
+   name essentially always appears in a population that large).
+3. **`RARE_NAME_TF` recalibration**: even for names PRESENT in the lookup, the existing threshold
+   (5e-5) sat at the **99.995th percentile** of the AU/HEP-context tf distribution — only
+   110/2,045,346 distinct names cleared it. Measured the full distribution before picking a new
+   value (median tf = 3.6e-7, i.e. over half of all distinct names occur exactly once in the
+   2.78M-author population; p99=2.5e-6, p99.9=1.1e-5, p99.99=3.3e-5) — the old threshold missed
+   this project's own documented real collision cases (Andrew Martin tf=1.5e-5, Xiaolin Wang
+   tf=1.7e-5, Jun Li tf=3.4e-5, Paul Thomas tf=6.1e-6, Mark Baker tf=2.9e-6, all below 5e-5).
+   Recalibrated to **1e-5** (~p99.9), tested against the real population before committing:
+   11→169 clusters flagged suspicious, sample dominated by genuinely common Chinese/Vietnamese/
+   Korean given+family combinations (Wei Wei, Yan Yan, two separate Wei Zhangs, two Wei Lius, two
+   Yang Lius...) — a reviewable, well-targeted set, not a false-positive flood. Confirmed the
+   scope of TF computation itself is correct first (`n = len(df)` in `02_prepare_oax.py` comes
+   from `author_hep.parquet`, the AU/HEP-context author pool, not a world population — so no
+   dilution bias from Australia being a small share of global academia, a real risk the user
+   raised and worth ruling out explicitly).
+
+Combined population effect (`01_prepare_arc.py` full re-run): **UNRESOLVED 1,625 → 169**
+(89.6% reduction), `01a_diagnose.py` hard-failure summary A+B+C: **5,061 → 507**.
+
+### `01a_diagnose.py` scope-derivation drift: a real, silent 186-record phantom coverage gap
+
+C1 ("investigators_raw unique_ids with no cluster") was flagging 186 — traced directly, not
+assumed: `01a_diagnose.py::_load()` built its own `inv_f` scope population by hand-filtering
+`investigators_raw.parquet` on `role_code`/`grant_code` scheme prefix only, a **second,
+independent reimplementation** of the scope `load_award_cif_items()` (which this same file
+already calls, for `prep`) actually uses — missing that function's own non-HEP-admin_org drop
+entirely. All 186 "missing" unique_ids sampled were CSIRO-administered DECRA records (a research
+agency, not a Higher Education Provider) — correctly, deliberately excluded by
+`load_award_cif_items()`, exactly matching its own printed "Dropped 186 investigator record(s)
+with a non-HEP admin_org" line. Not a coverage bug at all — a diagnostic tool that had silently
+drifted from the one true scope definition it was supposed to be checking against, precisely the
+class of bug the whole session's "sole core" consolidation was meant to eliminate everywhere.
+Fixed by deriving `inv_f` directly from `load_award_cif_items()`'s own returned `items` (the same
+list `prep` is already built from) instead of a separate hand-rolled filter — makes this specific
+drift structurally impossible to reintroduce. C1: 186 → 0.
+
+### `for2020_group_name()`: a real code/label mismatch bug, found investigating a flagged case
+
+Manually reviewing a flagged cluster (`DE250100317_LIANGWANG`) surfaced FOR2020 code "5004"
+displayed as "Religion, society and culture" — confirmed via `Resolver().resolve('5004',
+'FOR2020', 'FOR2020')` that group 5004's own canonical label is actually **"Religious
+studies"**; "Religion, society and culture" is the label of a different, finer 6-digit *field*
+code (500405) under that same group. Root cause: `load_grant_for2020_codes()` truncates a
+6-digit field code to its 4-digit parent group (a correct, hierarchical operation — verified
+elsewhere in this codebase) but was keeping the field-level NAME string unchanged after
+truncating the CODE, so any grant whose raw FOR entry resolved at field precision got a group
+code paired with a mismatched, too-specific label. Confirmed the `research_classification`
+package itself was never wrong — this was purely this project's own post-processing. Fixed via
+new `for_resolve.for2020_group_name(code4)`, called in `load_grant_for2020_codes()` whenever
+truncation actually occurred. Display-only bug — `division_mismatch_for2020()`/
+`is_suspicious_for2020()` compare on the numeric code/division prefix, never the name string, so
+this never affected classification correctness, only what a human reviewing a flagged case sees.
+
+### Real confirmed merge error found and fixed: two different "Liang Wang"s wrongly merged
+
+Manually reviewing `DE250100317_LIANGWANG` (flagged by A3, Chemical Engineering + "Religion,
+society and culture" as two *primary* FOR codes) after the label fix above still showed a
+genuine cross-division combination — traced to its root, not dismissed as another broad-career
+false positive. The cluster combines 2 grants: `DE250100317` (a 2025 DECRA) and `DP200100524`
+(a 2020 Discovery Project). Live ARC grant-page lookups (user-supplied) plus ORCID Public API
+verification (this session's own tooling) resolved both sides definitively:
+- `DE250100317` (Griffith University, ORCID `0000-0002-0377-1228`): **"Dr Liang Jason Wang"**,
+  Research Fellow, Centre for Catalysis and Clean Energy, Griffith — electrocatalysis/2D
+  nanomaterials, verified email domain `griffith.edu.au`. FOR codes genuinely all Engineering
+  (4004/4014/4016) — matches the real ARC grant page exactly, no Religious-Studies content at all.
+- `DP200100524` (Monash University admin, Macquarie partner org, no ARC-recorded ORCID):
+  co-investigators Julian Millie and Banu Senay (both religious/cultural-studies researchers),
+  primary FOR 2204 Religion and Religious Studies. The third CI, "Liang Wang," is **"Liang
+  Choon Wang"** — decisively confirmed via a real 2025 co-authored paper ("Islamic bureaucracies
+  in Indonesia and Turkey: the challenge of comparison," *Religion, State and Society*) whose
+  co-authors are exactly Banu Senay and Julian Millie. He's a Monash **economist** (PhD UCSD,
+  Dept of Economics) doing genuinely interdisciplinary work on this grant, not himself a
+  religious-studies scholar — the grant's own primary FOR code reflects the collaboration's
+  subject matter, not his discipline. ORCID `0000-0001-5723-9053` added to `manual_orcids.csv`.
+
+Institutions genuinely differ (Griffith vs Monash — an earlier assumption that both were Monash
+was wrong, corrected directly by the user and re-verified against `grants_flat.parquet`), so the
+*existing* institution-based `apply_manual_splits()` correctly separates these once
+`confirmed_different_people=True` is set — recorded in `manual_splits.csv`.
+
+**New infrastructure built regardless, per explicit user direction** (institution-based splitting
+being sufficient for this specific case doesn't mean it always will be): `manual_splits_by_grant.csv`
+(new, currently empty — schema `cluster_id, unique_id, split_label`) plus
+`_load_manual_splits_by_grant()` and an `apply_manual_splits()` update — a cluster with any
+finer-grained assignment uses it (any item not covered falls back to its own singleton group);
+clusters without one keep the original institution-based behaviour unchanged. This is the
+previously-deferred "Phase 4" fix from an earlier session's plan (needed for the confirmed
+`DE230100180_WeiWang` false-merge, where both real people share an institution) — built now as
+real, tested, available infrastructure even though not exercised by the Liang Wang case itself.
+
+**Two lookup-cache gaps closed along the way, both explained rather than left as mysteries**:
+Liang Jason Wang's ORCID (`0000-0002-0377-1228`) was present directly in ARC's raw data but
+missing from the local `orcid_records` diskcache despite `00b_enrich_orcid.py`'s record-fetch
+phase having "completed cleanly" in an earlier session — his grant commenced 2025, almost
+certainly added to `investigators_raw.parquet` after that phase last ran. Liang Choon Wang's
+name-search enrichment DID run and correctly declined to guess: 768 candidate ORCID matches for
+"Liang Wang," `confidence='too_common'` — the enrichment pipeline's own safety valve working
+exactly as designed; only resolvable via the specific co-authorship corroboration found this
+session, not any bulk search.
+
+### Second real confirmed merge error: two different "David Miller"s, spanning three institutions
+
+Reviewing another flagged cluster (`DP0209460_DavidMILLER`, 9 grants, common name, divisions
+{31 Biological Sciences, 41 Environment, 50 Humanities}) found a second genuine wrongful merge,
+same session, different failure shape. 8 of the 9 grants (JCU/Curtin/ANU) share real,
+verifiable co-investigators — Eldon Ball, David Bourne, Ira Cooke, Walter Gehring, Gerhard
+Technau (the last two: co-discoverers of *Pax6*/eyeless in developmental biology) — and Eldon
+Ball also appears directly as a co-author on the ORCID-verified candidate's own publication
+list. Live ORCID lookup (`0000-0003-0291-9531`): **David J Miller**, coral/evo-devo biology, JCU-
+affiliated since ~2004, ANU Visiting Fellow since 1992, OIST Visiting Researcher since 2021, 76
+works. The 9th grant (`DP0664031`, UNSW, sole investigator, zero co-investigators) is **David
+Philip Miller**, Emeritus Professor of History and Philosophy of Science at UNSW since 1981
+(Fellow, Australian Academy of Humanities; work on James Watt and the history of invention) —
+externally confirmed via his UNSW faculty bio, matching the grant's own primary FOR code (History
+and Philosophy of Science) exactly.
+
+This is the case the newly-built `manual_splits_by_grant.csv` mechanism was actually needed for
+(not Liang Wang, where plain institution-based splitting turned out sufficient once the
+institutions were correctly checked): the real coral biologist's own 8 genuine grants span
+**three different institutions** (JCU, Curtin, ANU), so a plain institution-based split would
+have wrongly fragmented him into three separate pieces while still failing to isolate the UNSW
+outlier cleanly. `manual_splits_by_grant.csv` gained its first real rows: 8 unique_ids labelled
+`coral_biologist`, 1 labelled `philosophy_of_science`; `manual_splits.csv` gained the matching
+`confirmed_different_people=True` cluster entry. Verified after rerun: split into exactly two
+clusters (`DP0209460_DavidMILLER`, 8 grants; `DP0664031_DavidMiller`, 1 grant), no fragmentation
+of the real biologist across his three institutions. `0000-0003-0291-9531` added to
+`manual_orcids.csv` for the coral-biologist cluster.
+
+Final state after all fixes (`01_prepare_arc.py` → `03_link_arc_oax.py` → `03b_enrich_awards_cif.py`
+→ `01a_diagnose.py`, all rerun clean): 22,920 AwardsCIF, **UNRESOLVED 167**, `01a_diagnose.py`
+hard failures **501** (all of it the same 167-cluster review population counted 3x across
+A2/A3/C2, per that script's own cross-check design, plus 0 everywhere else — no remaining
+phantom or unexplained counts). All 305 tests passing.
+
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
 

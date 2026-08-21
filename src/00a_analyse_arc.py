@@ -7,7 +7,7 @@ Establishes the scale of the problem before any solution is designed.
 Inputs:
     processed/investigators_raw.parquet
     processed/grants_flat.parquet
-    processed/arc_persons.parquet   (current Splink output, for comparison)
+    processed/awards_cif_arc_only.parquet   (current Splink output, for comparison)
     config/grant_summaries.csv      (for FOR division codes)
 
 Output:
@@ -175,10 +175,10 @@ def main():
     p(f"  No ORCID + multi-inst + multi-div:         {multi_inst_div.sum():>6,}  ← ambiguous before Splink")
 
     # ── Section 6: Post-Splink comparison ────────────────────────────────────
-    persons_path = PROCESSED_DATA / "arc_persons.parquet"
+    persons_path = PROCESSED_DATA / "awards_cif_arc_only.parquet"
     if persons_path.exists():
         persons = pd.read_parquet(persons_path)
-        p(f"\n── Post-Splink arc_persons.parquet ──────────────────────────────────")
+        p(f"\n── Post-Splink awards_cif_arc_only.parquet ──────────────────────────────────")
         p(f"  Clusters (persons):                        {len(persons):>6,}")
         p(f"  Multi-grant clusters:                      {(persons.n_grants>1).sum():>6,}")
         p(f"  Clusters with ORCID:                       {persons.orcids.apply(len).gt(0).sum():>6,}")

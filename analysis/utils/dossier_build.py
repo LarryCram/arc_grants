@@ -31,7 +31,6 @@ from importlib import import_module
 
 _ecr = import_module("analysis.07_analyse_ecr_fellowships")
 
-ARC_PERSONS = str(PROCESSED_DATA / "arc_persons.parquet")
 GRANT_MAP = str(PROCESSED_DATA / "arc_grant_cluster_map.parquet")
 GRANTS_FLAT = str(PROCESSED_DATA / "grants_flat.parquet")
 INV_RAW = str(PROCESSED_DATA / "investigators_raw.parquet")
@@ -256,7 +255,7 @@ def build_dossier(cohort_row: pd.Series, con: duckdb.DuckDBPyConnection) -> Doss
     cluster_id = cohort_row["cluster_id"]
 
     person = con.execute(
-        f"SELECT full_names FROM read_parquet('{ARC_PERSONS}') WHERE cluster_id = ?", [cluster_id]
+        f"SELECT full_names FROM read_parquet('{AWARDS_CIF}') WHERE cluster_id = ?", [cluster_id]
     ).fetchone()
     full_names = list(person[0]) if person else [cohort_row["name"]]
     preferred_name = full_names[0]

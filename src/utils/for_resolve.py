@@ -100,6 +100,29 @@ def upgrade_for_name(code: str | None, name: str | None) -> str | None:
     return result.label if result else name
 
 
+def for2020_group_name(code4: str | None) -> str | None:
+    """The official ANZSRC FOR2020 GROUP-level (4-digit) label for a group code -- e.g.
+    "5004" -> "Religious studies", never a finer field-level label like "500405" -> "Religion,
+    society and culture" even though both share the same parent group.
+
+    Exists because truncating a 6-digit FOR2020 field code to its 4-digit parent group (a real,
+    correct operation -- ANZSRC codes are hierarchically prefixed, so the first 4 digits of a
+    field code ARE its group code by construction) does NOT mean the field's own label is still
+    correct at group precision. Found 2026-08-21 via a live case: ARC's raw data records field
+    500405 ("Religion, society and culture") on a grant; load_grant_for2020_codes() correctly
+    truncates the code to group 5004, but had been keeping the field-level name string
+    unchanged, mislabeling the group as "Religion, society and culture" when its own correct
+    name is "Religious studies" -- confirmed directly via Resolver().resolve('5004', 'FOR2020',
+    'FOR2020'), not assumed. Does not affect division_mismatch_for2020()/is_suspicious_for2020()
+    correctness (they compare on the numeric code/division prefix, never the name string) --
+    display-only bug, but a real one worth fixing since these names are shown to humans doing
+    manual review."""
+    if not code4 or len(code4) != 4 or not code4.isdigit():
+        return None
+    result = _resolve_cached(code4, "FOR2020", "FOR2020")
+    return result.label if result else None
+
+
 def oax_subfield_name(code: str | None) -> str | None:
     """FOR2008-or-FOR2020 group code -> OAX subfield label, in one resolve() call (replaces
     the old two-hop upgrade_for_code -> group_to_subfield chain in 04_resolve_links.py's

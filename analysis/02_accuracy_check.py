@@ -25,7 +25,7 @@ from config.settings import PROCESSED_DATA, OPENALEX_DIR, OUTPUT_ROOT
 
 ANALYSIS_OUT  = OUTPUT_ROOT / "analysis"
 RESOLVED      = str(PROCESSED_DATA / "arc_oax_resolved.parquet")
-PERSONS       = str(PROCESSED_DATA / "arc_persons.parquet")
+PERSONS       = str(PROCESSED_DATA / "awards_cif.parquet")
 GRANTS_FLAT   = str(PROCESSED_DATA / "grants_flat.parquet")
 AUTHORS_GLOB  = str(OPENALEX_DIR / "authors" / "*.parquet")
 SAMPLES       = str(ANALYSIS_OUT / "samples.parquet")

@@ -2,7 +2,14 @@
 src/03_link_arc_oax.py
 
 Link ARC person clusters to OpenAlex (OAX) Australian authors.
-Splink link_only: awards_cif.parquet → openalex_authors_prep.parquet.
+Splink link_only: awards_cif_arc_only.parquet → openalex_authors_prep.parquet.
+
+Reads awards_cif_arc_only.parquet specifically, NOT awards_cif.parquet -- the former is
+01_prepare_arc.py's ARC/ORCID-only output (build_arc_only_population(), no OAX dependency);
+the latter is a later, separate stage's (03b_enrich_awards_cif.py) OAX-enriched rebuild of it.
+Reading the enriched file here would be circular (this script IS what produces the OAX linkage
+that file depends on) -- see CLAUDE.md's 2026-08-21 "ARC processing must produce checkable
+output before connecting with OAX" session notes for the incident this avoids.
 
 Output: arc_oax_links.parquet
     arc_id, oax_id, match_probability, high_confidence
@@ -27,7 +34,7 @@ PREDICT_THRESHOLD = 0.5
 LINK_THRESHOLD    = 0.9
 
 _DATA_PERSISTED = Path(__file__).resolve().parents[1] / "data_persisted"
-# Every file build_awards_cif_population() reads that could change awards_cif.parquet's
+# Every file build_arc_only_population() reads that could change awards_cif_arc_only.parquet's
 # content -- raw ARC data, every manual override CSV, and for_concordance.csv (feeds
 # for_name_tokens via make_expanded_for_tokens() -- free-text FOR-name fuzzy bridging for
 # Splink's own comparison scoring, NOT FOR-code resolution, which goes exclusively through
@@ -95,16 +102,19 @@ def _prep_oax(con: duckdb.DuckDBPyConnection, path: Path) -> pd.DataFrame:
 
 
 def main():
-    arc_path = PROCESSED_DATA / "awards_cif.parquet"
+    arc_path = PROCESSED_DATA / "awards_cif_arc_only.parquet"
     oax_path = PROCESSED_DATA / "openalex_authors_prep.parquet"
     out_path = PROCESSED_DATA / "arc_oax_links.parquet"
 
     # Refuse to link against a stale ARC-side population -- e.g. a manual_*.csv edited, or
-    # investigators_raw.parquet refreshed, since awards_cif.parquet was last built. This is
-    # exactly the class of bug this project hit twice in one session (2026-08-21): a wired-in
-    # correction that never actually reached production, and a diagnostic run against a
-    # population that predated the fix it was meant to verify.
-    assert_fresh("03_link_arc_oax (awards_cif.parquet)", outputs=[arc_path], inputs=_AWARDS_CIF_INPUTS)
+    # investigators_raw.parquet refreshed, since awards_cif_arc_only.parquet was last built.
+    # This is exactly the class of bug this project hit twice in one session (2026-08-21): a
+    # wired-in correction that never actually reached production, and a diagnostic run against
+    # a population that predated the fix it was meant to verify.
+    assert_fresh(
+        "03_link_arc_oax (awards_cif_arc_only.parquet)",
+        outputs=[arc_path], inputs=_AWARDS_CIF_INPUTS,
+    )
 
     con = duckdb.connect()
 
@@ -209,7 +219,9 @@ def main():
         linker.table_management.register_term_frequency_lookup(tf, col)
 
     print("[2/4] Training...")
-    linker.training.estimate_u_using_random_sampling(max_pairs=1_000_000)
+    # seed=42: pins the one real source of run-to-run nondeterminism in this pipeline -- see
+    # the matching comment in awards_cif.py's cluster_items() for the incident that motivated it.
+    linker.training.estimate_u_using_random_sampling(max_pairs=1_000_000, seed=42)
     linker.training.estimate_probability_two_random_records_match(
         [block_on("family_name_main")], recall=0.8,
     )

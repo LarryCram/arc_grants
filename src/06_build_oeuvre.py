@@ -10,14 +10,18 @@ AwardsCIF() is the pipeline going forward -- a refactor of 01_prepare_arc.py/03_
 04_resolve_links.py onto a proper dataclass, not a side experiment -- so this script's output
 lands in PROCESSED_DATA alongside arc_persons.parquet, not a separate location.
 
+2026-08-21: step 1 used to be build_awards_cif_population() -- rebuilding the ENTIRE ARC-side
+population from raw data on every run, purely to reach the two OAX-enrichment steps this script
+actually needed, and silently overwriting 01_prepare_arc.py's own output at the same path in the
+process (the incident that led to 01/03b's ARC-only/OAX-enriched split -- see their docstrings).
+This script now just loads 03b_enrich_awards_cif.py's already-enriched output directly.
+
 Steps:
-  1. build_awards_cif_population() -- the full step-1 chain (load_award_cif_items -> cluster_items
-     -> refine_clusters -> set_aside_indigenous_research -> populate_oax_candidates ->
-     dedup_oax_candidates -> compute_orcid_for -> compute_gap_candidates -> compute_reliability)
-  2. persist_awards_cif() -- PROCESSED_DATA/awards_cif.parquet (never persisted before this)
-  3. fetch_and_filter_stage1() -- PROCESSED_DATA/oeuvre_stage1_{survivors,exclusions}.parquet
-  4. apply_field_filter_stage3() -- PROCESSED_DATA/oeuvre_stage3_{survivors,exclusions}.parquet
-  5. compute_subfield_hep_signals() -- PROCESSED_DATA/oeuvre_subfield_hep_signals.parquet
+  1. load_awards_cif(AWARDS_CIF_PARQUET) -- 03b_enrich_awards_cif.py's own output, freshness-
+     checked against it below rather than rebuilt here
+  2. fetch_and_filter_stage1() -- PROCESSED_DATA/oeuvre_stage1_{survivors,exclusions}.parquet
+  3. apply_field_filter_stage3() -- PROCESSED_DATA/oeuvre_stage3_{survivors,exclusions}.parquet
+  4. compute_subfield_hep_signals() -- PROCESSED_DATA/oeuvre_subfield_hep_signals.parquet
 
 Usage:
   .venv/bin/python src/06_build_oeuvre.py
@@ -31,8 +35,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import duckdb
 
-from config.settings import DUCKDB_TMP_DIR
-from src.utils.awards_cif import build_awards_cif_population, persist_awards_cif, AWARDS_CIF_PARQUET
+from config.settings import DUCKDB_TMP_DIR, PROCESSED_DATA
+from src.utils.pipeline_freshness import assert_fresh
+from src.utils.awards_cif import load_awards_cif, AWARDS_CIF_PARQUET
 from src.utils.oeuvre_build import (
     fetch_and_filter_stage1,
     apply_field_filter_stage3,
@@ -58,28 +63,31 @@ def main():
     con.execute("SET memory_limit = '24GB'")
     con.execute(f"SET temp_directory = '{DUCKDB_TMP_DIR}'")
 
-    print("=== 06_build_oeuvre: Step 1 -- build_awards_cif_population ===")
-    clusters = build_awards_cif_population(con)
-    print(f"  {len(clusters):,} AwardsCIF built [{_elapsed(t0)}]")
+    print("=== 06_build_oeuvre: Step 1 -- load enriched AwardsCIF population ===")
+    # AWARDS_CIF_PARQUET is 03b_enrich_awards_cif.py's output, not rebuilt here -- refuse to
+    # run oeuvre-building against a stale enrichment (e.g. 01/03/03b edited or rerun since).
+    assert_fresh(
+        "06_build_oeuvre (awards_cif.parquet)",
+        outputs=[AWARDS_CIF_PARQUET],
+        inputs=[PROCESSED_DATA / "arc_oax_links.parquet"],
+    )
+    clusters = load_awards_cif(AWARDS_CIF_PARQUET)
+    print(f"  {len(clusters):,} AwardsCIF loaded [{_elapsed(t0)}]")
 
-    print("=== Step 2 -- persist_awards_cif ===")
-    persist_awards_cif(clusters, path=AWARDS_CIF_PARQUET)
-    print(f"  [{_elapsed(t0)}]")
-
-    print("=== Step 3 -- fetch_and_filter_stage1 ===")
+    print("=== Step 2 -- fetch_and_filter_stage1 ===")
     fetch_and_filter_stage1(
         clusters, con=con, path=STAGE1_SURVIVORS, exclusions_path=STAGE1_EXCLUSIONS,
     )
     print(f"  [{_elapsed(t0)}]")
 
-    print("=== Step 4 -- apply_field_filter_stage3 ===")
+    print("=== Step 3 -- apply_field_filter_stage3 ===")
     apply_field_filter_stage3(
         clusters, con=con, path=STAGE3_SURVIVORS, exclusions_path=STAGE3_EXCLUSIONS,
         stage1_path=STAGE1_SURVIVORS,
     )
     print(f"  [{_elapsed(t0)}]")
 
-    print("=== Step 5 -- compute_subfield_hep_signals ===")
+    print("=== Step 4 -- compute_subfield_hep_signals ===")
     compute_subfield_hep_signals(
         clusters, con=con, path=STAGE_SUBFIELD_HEP_SIGNALS, stage3_path=STAGE3_SURVIVORS,
     )

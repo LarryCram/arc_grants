@@ -164,7 +164,20 @@ from typing import Iterable
 
 from src.utils.for_resolve import oax_field_name, oax_subfield_name
 
-RARE_NAME_TF = 5e-5
+RARE_NAME_TF = 1e-5  # 2026-08-21 recalibration: was 5e-5 (~p99.995 of the AU-context full_name_key
+# distribution, only 110/2,045,346 names qualified as "common") -- empirically far stricter than
+# where the real collision-prone tail starts. Measured against the actual distribution: median tf
+# is 3.6e-7 (over half of all distinct names occur exactly once in the 2.78M-author AU/HEP-context
+# population), p99=2.5e-6, p99.9=1.1e-5. The old threshold missed documented real collision cases
+# in this project's own data (Andrew Martin tf=1.5e-5, Xiaolin Wang tf=1.7e-5, Jun Li tf=3.4e-5,
+# Paul Thomas tf=6.1e-6, Mark Baker tf=2.9e-6 -- all below 5e-5 despite being real, multi-cluster
+# same-name collisions). New value (~p99.9) reclassifies 2,414 names as "common" (up from 110);
+# measured population effect on ARC clusters: 11 -> 169 flagged suspicious, dominated by
+# genuinely common Chinese/Vietnamese/Korean given+family combinations (Wei Wei, Yan Yan, Wei
+# Zhang x2, Wei Liu x2, Yang Liu x2 ...) -- a reviewable, well-targeted set, not a false-positive
+# flood. Also see is_suspicious_for2020()'s docstring for the separate "missing from tf_lookup"
+# default fix (also 2026-08-21) -- that fix and this recalibration are independent, complementary
+# corrections to the same rare/common signal.
 
 INDIGENOUS_DIVISION_PREFIX = "45"  # FOR2020 division 45 "Indigenous Studies" -- confirmed
                                     # directly against real ARC grant records (e.g. group 4501
@@ -363,8 +376,16 @@ def division_mismatch_for2020(codes: list[dict]) -> bool:
     if len(fields) <= 1:
         return False
     divisions = sorted({e["code"][:2] for e in codes if e.get("code")})
+    # 2026-08-21 fix: a single ANZSRC division is administratively self-consistent even when
+    # OAX's finer, content-based crosswalk splits it into 2+ OAX fields (confirmed real,
+    # e.g. Mohammad Islam's "Materials engineering"/"Numerical modelling" both in division 40
+    # but resolving to different OAX fields; Timothy Connallon's single division 31 similarly
+    # flagged before this fix). The old `return True` here treated "can't form a division pair
+    # to test" as "therefore suspicious" -- backwards from the intent documented above; no
+    # pair to test means nothing here contradicts a single coherent division, not evidence of
+    # one. There is no whitelist to consult when only one division is present.
     if len(divisions) < 2:
-        return True
+        return False
     all_pairs_ok = all(
         frozenset((divisions[i], divisions[j])) in ACCEPTABLE_DIVISION_PAIRS
         for i in range(len(divisions)) for j in range(i + 1, len(divisions))
@@ -411,7 +432,23 @@ def is_suspicious_for2020(full_name_key: str | None, for2020_codes: list[dict], 
     The remaining "common name" gate is untouched and still doing real work independently:
     a genuinely rare full_name_key spanning multiple divisions is extremely unlikely to be two
     different people (a name collision needs two people sharing that exact rare name), regardless
-    of ORCID or division-pair whitelist status."""
-    if full_name_key and tf_lookup.get(full_name_key, 1.0) < RARE_NAME_TF:
+    of ORCID or division-pair whitelist status.
+
+    2026-08-21 fix: a full_name_key ABSENT from tf_lookup now counts as rare, not common.
+    Previously defaulted to 1.0 (common) on the reasoning "don't silently exempt a name we have
+    no data on" -- sound in the abstract, but empirically backwards: tf_lookup is built from
+    2.78M OAX authors' own full_name_key values, so a genuinely common name (e.g. "wei_wang")
+    essentially always appears in a population that large. Absence is itself strong evidence of
+    rarity, not an absence of evidence. Measured real-world impact of the old default: 16.8% of
+    ALL ARC full_name_keys are missing from tf_lookup, but 99.2% of currently-UNRESOLVED
+    clusters' keys are missing -- i.e. the "common name" gate was accidentally providing almost
+    no protection for exactly the population it exists to protect. Confirmed via a spot-check
+    (Ann Williamson): her real linked OAX candidate's own full_name_key is corrupted to
+    "williamson_williamson" (the already-documented family_name_main/max_by_len contamination
+    bug, CLAUDE.md's "Next Priority"), not "ann_williamson" -- so her correct key never had a
+    chance of matching, through no fault of her name's actual rarity."""
+    if not full_name_key or full_name_key not in tf_lookup:
+        return False
+    if tf_lookup[full_name_key] < RARE_NAME_TF:
         return False
     return division_mismatch_for2020(for2020_codes)

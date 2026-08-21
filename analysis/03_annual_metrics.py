@@ -30,7 +30,6 @@ from config.settings import PROCESSED_DATA, OPENALEX_COMPACT_DIR, OUTPUT_ROOT
 from analysis.utils.dedup import create_deduped_works
 
 ANALYSIS_OUT   = OUTPUT_ROOT / "analysis"
-PERSONS        = str(PROCESSED_DATA / "arc_persons.parquet")
 AUTH_GLOB      = str(OPENALEX_COMPACT_DIR / "authorships" / "*.parquet")
 QUANTILES      = str(ANALYSIS_OUT / "citation_quantiles.parquet")
 OUT_ANNUAL     = str(ANALYSIS_OUT / "annual_metrics.parquet")

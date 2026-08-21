@@ -3,8 +3,10 @@ src/04_resolve_links.py
 
 Disambiguate ARC persons with multiple high-confidence OAX matches.
 
-Input:  arc_oax_links.parquet  (all HC + sub-HC candidate pairs)
-        arc_persons.parquet    (orcids, inst_arr per cluster)
+Input:  arc_oax_links.parquet       (all HC + sub-HC candidate pairs)
+        awards_cif_arc_only.parquet (orcids, inst_arr per cluster -- ARC-only fields only,
+                                      reads the pre-OAX-enrichment checkpoint deliberately,
+                                      same file 03_link_arc_oax.py reads)
         openalex_authors_prep.parquet (orcid, inst_ids per OAX author)
         OAX raw authors parquet (works_count)
 
@@ -44,7 +46,7 @@ LINK_THRESHOLD = 0.9
 
 
 def main():
-    arc_path  = PROCESSED_DATA / "arc_persons.parquet"
+    arc_path  = PROCESSED_DATA / "awards_cif_arc_only.parquet"
     oax_path  = PROCESSED_DATA / "openalex_authors_prep.parquet"
     link_path = PROCESSED_DATA / "arc_oax_links.parquet"
     out_resolved  = PROCESSED_DATA / "arc_oax_resolved.parquet"

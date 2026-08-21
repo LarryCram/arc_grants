@@ -18,7 +18,7 @@ import matplotlib.ticker as mticker
 from config.settings import PROCESSED_DATA, OUTPUT_ROOT
 
 ANALYSIS_OUT = OUTPUT_ROOT / "analysis"
-PERSONS      = str(PROCESSED_DATA / "arc_persons.parquet")
+PERSONS      = str(PROCESSED_DATA / "awards_cif.parquet")
 
 def paths(sample_n):
     s = f"_sample-{sample_n}" if sample_n else ""

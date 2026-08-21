@@ -15,7 +15,7 @@ ANALYSIS_OUT.mkdir(parents=True, exist_ok=True)
 
 OUT      = str(ANALYSIS_OUT / "samples.parquet")
 RESOLVED = str(PROCESSED_DATA / "arc_oax_resolved.parquet")
-PERSONS  = str(PROCESSED_DATA / "arc_persons.parquet")
+PERSONS  = str(PROCESSED_DATA / "awards_cif.parquet")
 
 con = duckdb.connect()
 
