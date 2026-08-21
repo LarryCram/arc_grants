@@ -46,6 +46,15 @@ MANUAL_SPLITS_CSV        = Path(__file__).resolve().parents[1] / "data_persisted
 MANUAL_ORCIDS_CSV        = Path(__file__).resolve().parents[1] / "data_persisted" / "manual_orcids.csv"
 MANUAL_MERGES_CSV        = Path(__file__).resolve().parents[1] / "data_persisted" / "manual_merges.csv"
 ENRICHMENT_BLOCKLIST_CSV = Path(__file__).resolve().parents[1] / "data_persisted" / "enrichment_blocklist.csv"
+# Item-level corrections applied in Phase 1, before Splink ever sees the data -- same convention
+# as awards_cif.py's _load_manual_name_corrections()/_load_manual_orcid_corrections(), which this
+# mirrors. Found 2026-08-20 that these two files, despite existing and being documented as
+# "confirmed" fixes, were never actually wired into this (the production) pipeline -- only into
+# the parallel awards_cif.py rebuild. Verified directly: DP0451513_MartinNakata's cluster in the
+# live arc_persons.parquet still carried both "Martin Nakata" and "Nicholas Nakata" in full_names,
+# uncorrected.
+MANUAL_NAME_CORRECTIONS_CSV  = Path(__file__).resolve().parents[1] / "data_persisted" / "manual_name_corrections.csv"
+MANUAL_ORCID_CORRECTIONS_CSV = Path(__file__).resolve().parents[1] / "data_persisted" / "manual_orcid_corrections.csv"
 CLUSTER_THRESHOLD = 0.9
 RARE_NAME_TF      = 2e-6   # OAX full_name_key TF below this → rare name (tier 2 vs 3)
 
@@ -1273,11 +1282,20 @@ def main():
                 SELECT
                     i.unique_id,
                     i.grant_code as grant_id,
-                    i.first_name,
+                    -- Item-level manual overrides, applied here so Splink never sees the
+                    -- uncorrected value. nc.unique_id/oc.unique_id IS NOT NULL means "a
+                    -- correction row exists for this item" -- distinct from "the correction
+                    -- value is non-null", since manual_orcid_corrections.csv's correct_orcid is
+                    -- often deliberately blank (the fix is to null the field, not substitute a
+                    -- different value) and a plain COALESCE would wrongly fall back to the
+                    -- original wrong orcid in that case.
+                    COALESCE(nc.correct_first_name, i.first_name) as first_name,
                     i.family_name,
                     g.admin_org as AdminOrg,
                     i.role_code as role,
-                    i.orcid,
+                    CASE WHEN oc.unique_id IS NOT NULL
+                         THEN NULLIF(oc.correct_orcid, '')
+                         ELSE i.orcid END as orcid,
                     upgrade_for_name(
                         regexp_extract(s.primary_field_of_research, '^\\d{{4}}'),
                         g.primary_for_name
@@ -1291,6 +1309,10 @@ def main():
                     ON i.grant_code = g.grant_code
                 LEFT JOIN read_csv_auto('{GRANT_SUMMARIES_CSV}') s
                     ON i.grant_code = s.grant_id
+                LEFT JOIN read_csv_auto('{MANUAL_NAME_CORRECTIONS_CSV}') nc
+                    ON i.unique_id = nc.unique_id
+                LEFT JOIN read_csv_auto('{MANUAL_ORCID_CORRECTIONS_CSV}') oc
+                    ON i.unique_id = oc.unique_id
                 WHERE i.role_code IN ({roles_sql})
                   AND substring(i.grant_code, 1, 2) IN ({schemes_sql})
                   AND g.admin_org IN (SELECT alias FROM _hep_crosswalk)
@@ -1323,6 +1345,16 @@ def main():
           AND g.admin_org NOT IN (SELECT alias FROM _hep_crosswalk)
     """).fetchone()[0]
     print(f"  Dropped {n_dropped_non_hep:,} investigator record(s) with a non-HEP admin_org")
+    n_name_corrections = con.execute(f"""
+        SELECT COUNT(*) FROM '{out_arc}' a
+        JOIN read_csv_auto('{MANUAL_NAME_CORRECTIONS_CSV}') nc ON a.unique_id = nc.unique_id
+    """).fetchone()[0]
+    n_orcid_corrections = con.execute(f"""
+        SELECT COUNT(*) FROM '{out_arc}' a
+        JOIN read_csv_auto('{MANUAL_ORCID_CORRECTIONS_CSV}') oc ON a.unique_id = oc.unique_id
+    """).fetchone()[0]
+    print(f"  Applied {n_name_corrections} manual name correction(s), "
+          f"{n_orcid_corrections} manual ORCID correction(s)")
     print("  ARC prep complete.")
 
     # ── Phase 2: Deduplicate ARC persons ─────────────────────────────────────

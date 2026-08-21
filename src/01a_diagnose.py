@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import PROCESSED_DATA
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
 from src.utils.cluster_checks import is_suspicious_for2020
+from src.utils.awards_cif import load_award_cif_items
 
 PASS = "✓"
 FAIL = "✗"
@@ -51,7 +52,11 @@ def _show_clusters(df: pd.DataFrame, n: int = 10) -> None:
 # ── load data ──────────────────────────────────────────────────────────────────
 
 def _load() -> tuple:
-    persons = pd.read_parquet(PROCESSED_DATA / "arc_persons.parquet")
+    # AwardsCIF is the sole core (2026-08-21 consolidation) -- arc_persons.parquet and
+    # arc_investigators_prep.parquet are retired; both of this function's former direct-parquet
+    # reads of those two files are replaced by awards_cif.parquet and load_award_cif_items()
+    # respectively.
+    persons = pd.read_parquet(PROCESSED_DATA / "awards_cif.parquet")
 
     gmap = pd.read_parquet(PROCESSED_DATA / "arc_grant_cluster_map.parquet")
 
@@ -61,9 +66,14 @@ def _load() -> tuple:
         & inv["grant_code"].str[:2].isin(KEEP_SCHEMES)
     ][["unique_id", "grant_code", "orcid"]].copy()
 
-    prep = pd.read_parquet(PROCESSED_DATA / "arc_investigators_prep.parquet")[
-        ["unique_id", "family_names", "first_initials"]
-    ].copy()
+    # arc_investigators_prep.parquet's `first_initials` was an array (list_filter(...,
+    # len(x)==1)); every real consumer below only ever took its first element as a scalar --
+    # exactly what AwardCIFItem.first_initial already is, so no array wrapping is needed here.
+    items, _corrections, _orcid_corrections = load_award_cif_items()
+    prep = pd.DataFrame([
+        {"unique_id": it.unique_id, "family_names": it.family_names, "first_initials": [it.first_initial] if it.first_initial else []}
+        for it in items
+    ])
 
     tf_df = pd.read_parquet(PROCESSED_DATA / "oax_tf_full_name.parquet")
     tf_lookup = dict(zip(tf_df["full_name_key"], tf_df["tf_full_name_key"]))

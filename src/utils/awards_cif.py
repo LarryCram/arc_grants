@@ -26,7 +26,7 @@ import csv
 import json
 import re
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import diskcache
@@ -55,6 +55,7 @@ from src.utils.cluster_checks import (
 _DATA_PERSISTED = Path(__file__).resolve().parents[2] / "data_persisted"
 _FOR_CONCORDANCE_CSV = _DATA_PERSISTED / "for_concordance.csv"
 _MANUAL_NAME_CORRECTIONS_CSV = _DATA_PERSISTED / "manual_name_corrections.csv"
+_MANUAL_ORCID_CORRECTIONS_CSV = _DATA_PERSISTED / "manual_orcid_corrections.csv"
 _MANUAL_SPLITS_CSV = _DATA_PERSISTED / "manual_splits.csv"
 _MANUAL_ORCIDS_CSV = _DATA_PERSISTED / "manual_orcids.csv"
 _MANUAL_MERGES_CSV = _DATA_PERSISTED / "manual_merges.csv"
@@ -299,6 +300,27 @@ def _load_manual_name_corrections() -> dict[str, dict]:
     return corrections
 
 
+def _load_manual_orcid_corrections() -> dict[str, dict]:
+    """data_persisted/manual_orcid_corrections.csv -- hand-confirmed fixes for ARC-source ORCID
+    data-entry errors, same convention as _load_manual_name_corrections() (keyed on unique_id,
+    applied before clustering). Unlike the name-correction file, `correct_orcid` is often blank
+    on purpose -- the confirmed cases so far (2026-08-20: Wenhui Duan/Chien Ming Wang across 5
+    grants, Alexandra Lasczik/Tracey Bunda, Georgia Curran/Enid Gallagher) are all "two real
+    people sharing one ORCID", where the wrong row's own correct ORCID isn't known (or, for
+    Gallagher, confirmed not to exist at all) -- so the fix is to null the field, not substitute
+    a different value. A blank correct_orcid must still override i.orcid to None, not be treated
+    as "no correction" -- see the CASE/NULLIF handling at the call site."""
+    if not _MANUAL_ORCID_CORRECTIONS_CSV.exists():
+        return {}
+    import csv as _csv
+    corrections: dict[str, dict] = {}
+    with open(_MANUAL_ORCID_CORRECTIONS_CSV, newline="") as f:
+        for row in _csv.DictReader(f):
+            uid = row["unique_id"].strip()
+            if uid:
+                corrections[uid] = row
+    return corrections
+
 
 def load_grant_for2020_codes() -> dict[str, list[dict]]:
     """grant_code -> ordered list of {code, name, is_primary, confidence} -- every ARC
@@ -447,7 +469,7 @@ def _load_institution_hep_crosswalk() -> dict[int, str]:
 
 def load_award_cif_items(
     con: duckdb.DuckDBPyConnection | None = None,
-) -> tuple[list[AwardCIFItem], dict[str, dict]]:
+) -> tuple[list[AwardCIFItem], dict[str, dict], dict[str, dict]]:
     """Load Award-CI/F items: investigators_raw.parquet joined to grants_flat.parquet and
     (for the FOR-code upgrade) grant_summaries.csv, filtered to KEEP_ROLES ∩ KEEP_SCHEMES,
     with normalized name forms and the upgraded ANZSRC FOR name/code attached per item.
@@ -455,13 +477,15 @@ def load_award_cif_items(
     Mirrors 01_prepare_arc.py's Phase 1 (the arc_raw CTE + arc_names()/for_tokens() UDFs +
     final SELECT) -- same source tables and filters, typed objects instead of a parquet file.
 
-    Returns (items, corrections_applied) -- corrections_applied maps unique_id to the
-    manual_name_corrections.csv row that was applied, if any. AwardCIFItem itself carries no
-    provenance (it's a raw atomic unit, not a resolved identity) -- cluster_items() is
-    responsible for recording a provenance event on any AwardsCIF whose items were corrected,
-    once that cluster actually exists.
+    Returns (items, corrections_applied, orcid_corrections_applied) -- corrections_applied maps
+    unique_id to the manual_name_corrections.csv row that was applied, if any;
+    orcid_corrections_applied is the same shape for manual_orcid_corrections.csv. AwardCIFItem
+    itself carries no provenance (it's a raw atomic unit, not a resolved identity) --
+    cluster_items() is responsible for recording a provenance event on any AwardsCIF whose items
+    were corrected, once that cluster actually exists.
     """
     corrections = _load_manual_name_corrections()
+    orcid_corrections = _load_manual_orcid_corrections()
     own_con = con is None
     con = con or duckdb.connect()
     try:
@@ -526,6 +550,13 @@ def load_award_cif_items(
         if correction is not None:
             first_name = correction["correct_first_name"]
 
+        orcid = r["orcid"]
+        orcid_correction = orcid_corrections.get(r["unique_id"])
+        if orcid_correction is not None:
+            # A blank correct_orcid means "null the field", not "no correction" -- must not
+            # fall back to r["orcid"] here.
+            orcid = orcid_correction["correct_orcid"] or None
+
         for_name = upgrade_for_name(r["for2008_code"], r["primary_for_name"])
         for_code = upgrade_for_code(r["for2008_code"]) or r["for2008_code"]
 
@@ -562,7 +593,7 @@ def load_award_cif_items(
             first_name=first_name,
             family_name=r["family_name"],
             role_code=r["role_code"],
-            orcid=r["orcid"],
+            orcid=orcid,
             admin_org=r["admin_org"],
             institution_oax_id=r["institution_oax_id"],
             funding_commence_year=r["funding_commence_year"],
@@ -581,7 +612,7 @@ def load_award_cif_items(
         ))
 
     print(f"  Dropped {n_dropped_non_hep_admin:,} investigator record(s) with a non-HEP admin_org")
-    return items, corrections
+    return items, corrections, orcid_corrections
 
 
 # ── construction: cluster_items ─────────────────────────────────────────────────
@@ -625,6 +656,7 @@ def _build_awards_cif(cluster_id: str, items: list[AwardCIFItem]) -> AwardsCIF:
 def cluster_items(
     items: list[AwardCIFItem],
     corrections: dict[str, dict] | None = None,
+    orcid_corrections: dict[str, dict] | None = None,
 ) -> list[AwardsCIF]:
     """Cluster Award-CI/F items into provisional AwardsCIF() groupings via Splink `dedupe_only`
     -- the exact comparison/blocking configuration from 01_prepare_arc.py's Phase 2, reused
@@ -633,9 +665,11 @@ def cluster_items(
     cluster_id column onto a DataFrame, the clustering result directly constructs one
     AwardsCIF() per group, recording a splink_cluster provenance event on each, plus a
     name_typo_correction event on any cluster containing an item load_award_cif_items()
-    corrected.
+    corrected, and an orcid_correction event on any cluster containing an item whose ORCID
+    load_award_cif_items() corrected (manual_orcid_corrections.csv).
     """
     corrections = corrections or {}
+    orcid_corrections = orcid_corrections or {}
 
     df = pd.DataFrame([{
         "unique_id": it.unique_id,
@@ -776,6 +810,15 @@ def cluster_items(
                     correct_first_name=correction["correct_first_name"],
                     notes=correction.get("notes"),
                 )
+            orcid_correction = orcid_corrections.get(it.unique_id)
+            if orcid_correction is not None:
+                cif.record_event(
+                    "orcid_correction",
+                    unique_id=it.unique_id,
+                    wrong_orcid=orcid_correction["wrong_orcid"],
+                    correct_orcid=orcid_correction["correct_orcid"] or None,
+                    notes=orcid_correction.get("notes"),
+                )
         clusters.append(cif)
 
     return clusters
@@ -793,11 +836,96 @@ def _norm_full(name: str) -> str:
     return re.sub(r"[^a-z ]", "", name.lower()).strip()
 
 
+def _union_oeuvre_by_work_idx(everyone: list[AwardsCIF]) -> list["CandidateWork"]:
+    """Union oeuvre across merging clusters, keyed on work_idx -- two clusters both reaching the
+    same OpenAlex work get one CandidateWork with source_author_idxs unioned, not a duplicate
+    entry. In every real call site today `oeuvre` is empty (populated later, by oeuvre_build.py,
+    long after build_awards_cif_population() runs) -- this exists for merge()'s post-hoc case
+    (Phase 3), where a caller may merge two ACIFs that already have real oeuvre attached."""
+    by_work: dict[int, "CandidateWork"] = {}
+    for c in everyone:
+        for w in c.oeuvre:
+            existing = by_work.get(w.work_idx)
+            if existing is None:
+                by_work[w.work_idx] = w
+            else:
+                merged_ids = sorted(set(existing.source_author_idxs) | set(w.source_author_idxs))
+                by_work[w.work_idx] = replace(existing, source_author_idxs=merged_ids)
+    return [by_work[k] for k in sorted(by_work)]
+
+
+def _merge_aggregate_fields(canonical: AwardsCIF, absorbed: list[AwardsCIF]) -> dict:
+    """Every AwardsCIF field _build_awards_cif() cannot derive from items -- an explicit rule
+    per field, no silent dataclass defaults. Fixes a real, confirmed data-loss bug: several
+    refine_clusters() steps set fields like `orcids` in place (apply_enriched_orcids,
+    apply_manual_orcids) without touching `items`, and _merge_awards_cifs() used to rebuild a
+    merged cluster purely from _build_awards_cif(items) -- silently discarding every in-place
+    change on any cluster absorbed into a later merge. Confirmed live on the persisted
+    population: 44 AwardsCIF carried an enriched_orcid/manual_orcid provenance event but had
+    orcids == [] -- the merge that happened after the ORCID was set destroyed it."""
+    everyone = [canonical] + absorbed
+    merged_ids = {c.cluster_id for c in absorbed}
+    orcid_for: dict[str, dict] = {}
+    for c in everyone:
+        for entry in c.orcid_for_codes:
+            code = entry["code"]
+            if code not in orcid_for:
+                orcid_for[code] = {"code": code, "name": entry["name"], "count": 0}
+            orcid_for[code]["count"] += entry["count"]
+    return {
+        "orcids": sorted({o for c in everyone for o in c.orcids}),
+        "orcid_for_codes": sorted(orcid_for.values(), key=lambda x: -x["count"]),
+        "oax_candidates": sorted({x for c in everyone for x in c.oax_candidates}),
+        "oeuvre": _union_oeuvre_by_work_idx(everyone),
+        "excluded": any(c.excluded for c in everyone),
+        "excluded_reason": next((c.excluded_reason for c in everyone if c.excluded_reason), None),
+        "gap_candidates": sorted({g for c in everyone for g in c.gap_candidates}
+                                  - merged_ids - {canonical.cluster_id}),
+        # Deliberately INVALIDATED, never guessed -- a merge changes the inputs a tier/status
+        # was computed from enough that carrying a stale value forward would be worse than
+        # admitting it's now unknown. Re-run compute_reliability() after any merge.
+        "reliability_tier": None,
+        "resolution_status": "UNRESOLVED",
+    }
+
+
 def _merge_awards_cifs(canonical: AwardsCIF, absorbed: list[AwardsCIF], event: str, **details) -> AwardsCIF:
     """Merge `absorbed` clusters into `canonical`: re-aggregate over the union of items,
-    concatenate provenance, then append a new event describing the merge."""
+    concatenate provenance, then append a new event describing the merge. Every field NOT
+    derivable from items (orcids, oax_candidates, oeuvre, excluded/excluded_reason,
+    gap_candidates -- see _merge_aggregate_fields()) is explicitly carried forward, not silently
+    dropped to a dataclass default."""
     all_items = canonical.items + [it for c in absorbed for it in c.items]
+    if not all_items:
+        # Every current caller (merge_by_orcid, merge_persons_by_orcid, apply_manual_merges,
+        # merge_same_grant_coinvestigators, all inside refine_clusters()) operates on freshly
+        # built AwardsCIF with items intact -- this path is unreachable today. It becomes
+        # reachable once Phase 3's merge() operator can be called on two load_awards_cif()-
+        # reconstructed objects (items == [] after a round-trip) -- build the field-wise
+        # _merge_without_items() path there, not here, so it's built against a real caller.
+        raise NotImplementedError(
+            "_merge_awards_cifs() called with no items on either side -- field-wise merge for "
+            "loaded/reconstructed AwardsCIF is not yet implemented (see merge(), Phase 3)."
+        )
     merged = _build_awards_cif(canonical.cluster_id, all_items)
+    for k, v in _merge_aggregate_fields(canonical, absorbed).items():
+        setattr(merged, k, v)
+    # _build_awards_cif() derived orcid_status from items' own orcid field, which
+    # apply_enriched_orcids()/apply_manual_orcids() never touch (they set orcids at the cluster
+    # level only) -- recompute from the just-corrected `orcids`, or it stays stale/inconsistent.
+    merged.orcid_status = (
+        "HAS_ORCID" if len(merged.orcids) == 1 else
+        "MULTI_ORCID" if len(merged.orcids) > 1 else
+        "NO_ORCID"
+    )
+    if not merged.excluded:
+        # Re-apply set_aside_indigenous_research()'s in-place strip of non-primary division-45
+        # codes -- _build_awards_cif() recomputes for2020_codes fresh from items, which still
+        # carry the original, unstripped codes, so a naive rebuild would silently reinstate them.
+        merged.for2020_codes = [
+            e for e in merged.for2020_codes
+            if not e["code"].startswith(INDIGENOUS_DIVISION_PREFIX)
+        ]
     merged.provenance = canonical.provenance + [ev for c in absorbed for ev in c.provenance]
     merged.record_event(event, merged_from=[c.cluster_id for c in absorbed], **details)
     return merged
@@ -1795,8 +1923,8 @@ def build_awards_cif_population(con: duckdb.DuckDBPyConnection | None = None) ->
             con.execute("SET enable_progress_bar = false")
             con.execute("SET memory_limit = '24GB'")
             con.execute(f"SET temp_directory = '{DUCKDB_TMP_DIR}'")
-        items, corrections = load_award_cif_items(con)
-        clusters = cluster_items(items, corrections)
+        items, corrections, orcid_corrections = load_award_cif_items(con)
+        clusters = cluster_items(items, corrections, orcid_corrections)
         clusters = refine_clusters(clusters)
         clusters = set_aside_indigenous_research(clusters)
         clusters = populate_oax_candidates(clusters, con)
@@ -1853,6 +1981,30 @@ def persist_awards_cif(clusters: list[AwardsCIF], path: Path = AWARDS_CIF_PARQUE
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(path, index=False)
     print(f"  Persisted {len(df):,} AwardsCIF to {path}")
+
+
+GRANT_CLUSTER_MAP_PARQUET = PROCESSED_DATA / "arc_grant_cluster_map.parquet"
+
+
+def persist_grant_cluster_map(
+    clusters: list[AwardsCIF], path: Path = GRANT_CLUSTER_MAP_PARQUET,
+) -> None:
+    """grant unique_id -> cluster_id, one row per grant appearance -- mirrors
+    01_prepare_arc.py's main() (exploded cluster_id/grant_ids, same two-column shape:
+    unique_id, cluster_id), consumed by 01a_diagnose.py and
+    analysis/07_analyse_ecr_fellowships.py's GRANT_MAP. Nothing in awards_cif.py persisted this
+    before Phase 0 of the consolidation plan -- a real gap, since it's the only artifact of
+    01_prepare_arc.py's output that awards_cif.parquet alone can't reconstruct (grant_ids is
+    already on AwardsCIF, this is purely the explode)."""
+    rows = [
+        {"unique_id": gid, "cluster_id": c.cluster_id}
+        for c in clusters
+        for gid in c.grant_ids
+    ]
+    df = pd.DataFrame(rows, columns=["unique_id", "cluster_id"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(path, index=False)
+    print(f"  Saved grant→cluster map ({len(df):,} rows) → {path}")
 
 
 def load_awards_cif(path: Path = AWARDS_CIF_PARQUET) -> list[AwardsCIF]:

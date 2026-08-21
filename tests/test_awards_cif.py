@@ -28,6 +28,7 @@ from src.utils.awards_cif import (
     merge_by_orcid,
     split_orcid_conflicts,
     merge_persons_by_orcid,
+    _merge_awards_cifs,
     compute_gap_candidates,
     compute_reliability,
     persist_awards_cif,
@@ -272,6 +273,80 @@ class TestMergePersonsByOrcid:
         b = _build_awards_cif("cluster_B", [_item("G2_B", orcid="0000-0002-0002-0002")])
         out = merge_persons_by_orcid([a, b])
         assert len(out) == 2
+
+
+# ---------------------------------------------------------------------------
+# _merge_awards_cifs data preservation -- regression tests for a real, confirmed live bug
+# (2026-08-21): refine_clusters() steps that set fields in place (apply_enriched_orcids,
+# apply_manual_orcids set c.orcids without touching c.items) used to have that change silently
+# discarded by any later _merge_awards_cifs() call, since it rebuilt the merged cluster purely
+# from _build_awards_cif(items). Confirmed on the live persisted population: 44 AwardsCIF carried
+# an enriched_orcid/manual_orcid provenance event but had orcids == [].
+# ---------------------------------------------------------------------------
+
+class TestMergeAwardsCifsDataPreservation:
+    def test_in_place_orcid_survives_a_later_merge(self):
+        # Simulates apply_enriched_orcids(): items carry no orcid, but the cluster-level
+        # `orcids` was set in place, exactly as that function does.
+        enriched = _build_awards_cif("A", [_item("G1_A", first_names=["j"], family_names=["smith"])])
+        enriched.orcids = ["0000-0001-0001-0001"]
+        enriched.orcid_status = "HAS_ORCID"
+        enriched.record_event("enriched_orcid", orcid="0000-0001-0001-0001", confidence="high")
+
+        other = _build_awards_cif("B", [_item("G1_B", first_names=["j"], family_names=["smith"])])
+
+        merged = _merge_awards_cifs(enriched, [other], "manual_merge")
+        assert merged.orcids == ["0000-0001-0001-0001"]
+        assert merged.orcid_status == "HAS_ORCID"
+
+    def test_in_place_orcid_survives_when_absorbed_not_canonical(self):
+        # Same bug, other direction: the enriched cluster is the one being ABSORBED, not kept.
+        canonical = _build_awards_cif("A", [_item("G1_A", first_names=["j"], family_names=["smith"])])
+        enriched = _build_awards_cif("B", [_item("G1_B", first_names=["j"], family_names=["smith"])])
+        enriched.orcids = ["0000-0002-0002-0002"]
+        enriched.orcid_status = "HAS_ORCID"
+        enriched.record_event("manual_orcid", orcid="0000-0002-0002-0002")
+
+        merged = _merge_awards_cifs(canonical, [enriched], "manual_merge")
+        assert merged.orcids == ["0000-0002-0002-0002"]
+        assert merged.orcid_status == "HAS_ORCID"
+
+    def test_oax_candidates_and_excluded_flag_survive_a_merge(self):
+        a = _build_awards_cif("A", [_item("G1_A")])
+        a.oax_candidates = ["A5111111111"]
+        b = _build_awards_cif("B", [_item("G1_B")])
+        b.oax_candidates = ["A5222222222"]
+        b.excluded = True
+        b.excluded_reason = "indigenous"
+
+        merged = _merge_awards_cifs(a, [b], "manual_merge")
+        assert merged.oax_candidates == ["A5111111111", "A5222222222"]
+        assert merged.excluded is True
+        assert merged.excluded_reason == "indigenous"
+
+    def test_reliability_invalidated_not_carried_forward_stale(self):
+        a = _build_awards_cif("A", [_item("G1_A")])
+        a.reliability_tier = "1a"
+        a.resolution_status = "RESOLVED"
+        b = _build_awards_cif("B", [_item("G1_B")])
+
+        merged = _merge_awards_cifs(a, [b], "manual_merge")
+        assert merged.reliability_tier is None
+        assert merged.resolution_status == "UNRESOLVED"
+
+    def test_end_to_end_via_merge_persons_by_orcid(self):
+        # Same bug, exercised through a real production call site rather than the private
+        # function directly, so the regression is caught even if the internals change.
+        enriched = _build_awards_cif("cluster_A", [_item("G1_A", first_names=["j"])])
+        enriched.orcids = ["0000-0003-0003-0003"]
+        enriched.orcid_status = "HAS_ORCID"
+        enriched.record_event("enriched_orcid", orcid="0000-0003-0003-0003", confidence="high")
+        other = _build_awards_cif("cluster_B", [_item("G2_B", orcid="0000-0003-0003-0003", first_names=["j"])])
+
+        out = merge_persons_by_orcid([enriched, other])
+        assert len(out) == 1
+        assert out[0].orcids == ["0000-0003-0003-0003"]
+        assert out[0].orcid_status == "HAS_ORCID"
 
 
 # ---------------------------------------------------------------------------
