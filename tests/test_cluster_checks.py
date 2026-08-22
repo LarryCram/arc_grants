@@ -190,6 +190,25 @@ class TestIsSuspiciousFor2020:
         codes = [_CIVIL_40, _INFOSYS_46]
         assert is_suspicious_for2020("some unseen name", codes, {}) is False
 
+    def test_single_grant_never_suspicious(self):
+        # 2026-08-21: a single-grant cluster was never the product of an ARC-internal merge --
+        # there's only one grant record, so nothing was ever combined with anything. Its own
+        # FOR-code spread reflects one genuinely interdisciplinary proposal, not identity risk.
+        # Real case: Yan Yan (DECRA), Nanotechnology/Industrial biotech/Medical biotech on one
+        # grant -- a common name (tf well above RARE_NAME_TF) with an unwhitelisted division
+        # spread that would otherwise flag.
+        codes = [_CIVIL_40, _INFOSYS_46]
+        tf_lookup = {"yan yan": 8.7e-5}
+        assert is_suspicious_for2020("yan yan", codes, tf_lookup, n_grants=1) is False
+
+    def test_two_grants_still_evaluated(self):
+        # The n_grants gate only exempts n_grants<=1 -- 2+ grants still goes through the full
+        # check (default n_grants=2 in every existing call/test above already covers this, this
+        # test makes the boundary explicit).
+        codes = [_CIVIL_40, _INFOSYS_46]
+        tf_lookup = {"wei wang": 1.0}
+        assert is_suspicious_for2020("wei wang", codes, tf_lookup, n_grants=2) is True
+
 
 class TestFirstNamesCompatible:
     def test_initial_matches_full_name_in_s(self):

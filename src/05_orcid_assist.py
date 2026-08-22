@@ -6,7 +6,9 @@ Scores each candidate against the ARC person's FOR field tokens via ORCID keywor
 Outputs high-confidence suggestions to a staging CSV for human review before
 promoting to data_persisted/manual_resolutions.csv.
 
-Caches all HTTP responses under PROCESSED_DATA/orcid_cache/ so re-runs are cheap.
+Caches all HTTP responses via orcid_client.py's single canonical ORCID record cache (was its
+own separate per-file JSON store under PROCESSED_DATA/orcid_cache/ until 2026-08-21, when the
+project consolidated three independently-diverged ORCID caches into one) so re-runs are cheap.
 
 Output: PROCESSED_DATA/orcid_suggestions.csv
     arc_id, arc_name, oax_id, action, score, gap, n_unscored,
@@ -24,9 +26,9 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import PROCESSED_DATA
 from src.utils.names import for_name_tokens
-from src.utils.orcid_cache import fetch_orcid, orcid_keywords
+from src.utils.orcid_cache import orcid_keywords
+from src.utils.orcid_client import fetch_orcid_record, default_cache
 
-CACHE_DIR        = PROCESSED_DATA / "orcid_cache"
 MIN_WINNER_SCORE = 0.10
 MIN_GAP          = 0.08
 
@@ -51,7 +53,7 @@ def field_score(kw_list: list[str], arc_for_toks: set[str]) -> float:
 
 
 def main(test: bool = False):
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache = default_cache()
 
     deferred = pd.read_parquet(PROCESSED_DATA / "arc_ambiguous_deferred.parquet")
     arc      = pd.read_parquet(PROCESSED_DATA / "awards_cif_arc_only.parquet")
@@ -76,7 +78,7 @@ def main(test: bool = False):
     print(f"[1/3] Fetching {len(orcids_needed)} ORCID records...")
     orcid_data = {}
     for i, orcid in enumerate(sorted(orcids_needed)):
-        orcid_data[orcid] = fetch_orcid(orcid, CACHE_DIR)
+        orcid_data[orcid] = fetch_orcid_record(orcid, cache)
         if (i + 1) % 50 == 0:
             print(f"  {i+1} / {len(orcids_needed)}")
     print(f"  Done.")

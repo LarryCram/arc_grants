@@ -405,9 +405,28 @@ def division_mismatch_for2020_pairwise(codes1: list[dict], codes2: list[dict]) -
     return not (d1 & d2)
 
 
-def is_suspicious_for2020(full_name_key: str | None, for2020_codes: list[dict], tf_lookup: dict) -> bool:
+def is_suspicious_for2020(
+    full_name_key: str | None, for2020_codes: list[dict], tf_lookup: dict, n_grants: int = 2,
+) -> bool:
     """True if cluster warrants manual review: common name, cross-OAX-field FOR (not exempted by
     ACCEPTABLE_DIVISION_PAIRS).
+
+    2026-08-21: `n_grants <= 1` is now exempted outright, before any other check. This entire
+    function exists to catch a possible ARC-internal Splink merge error -- two different real
+    people wrongly combined into one cluster. A single-grant cluster was never the product of
+    such a merge (there is only one grant record, so nothing was ever combined with anything);
+    its FOR-code spread reflects one ARC application's own declared, genuinely interdisciplinary
+    research scope, not identity risk. Confirmed empirically before adding this gate: 36 of the
+    167 UNRESOLVED clusters at the time were single-grant, and every one of the three spot-checked
+    (Yan Yan: nanotech/biotech/medical-biotech; Wei Liu, ORCID present: transport-logistics/civil
+    engineering; Xiao Hua Wang: environmental-management/economics/oceanography) was one coherent
+    proposal spanning divisions ACCEPTABLE_DIVISION_PAIRS simply doesn't cover -- and, checked
+    directly rather than assumed, none of the 36 single-grant cases combine 2+ distinct
+    full_names on that one grant (the one scenario -- a same-grant name-form merge, as with Pate
+    or Jeffrey/Jeff Richardson -- where a real merge decision was still made despite n_grants==1),
+    so this gate carries zero risk of masking that different failure mode. Default `n_grants=2`
+    keeps every existing call site (and this function's own tests) exempt-nothing unless a
+    caller explicitly passes the cluster's real count.
 
     The "any ORCID present -> never suspicious" bypass this function used to have (unconditional,
     regardless of how many of the cluster's own grant records that ORCID actually appears on) was
@@ -447,6 +466,8 @@ def is_suspicious_for2020(full_name_key: str | None, for2020_codes: list[dict], 
     "williamson_williamson" (the already-documented family_name_main/max_by_len contamination
     bug, CLAUDE.md's "Next Priority"), not "ann_williamson" -- so her correct key never had a
     chance of matching, through no fault of her name's actual rarity."""
+    if n_grants <= 1:
+        return False
     if not full_name_key or full_name_key not in tf_lookup:
         return False
     if tf_lookup[full_name_key] < RARE_NAME_TF:

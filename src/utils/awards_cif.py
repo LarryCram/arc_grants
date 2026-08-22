@@ -657,7 +657,13 @@ def _build_awards_cif(cluster_id: str, items: list[AwardCIFItem]) -> AwardsCIF:
         for2020_codes=_aggregate_for2020_codes(items),
         full_name_key=fnk_counts.most_common(1)[0][0] if fnk_counts else None,
         grant_ids=[it.unique_id for it in items],
-        n_grants=len(items),
+        # 2026-08-21 fix: was len(items) -- counted raw (grant x investigator) records, not
+        # distinct grants, so an announcement/current same-grant name-snapshot pair (e.g.
+        # LP0211723_DTNguyen: "D.T. Nguyen" + "Duc-Tho Nguyen", one real grant) was miscounted
+        # as 2 grants. Found while gating is_suspicious_for2020() on n_grants<=1 -- that gate's
+        # whole premise (a single-grant cluster was never the product of a multi-grant merge)
+        # needs the real distinct-grant count to hold, not an item count that can overcount it.
+        n_grants=len({it.grant_code for it in items}),
         orcid_status=(
             "HAS_ORCID" if len(orcids) == 1 else
             "MULTI_ORCID" if len(orcids) > 1 else
@@ -1924,7 +1930,7 @@ def compute_reliability(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     tf_lookup = dict(zip(tf_df["full_name_key"], tf_df["tf_full_name_key"]))
 
     for c in clusters:
-        suspicious = is_suspicious_for2020(c.full_name_key, c.for2020_codes, tf_lookup)
+        suspicious = is_suspicious_for2020(c.full_name_key, c.for2020_codes, tf_lookup, c.n_grants)
         c.resolution_status = "UNRESOLVED" if suspicious else "RESOLVED"
         if c.orcid_status == "MULTI_ORCID":
             c.resolution_status = "UNRESOLVED"

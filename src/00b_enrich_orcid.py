@@ -42,18 +42,19 @@ import requests
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from config.settings import PROCESSED_DATA, DISKCACHE_DIR
+from config.settings import PROCESSED_DATA, DISKCACHE_DIR, ADMIN_ORGS_CSV
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
 from src.utils.names import strip_diacriticals, name_part_tokens
 from src.utils.io import setup_stdout_utf8
 from src.utils.orcid_cache import orcid_addresses, orcid_external_ids, orcid_works_count
 from src.utils.era_journals import load_era_lookup, orcid_for_codes
-from src.utils.orcid_client import get_access_token, ORCID_CLIENT_ID
+from src.utils.orcid_client import get_access_token, ORCID_CLIENT_ID, default_cache
 
 PROJECT_DATA = Path(__file__).resolve().parents[1] / "data_persisted"
 
 ORCID_API          = "https://pub.orcid.org/v3.0"
 ORCID_SEARCH       = f"{ORCID_API}/search/"
+ORCID_EXPANDED     = f"{ORCID_API}/expanded-search/"
 # Authenticated (registered client, 2026-08-18) when credentials are configured -- clears the
 # anonymous daily quota that stalled this script's original run (CLAUDE.md, "2026-08-08
 # follow-up"). Falls back to anonymous, unauthenticated headers otherwise so this script still
@@ -84,6 +85,82 @@ def _name_key(family: str, first: str) -> str | None:
     f = _norm_family(family)
     i = _first_initial(first)
     return f"{f}_{i}" if (f and i) else None
+
+
+# ---------------------------------------------------------------------------
+# Institution-name resolution (ARC admin_org -> an ORCID-searchable phrase)
+# ---------------------------------------------------------------------------
+
+def load_admin_org_to_institution_name() -> dict[str, str]:
+    """ARC's own admin_org string (grants_flat.admin_org / admin_orgs.csv's
+    organisationName_alias) -> admin_orgs.csv's institution_name column.
+
+    2026-08-21: institution_name is OpenAlex's own naming convention for the institution (e.g.
+    "UNSW Sydney"), not ARC's administrative legal name ("The University of New South Wales") --
+    confirmed empirically these are NOT interchangeable for ORCID's expanded-search
+    affiliation-org-name field: it does exact (case/punctuation-insensitive but word-order-
+    sensitive) phrase matching against whatever string a person's own employment entry actually
+    contains, with no synonym expansion -- "The University of New South Wales, Sydney" returned
+    zero hits for a person whose employer field literally reads "UNSW Sydney". institution_name
+    happened to match real ORCID employment strings in every case tested this session, so it's
+    the right phrase to search with, not admin_org itself.
+    """
+    import csv as _csv
+    out: dict[str, str] = {}
+    with open(ADMIN_ORGS_CSV, newline="", encoding="utf-8") as f:
+        for row in _csv.DictReader(f):
+            alias = (row.get("organisationName_alias") or "").strip()
+            iname = (row.get("institution_name") or "").strip()
+            if alias and iname:
+                out[alias] = iname
+    return out
+
+
+def _query_expanded(q: str) -> dict | None:
+    try:
+        r = requests.get(ORCID_EXPANDED, params={"q": q, "rows": TOO_COMMON + 1},
+                         headers=_headers(), timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+
+def _search_by_institution(first: str, family: str, institution_names: list[str],
+                           record_cache: diskcache.Cache, for_cache: diskcache.Cache,
+                           era_lookup: dict) -> dict | None:
+    """Try expanded-search with an affiliation-org-name filter for each candidate institution
+    phrase in turn (a name pair can span 2+ grants at different institutions). Returns a result
+    dict in the same shape _resolve_results() produces (confidence='institution_match') on the
+    first institution that yields exactly one hit, or None if every institution draws a blank --
+    callers should then fall back to the existing name-only search, not treat None as a final
+    answer. Deliberately requires an EXACT single hit, not "fewest candidates" -- 2+ hits at the
+    same institution is exactly the kind of common-name-within-one-institution collision this
+    project has already found real cases of (e.g. two different "Yang Liu"s), and picking one
+    arbitrarily would be worse than deferring to the existing broader mechanism.
+    """
+    for iname in institution_names:
+        q = f'given-names:{first} AND family-name:{family} AND affiliation-org-name:"{iname}"'
+        data = _query_expanded(q)
+        time.sleep(RATE_SEARCH_SEC)
+        if data is None:
+            continue
+        n = data.get("num-found", 0)
+        if n != 1:
+            continue
+        result = (data.get("expanded-result") or [None])[0]
+        if not result:
+            continue
+        orcid = result.get("orcid-id")
+        rec = fetch_record(orcid, record_cache, for_cache, era_lookup)
+        meta = _candidate_meta(orcid, rec)
+        return {
+            "orcid": orcid, "confidence": "institution_match", "num_found": 1,
+            "works_count":   meta["works_count"],
+            "external_ids":  json.dumps(meta["external_ids"]),
+            "au_candidates": json.dumps([meta]),
+        }
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -193,11 +270,27 @@ def _search_orcid(first: str, family: str,
                   search_cache: diskcache.Cache,
                   for_cache: diskcache.Cache,
                   era_lookup: dict,
+                  institution_names: list[str] | None = None,
                   force: bool = False) -> dict:
-    """Search for a name; return resolved dict. Uses search_cache unless force=True."""
+    """Search for a name; return resolved dict. Uses search_cache unless force=True.
+
+    2026-08-21: tries expanded-search with an affiliation-org-name filter first (one attempt per
+    distinct institution this name pair's own ARC grants were administered at -- a person can
+    hold grants at 2+ institutions). This is what actually rescues a common name from the
+    too_common short-circuit below: institution-targeted search never needs to fetch/inspect
+    every candidate the way the plain search + country-filter path does, so it isn't gated by
+    TOO_COMMON at all. Falls through to the existing name-only search unchanged when no
+    institution is supplied, or every institution attempt draws a blank (num-found != 1)."""
     key = (first, family)
     if not force and key in search_cache:
         return search_cache[key]
+
+    if institution_names:
+        inst_result = _search_by_institution(first, family, institution_names,
+                                             record_cache, for_cache, era_lookup)
+        if inst_result is not None:
+            search_cache[key] = inst_result
+            return inst_result
 
     data = _query_orcid(f'given-names:{first} AND family-name:{family}')
     if data is None:
@@ -229,7 +322,13 @@ def main(dry_run: bool = False,
          update_name: tuple[str, str] | None = None):
     setup_stdout_utf8()
 
-    record_cache = diskcache.Cache(str(DISKCACHE_DIR / "orcid_records"))
+    # 2026-08-21: was its own separate diskcache.Cache(DISKCACHE_DIR/"orcid_records") --
+    # consolidated onto orcid_client.py's single canonical record cache (previously only used
+    # by ad hoc session lookups) after the project accumulated three separate ORCID record
+    # stores (this one, orcid_client.py's, and orcid_cache.py's per-file JSON used by
+    # 05_orcid_assist.py) that had silently diverged. See the one-off migration that copied
+    # every entry from all three into this cache before this change landed.
+    record_cache = default_cache()
     search_cache = diskcache.Cache(str(DISKCACHE_DIR / "orcid_searches"))
     for_cache    = diskcache.Cache(str(DISKCACHE_DIR / "orcid_for"))
 
@@ -258,6 +357,20 @@ def main(dry_run: bool = False,
     inv = inv[inv["grant_code"].str[:2].isin(KEEP_SCHEMES)]
     inv["name_key"] = inv.apply(lambda r: _name_key(r.family_name, r.first_name), axis=1)
     inv = inv[inv["name_key"].notna()]
+
+    # 2026-08-21: institution-targeted search -- map each name pair to the distinct ORCID-
+    # searchable institution phrase(s) its own ARC grants were administered at (a person can
+    # hold grants at 2+ institutions, so this is a list, tried in order by _search_orcid()).
+    grants = pd.read_parquet(PROCESSED_DATA / "grants_flat.parquet")[["grant_code", "admin_org"]]
+    admin_org_to_iname = load_admin_org_to_institution_name()
+    inv_inst = inv.merge(grants, on="grant_code", how="left")
+    inv_inst["institution_name"] = inv_inst["admin_org"].map(admin_org_to_iname)
+    pair_institutions: dict[tuple[str, str], list[str]] = (
+        inv_inst.dropna(subset=["institution_name"])
+        .groupby(["first_name", "family_name"])["institution_name"]
+        .apply(lambda s: sorted(set(s)))
+        .to_dict()
+    )
 
     # All distinct name pairs
     pairs = (
@@ -318,8 +431,10 @@ def main(dry_run: bool = False,
     if n:
         print(f"\nSearching {n} names...")
         for i, (_, row) in enumerate(need_search.iterrows()):
+            insts = pair_institutions.get((row.first_name, row.family_name), [])
             _search_orcid(row.first_name, row.family_name,
-                          record_cache, search_cache, for_cache, era_lookup)
+                          record_cache, search_cache, for_cache, era_lookup,
+                          institution_names=insts)
             if (i + 1) % 50 == 0 or (i + 1) == n:
                 counts = {}
                 for key in search_cache.iterkeys():

@@ -817,6 +817,122 @@ hard failures **501** (all of it the same 167-cluster review population counted 
 A2/A3/C2, per that script's own cross-check design, plus 0 everywhere else — no remaining
 phantom or unexplained counts). All 305 tests passing.
 
+## `n_grants` counted items, not distinct grants; single-grant clusters exempted from suspicion (2026-08-21)
+
+Working through the 167 UNRESOLVED clusters found 36 were single-grant -- structurally *cannot*
+be a wrongful ARC-internal merge (nothing to merge if there's only one grant record). Their
+FOR-code spread just reflects one genuinely interdisciplinary ARC proposal (verified on 3
+iconic cases: Yan Yan -- nanotech/biotech/medical-biotech on one DECRA; Wei Liu -- transport-
+logistics/civil engineering; Xiao Hua Wang -- environmental-management/economics/oceanography).
+Added an `n_grants<=1` early-exempt gate to `is_suspicious_for2020()` (checked first: zero of
+the 36 combined 2+ distinct names on their one grant, so this can't mask a real same-grant
+merge like Pate). Resolved 167->131.
+
+Investigating this surfaced a real, separate bug: `AwardsCIF.n_grants` was `len(items)` --
+raw (grant x investigator) record count, not distinct grant codes. `LP0211723_DTNguyen` (an
+announcement/current name-snapshot pair on ONE real grant) was miscounted as 2. Fixed to
+`len({it.grant_code for it in items})`; safe against every existing test (all use distinct
+grant-code prefixes per item). 131->126 after rerun (a few more cases besides DTNguyen were
+affected).
+
+## Real confirmed wrongful-merge cases resolved via ORCID biography/employment + external corroboration (2026-08-21)
+
+Continuing the systematic 01a_diagnose.py review, now spanning the full multi-grant UNRESOLVED
+population (not just the earlier Liang Wang/David Miller cases). Method refined mid-session
+after a real miss: initially characterized cases by institution/FOR-code pattern alone without
+fetching each ORCID's own `/record`; missed that David Hunter's cached record had a decisive
+biography field ("Professor of Medicine at the University of Sydney, is a rheumatologist...")
+sitting unexamined because the check script only looked at `name`/`employments`, never
+`person.biography`. Fixed going forward: every case now gets biography + employment + other-
+names checked, not just employments.
+
+**Confirmed splits this session** (all recorded in `manual_splits.csv`, evidence per case in its
+own note): Jee Hyun Kim/Hyun Jin Kim, Peter Smith/Peter James Smith, Yun-Xiao Wang/Xiao Hua Wang,
+Peng-Yuan Wang/Yuan Wang (user found a real Swinburne/MCN news article -- "Dr Peng-Yuan (George)
+Wang," stem-cell/nanofabrication DECRA fellow), Tao Liu (two different fellows -- user's own
+catch: **a Future Fellowship (2012) and a DECRA (2022) cannot belong to the same person**, FT is
+mid-career and DE is early-career, the eligibility windows structurally can't overlap for one
+career), David Hunter, Wei Xu, David Lewis, Ying Zhu, Richard Jones, Craig Anderson, Jing Zhao
+(full ORCID biography decisive -- "DECRA Research Fellow... UNSW... sustainable mining,
+biohydrometallurgy"), Wei Liu (user found his real UWA faculty page -- Associate Professor,
+Computer Science and Software Engineering, UWA Data Institute Deputy Director -- matching the
+RMIT AI/software-engineering grants, not the Sydney Language Studies one).
+
+**One case reconsidered and NOT split**: Yong Wang (`DP0984755`) initially looked like a UQ
+Materials-Engineering/UNSW Food-Sciences split candidate, but the ORCID's own employment
+timeline (COFCO Nutrition and Health Research Institute 2011-2019 -> UNSW Chemical Engineering
+2020-present -> visiting MIT 2024, plus a UNSW co-investigator specifically working in
+food-particle engineering) reads as one coherent materials-science-into-food-science career, not
+two people -- the missing early UQ position is a mundane self-reported-employment gap, not
+evidence of a different person. A caution against treating "ORCID employment doesn't list
+grant institution X" as automatic proof of a split without checking whether the fuller
+narrative still coheres.
+
+**A related infrastructure gap found and fixed**: three separate ORCID `/record` caches had
+accumulated in this codebase and silently diverged -- `orcid_client.py`'s own
+`orcid_records_authenticated` (10,455 entries), `00b_enrich_orcid.py`'s separate
+`orcid_records` diskcache (18,099 entries, populated before the authenticated client existed),
+and `orcid_cache.py`'s per-file JSON store under `PROCESSED_DATA/orcid_cache/` (4,216 entries,
+used by `05_orcid_assist.py`). Consolidated onto `orcid_client.py`'s cache as the sole store
+(24,631 entries after migrating all three, ~3,848 + ~10,328 genuinely new records recovered from
+the other two) -- both `00b_enrich_orcid.py` and `05_orcid_assist.py` now fetch/cache through it
+exclusively; the other two stores are inert, left on disk rather than deleted.
+
+## ORCID `expanded-search` endpoint: institution-targeted search, built into 00b_enrich_orcid.py (2026-08-21)
+
+Investigating why `00b_enrich_orcid.py`'s existing search kept giving up on common names (12
+real UNRESOLVED cases upstream all trace to `confidence='too_common'`, which short-circuits
+*before* the AU-country-filter step ever runs, at `num_found > TOO_COMMON=10` -- confirmed
+directly, not assumed, by reading `_resolve_results()`) led to discovering ORCID's v3.0
+`expanded-search` endpoint, distinct from the plain `/search/` endpoint this script has always
+used. It supports `affiliation-org-name` (plus `ror-org-id`/`ringgold-org-id`/`grid-org-id`) as
+a query field and returns `institution-name` directly in the result -- no per-candidate
+`/record` fetch needed to check affiliation, unlike the existing country-filter path.
+
+**Empirically characterized before building anything** (a live case, `family-name:Zhao AND
+given-names:Jing`, ORCID already known independently): `affiliation-org-name` phrase matching
+is case/punctuation-insensitive but **word-order-sensitive**, with **no synonym expansion** --
+matches only the literal string a person's own employment entry contains. ARC's own `admin_org`
+legal name ("The University of New South Wales") does NOT match a real employee's actual entry
+("UNSW Sydney") -- zero hits -- while `admin_orgs.csv`'s existing `institution_name` column
+(OpenAlex's own naming convention, already built for a different purpose) does. This is why
+`_search_by_institution()` searches on `institution_name`, not ARC's raw `admin_org`.
+
+**Built**: `load_admin_org_to_institution_name()`, `_query_expanded()`,
+`_search_by_institution()` (tries each institution a name-pair's own ARC grants were
+administered at, in turn, requiring an exact single hit -- 2+ hits at one institution is treated
+as inconclusive, not resolved arbitrarily, since this project has already found real cases of
+common-name collisions *within* one institution). Wired into `_search_orcid()` as the first
+attempt, before the existing name-only search -- `main()` now builds a `name_pair ->
+[institution_name, ...]` map from `investigators_raw.parquet` joined to `grants_flat.parquet`,
+resolved through `admin_orgs.csv`. Verified via `--dry-run`: runs end-to-end with no errors,
+record_cache size unchanged as expected (no live calls in dry-run mode).
+
+**A larger "cache every HEP roster" alternative was investigated and set aside** (real
+numbers, not the user's own ~50K estimate): pagination via `start`/`rows` works cleanly
+(confirmed no overlap between pages) and the real max page size is between 1,000 and 1,200
+rows/request (1,000 confirmed working, 2,000 returns HTTP 400). But the actual total across all
+42 real Australian HEP institutions is **260,907** ORCID records (Melbourne 25,329, Sydney
+21,339, Monash 21,276, UQ 20,582 alone), not ~50,000 -- a full listing crawl would take minutes,
+but fetching a full `/record` for all 260,907 (mostly people with zero connection to any ARC
+investigator) would take an estimated 15-18 hours, mostly wasted. Set aside as a rabbit hole
+relative to the actual task (resolving ~120 flagged ACIFs) per direct user redirection; the
+already-built targeted per-person `expanded-search` approach only queries for the ~12,000
+people actually needed.
+
+**Population effect of everything in this session's ORCID-investigation batch**: UNRESOLVED
+126->120 after the last full rerun (confirmed splits above); a systematic biography+employment
+check across the remaining 82 ORCID-bearing UNRESOLVED clusters found **44 more real,
+institution-corroborated split candidates** (same evidence signature as the confirmed cases
+above -- ORCID's own employment matches one of a cluster's grant institutions and not the
+others), 3 likely-fine (full institution overlap, probably genuine career mobility), 4 needing
+individual attention (zero overlap, though 2 of those may just be a "University of New South
+Wales" vs "UNSW Sydney" string-matching artifact in the diagnostic script itself, not a real
+mismatch -- not yet re-checked), and 10 genuinely ORCID-exhausted (no biography, no employment
+data on file at all). The 44 are queued for recording, not yet applied -- last thing discussed
+before this session's checkpoint, deliberately paused to decide full-detail-per-case vs a
+streamlined batch-recording approach before proceeding.
+
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
 

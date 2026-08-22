@@ -6,10 +6,19 @@ Authenticated ORCID Public API client with disk caching.
 Uses the registered ORCID Public API client (ORCID_CLIENT_ID/ORCID_CLIENT_SECRET in .env,
 obtained 2026-08-18) via OAuth client-credentials, not anonymous access -- anonymous access hit
 ORCID's daily quota during 00b_enrich_orcid.py's original run (CLAUDE.md, "2026-08-08
-follow-up"), a registered client should clear that wall. Kept as a separate module from
-src/utils/orcid_cache.py (the existing anonymous, per-file-JSON cache used by
-00b_enrich_orcid.py/05_orcid_assist.py) rather than merged into it -- this one authenticates
-and that one doesn't; not changing 00b's already-working behavior as a side effect of this.
+follow-up"), a registered client clears that wall.
+
+2026-08-21: this is now the SOLE ORCID /record cache for the whole project. Previously three
+independent stores existed (this one; 00b_enrich_orcid.py's own diskcache.Cache at
+DISKCACHE_DIR/orcid_records; and src/utils/orcid_cache.py's per-file JSON store under
+PROCESSED_DATA/orcid_cache/, used by 05_orcid_assist.py) and had silently diverged (10,455 vs
+18,099 vs 4,216 entries with real, non-overlapping content). All three were migrated into this
+cache (seed_from_anonymous_cache() for the diskcache, a one-off script for the per-file JSON
+store) and both 00b_enrich_orcid.py and 05_orcid_assist.py now fetch/cache through this module's
+functions -- there is exactly one place ORCID records are stored going forward.
+src/utils/orcid_cache.py's fetch_orcid()/per-file mechanism is retired; its pure accessor
+functions (orcid_addresses, orcid_keywords, orcid_external_ids, orcid_works_count) are unchanged
+and still used, since those operate on an already-fetched record dict regardless of cache origin.
 
 Cache: diskcache.Cache (user's stated preference) at
 DISKCACHE_DIR/orcid_records_authenticated -- one entry per ORCID, the full /record response
@@ -78,14 +87,16 @@ def default_cache() -> diskcache.Cache:
 
 
 def seed_from_anonymous_cache(cache: diskcache.Cache | None = None) -> int:
-    """One-time (re-runnable) backfill from the older, pre-existing anonymous-access cache
-    (src/utils/orcid_cache.py / 00b_enrich_orcid.py's own diskcache store,
-    DISKCACHE_DIR/orcid_records -- 10,413 entries as of 2026-08-18, 3 of them error responses).
-    Same /record endpoint, same response shape, auth only affects the request not the data --
-    confirmed directly (2026-08-18) by inspecting a real cached entry -- so there is no reason
-    to re-fetch anyone already fetched there. Skips error entries (a fresh authenticated fetch
-    is cheap and might succeed where the old anonymous one didn't) and anyone already present in
-    the target cache. Returns the number of records actually copied."""
+    """Re-runnable backfill from the older, pre-existing anonymous-access diskcache
+    (00b_enrich_orcid.py's own store before the 2026-08-21 consolidation,
+    DISKCACHE_DIR/orcid_records). Same /record endpoint, same response shape, auth only affects
+    the request not the data -- confirmed directly (2026-08-18) by inspecting a real cached
+    entry -- so there is no reason to re-fetch anyone already fetched there. Skips error entries
+    (a fresh authenticated fetch is cheap and might succeed where the old anonymous one didn't)
+    and anyone already present in the target cache. Returns the number of records actually
+    copied. Left in place, still re-runnable, in case that old cache directory ever gains new
+    entries from somewhere -- but as of the 2026-08-21 consolidation, nothing in this codebase
+    writes to it anymore, so a 0 return is the expected steady state."""
     cache = cache or default_cache()
     old = diskcache.Cache(str(DISKCACHE_DIR / "orcid_records"))
     n_copied = 0
