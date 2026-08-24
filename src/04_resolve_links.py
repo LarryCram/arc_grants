@@ -196,7 +196,12 @@ def main():
     deferred_rows = []
 
     for arc_id, group in ambig.groupby("arc_id"):
-        all_oax = set(group["oax_id"])
+        # sorted, not set() -- set() iteration order is randomized per-process
+        # (PYTHONHASHSEED), and this feeds max(wcs, key=wcs.get) below, whose tie-break (two
+        # candidates with equal works_count) would otherwise silently differ run to run. Same
+        # class of bug found and fixed 2026-08-23 in awards_cif.py's _name_forms() and
+        # dedup_oax_candidates().
+        all_oax = sorted(set(group["oax_id"]))
 
         # Step 0: OAX same-ORCID pre-dedup — two OAX IDs sharing an ORCID are
         # split records of the same person; keep the dominant one (>80% of group
@@ -222,7 +227,7 @@ def main():
                 "arc_id": r["arc_id"], "oax_id": r["oax_id"],
                 "match_probability": r["match_probability"],
                 "resolved_by": "oax_orcid_dedup",
-                "secondary_oax_ids": list(all_oax - {r["oax_id"]}),
+                "secondary_oax_ids": [x for x in all_oax if x != r["oax_id"]],
             })
             continue
 
@@ -236,7 +241,7 @@ def main():
         # when one member carries an ORCID (even if the ARC person lacks one), and
         # use the ORCID-bearing member's identity to exclude out-of-field namesakes.
         topic_to_oax_ids = defaultdict(list)
-        for oax_id in set(group["oax_id"]):
+        for oax_id in sorted(set(group["oax_id"])):
             for t in _lst(oax_topics.get(oax_id)):
                 topic_to_oax_ids[t].append(oax_id)
         # Protect any OAX record that matches the ARC person's own ORCID.
@@ -267,7 +272,7 @@ def main():
                 "arc_id": r["arc_id"], "oax_id": r["oax_id"],
                 "match_probability": r["match_probability"],
                 "resolved_by": "oax_topic_dedup",
-                "secondary_oax_ids": list(all_oax - {r["oax_id"]}),
+                "secondary_oax_ids": [x for x in all_oax if x != r["oax_id"]],
             })
             continue
 
@@ -287,7 +292,7 @@ def main():
                 "arc_id": r["arc_id"], "oax_id": r["oax_id"],
                 "match_probability": r["match_probability"],
                 "resolved_by": "name_filter",
-                "secondary_oax_ids": list(all_oax - {r["oax_id"]}),
+                "secondary_oax_ids": [x for x in all_oax if x != r["oax_id"]],
             })
             continue
 
@@ -298,7 +303,7 @@ def main():
             resolved_rows.append({
                 "arc_id": r["arc_id"], "oax_id": r["oax_id"],
                 "match_probability": r["match_probability"], "resolved_by": "orcid",
-                "secondary_oax_ids": list(all_oax - {r["oax_id"]}),
+                "secondary_oax_ids": [x for x in all_oax if x != r["oax_id"]],
             })
             continue
 
@@ -318,7 +323,7 @@ def main():
                 resolved_rows.append({
                     "arc_id": r["arc_id"], "oax_id": r["oax_id"],
                     "match_probability": r["match_probability"], "resolved_by": "inst_gate",
-                    "secondary_oax_ids": list(all_oax - {r["oax_id"]}),
+                    "secondary_oax_ids": [x for x in all_oax if x != r["oax_id"]],
                 })
                 continue
 
@@ -350,7 +355,7 @@ def main():
             resolved_rows.append({
                 "arc_id": r["arc_id"], "oax_id": r["oax_id"],
                 "match_probability": r["match_probability"], "resolved_by": by,
-                "secondary_oax_ids": list(all_oax - {r["oax_id"]}),
+                "secondary_oax_ids": [x for x in all_oax if x != r["oax_id"]],
             })
             continue
 
@@ -364,7 +369,7 @@ def main():
                 resolved_rows.append({
                     "arc_id": r["arc_id"], "oax_id": r["oax_id"],
                     "match_probability": r["match_probability"], "resolved_by": "works_count",
-                    "secondary_oax_ids": list(all_oax - {r["oax_id"]}),
+                    "secondary_oax_ids": [x for x in all_oax if x != r["oax_id"]],
                 })
                 continue
 
@@ -409,7 +414,7 @@ def main():
         sub_hc_rescue["works_count"] = sub_hc_rescue["oax_id"].map(sub_oax_works).fillna(0).astype(int)
 
         for arc_id, grp in sub_hc_rescue.groupby("arc_id"):
-            all_sub = set(grp["oax_id"])
+            all_sub = sorted(set(grp["oax_id"]))  # sorted, not set() -- see all_oax above
             compat = grp["oax_id"].apply(lambda oid: _names_compat(arc_id, oid))
             grp = grp[compat]
             if len(grp) == 0:
@@ -423,7 +428,7 @@ def main():
                     "arc_id": r["arc_id"], "oax_id": r["oax_id"],
                     "match_probability": r["match_probability"],
                     "resolved_by": "name_filter",
-                    "secondary_oax_ids": list(all_sub - {r["oax_id"]}),
+                    "secondary_oax_ids": [x for x in all_sub if x != r["oax_id"]],
                 })
 
     resolved_rescue = pd.DataFrame(rescue_rows)

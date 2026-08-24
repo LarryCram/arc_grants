@@ -27,6 +27,7 @@ The Splink pipeline replaces the entire old multi-layer pipeline, archived at
   work or a hard-to-reacquire external source — hand-curated matching/override CSVs
   (`manual_resolutions.csv`, `manual_splits.csv`, `manual_splits_hand_counts.csv`,
   `manual_orcids.csv`, `manual_merges.csv`, `manual_name_corrections.csv`, `manual_orcid_corrections.csv`,
+  `manual_splits_by_grant.csv`, `manual_confirmed_not_suspicious.csv`,
   `enrichment_blocklist.csv`,
   `for_concordance.csv`, `for_divisions.csv`, `for_adjacent_divisions.csv`) plus the ANZSRC/Scopus/OpenAlex/ERA source
   `.xlsx` reference files. Previously split across `config/*.csv` (some git-tracked but
@@ -932,6 +933,200 @@ mismatch -- not yet re-checked), and 10 genuinely ORCID-exhausted (no biography,
 data on file at all). The 44 are queued for recording, not yet applied -- last thing discussed
 before this session's checkpoint, deliberately paused to decide full-detail-per-case vs a
 streamlined batch-recording approach before proceeding.
+
+## `manual_confirmed_not_suspicious.csv`: fixing a real "reviewed forever" loop (2026-08-23)
+
+Continuing the systematic UNRESOLVED review (now via `src/01a_diagnose.py --json/--detail`, new
+flags added this session that render each flagged cluster's own per-grant scheme/year/admin_org/
+FOR2020 list/co-investigator roster from `load_award_cif_items()` + `grants_flat.parquet` --
+reused by a published Artifact review sheet with a computed one-person-vs-split signal chip, per
+user direction not to recompute this ad hoc each time: "the info must be in pipeline output").
+Several confirmed splits this session (`LP0562243_XinMingChen` -- ORCID nephrology researcher at
+Sydney vs. a UNSW acoustics APDI externally confirmed via a real 2010 International Congress on
+Acoustics award report naming him alongside Joe Wolfe/John Smith; `DP240102286_DavidPrice` -- a
+2002 Melbourne performing-arts grant vs. a 2024 Melbourne applied-math/epidemiology grant, ruled
+out definitively once the 2024 ORCID-holder's own biography showed his Statistics PhD didn't even
+start until 2015; `LP100100437_RichardTaylor`, `DP0208353_PeterAnderson` (a UQ plant-immunity
+biochemist -- confirmed via a real bioRxiv preprint co-authored with the exact CI/PI pair on that
+grant -- split from a Melbourne paediatrics/public-health Peter Anderson), `DP0665616_MichaelAnderson`
+(a UWA psychologist vs. a University of Sydney arts/drama-education professor, externally
+confirmed via his own USyd profile), `DE160101207_ChristopherBrown` (an environmental scientist
+whose career moved Griffith->UTas around 2021 vs. a materials engineer who the raw ARC grant page
+itself shows was listed at Announcement then removed from the Current investigator snapshot),
+`DP1094070_JianLiu`) needed `manual_splits_by_grant.csv`, not plain `manual_splits.csv`, because
+the "same person" grants and the "different person" grant(s) shared an `institution_oax_id` in
+several of these cases -- a plain institution-based split could not separate them.
+
+**The loop the user caught**: after several of these splits landed, the *surviving, correctly-
+reunited* piece (e.g. `LP0776532_MichaelAnderson`, `DP1094070_JianLiu`) immediately came back as
+UNRESOLVED again -- not because the split was wrong, but because `is_suspicious_for2020()` is a
+pure, stateless function of a cluster's own current `full_name_key`/`for2020_codes`/`n_grants`,
+recomputed identically on every `01_prepare_arc.py` run with zero memory of prior human review.
+Splitting a cluster fixes its *membership*; it does nothing about the FOR2020-division-whitelist
+gap that made the surviving combination look suspicious in the first place, so the exact same
+flag fires again. User: "that is silly -- a recipe for going around in circles. Make it work
+properly."
+
+**Fix**: `data_persisted/manual_confirmed_not_suspicious.csv` (`cluster_id, notes`) -- same
+two-tier hand-curated-override convention as every other `manual_*.csv` in this project. Wired
+into `compute_reliability()` (`src/utils/awards_cif.py`, the sole place `resolution_status` is
+computed, per the earlier "sole core" consolidation): a listed `cluster_id` is forced `RESOLVED`
+regardless of `is_suspicious_for2020()`'s verdict, but a live `MULTI_ORCID` conflict still
+overrides even that -- a real ORCID clash is a hard data fact, not a heuristic false positive a
+human can pre-clear. `01a_diagnose.py`'s A3 check (which independently recomputes
+`is_suspicious_for2020` and must agree with A2's `resolution_status` count) updated with the same
+override, so it doesn't report a phantom mismatch against a cluster that's actually fine.
+Seeded with the two clusters that hit this loop this session. Same staleness profile as every
+other `cluster_id`-keyed manual override here (a future membership change could make an entry
+stop applying) -- but a lower-risk failure mode than `manual_splits.csv` going stale, since a
+stale entry here just means the flag reappears for re-review, not that anything gets silently
+mismerged. Verified: full rerun, `01a_diagnose.py` A2/A3 agree cleanly (112=112); 3 new tests in
+`tests/test_awards_cif.py::TestComputeReliability` (default-stays-unresolved, override-works,
+override-does-not-beat-MULTI_ORCID); 310/310 passing.
+
+## UNRESOLVED population driven to zero; a real cross-run non-determinism bug found and fixed (2026-08-23/24)
+
+Continuing the systematic review from 120 UNRESOLVED (start of session) down to **0** — every
+remaining case either confirmed as a genuine wrongful merge (split, `manual_splits.csv`) or
+confirmed as one real person (`manual_orcids.csv` when a real ORCID was found, or
+`manual_confirmed_not_suspicious.csv` when the FOR-code-division heuristic still fired despite
+decisive external confirmation). New review tooling built along the way, both now real,
+committed pipeline code rather than scratch scripts, per direct user correction ("why do you
+choose an ad hoc script? The info must be in pipeline output"):
+
+- **`src/01a_diagnose.py --detail <cluster_id>...` / `--json <cluster_id>...`** — a genuine
+  per-cluster review report (scheme/year/admin_org/full FOR2020 code list per grant, every
+  co-investigator with ORCID, sorted consistently -- target person's own rows first, then
+  co-investigators alphabetized by family name so the same person always renders in the same
+  order across every grant, making a shared name easy to spot at a glance) built from
+  `load_award_cif_items()` + `grants_flat.parquet`, the same canonical sources this file's A/B/C
+  checks already use -- not a fresh ad hoc join. `--json` feeds the same data into a published
+  Artifact review page (case cards with a computed one-person-vs-split signal, search/filter,
+  Claude's own per-case note alongside the raw evidence) for cases needing human judgement.
+- **`src/utils/orcid_bulk_lookup.py`** — queries the local Zenodo "Easy ORCID" bulk snapshot
+  (`/home/lc/s/orcid/orcid_persons.parquet` + `orcid_affiliations.parquet`, built earlier this
+  session, ~4.8M people / 12.1M affiliations) for name+institution candidate matches in
+  milliseconds, no rate limit -- the first thing to check before the live ORCID API or a manual
+  web search. Institution matching is exact against `admin_orgs.csv`'s own `institution_name`
+  column (not fuzzy against every alias -- an earlier loose-alias attempt this session produced
+  heavy false positives, e.g. a bare "University of Technology" alias for UTS matching unrelated
+  Chinese campuses). Directly found the `DP160101934_QingWang` (ANU computer scientist vs.
+  Melbourne forestry-geneticist) and `DP210102705_WeiShi` (Monash/WEHI bioinformatics professor
+  vs. Deakin economist) splits without needing a live API call or a web search. Known limitation,
+  confirmed directly: the snapshot has real coverage gaps (a frozen 2024 crawl, not live) --
+  several searches this session found the wrong or no candidate even for people who do have a
+  real ORCID (e.g. Yang Song's real ORCID, 0000-0003-1283-1672, wasn't in the snapshot at all;
+  found instead via a direct live-ORCID-page paste from the user).
+
+**A real, previously-undiagnosed non-determinism bug, found because the user pushed back hard on
+the resolved-cluster-count churning between reruns** ("it looks highly like a deep error
+somewhere", "we should have removed all the non-deterministic items like this already"). Traced
+to `_name_forms()` (`src/utils/awards_cif.py`): given-name tokens were deduplicated via
+`list(set(...))`, and `_first_name_canonical()` picks among them via `max(tokens, key=len)`. On a
+genuine length-tie between two given-name tokens (e.g. "Xiao"/"Dong" in "Xiao Dong Chen", both
+length 4 -- a common shape for two-part Chinese/Vietnamese/Burmese/German given names, not a rare
+edge case), `max()` returns whichever token iteration hit first -- but `set()` iteration order in
+CPython is randomized per-process (`PYTHONHASHSEED`), so two back-to-back `.venv/bin/python
+src/01_prepare_arc.py` invocations, with *zero* other changes, could and did pick a different
+token, flipping `full_name_key` (e.g. `"xiao_chen"` vs `"dong_chen"`), which flipped
+`is_suspicious_for2020()`'s rarity lookup, which flipped `resolution_status` itself. Reproduced
+directly (two clean reruns, full column diff) before touching anything, to confirm it was real
+and not user-CSV-edit noise from mid-session changes.
+
+**Fix**: `dict.fromkeys()` instead of `set()` in `_name_forms()` (order-preserving dedup -- the
+first-listed given-name token now deterministically wins any length tie, which is also the more
+correct semantic: the first-listed given name is usually the person's primary one). Same
+class of bug found and fixed in two more places once specifically audited for: `set(c.oax_candidates)`
+in `awards_cif.py::dedup_oax_candidates()` (feeding a `max(wcs, key=wcs.get)` works-count
+tie-break) and the mirrored logic in `04_resolve_links.py` (`set(group["oax_id"])`, 8 downstream
+`secondary_oax_ids` output sites all depending on it -- fixed to sorted lists throughout, since
+`group - removed`-style set arithmetic no longer type-checks once the base collection is a list).
+Also made `_build_awards_cif()`'s own `items`/`grant_ids` ordering and `compute_gap_candidates()`'s
+`gap_candidates` list ordering deterministic (found via a full column-by-column double-run diff
+after the main fix -- these were harmless *content*-identical ordering artifacts, not real bugs,
+but the user's explicit expectation was zero non-determinism of any kind, not just the
+consequential kind).
+
+**A full systematic audit of every `max(..., key=...)` call site in `src/`** (not just the one
+that happened to be caught) found: the fixed one above; the two dormant OAX-side siblings (now
+fixed); several already-safe sites (`00a_analyse_arc.py`'s list-based `_full_first`, cluster-level
+`family_names` maxes fed by `sorted({...})`, a FOR-token union-find fed by `sorted(full_forms)`);
+and confirmation that `02_prepare_oax.py`'s own `oax_name_arrays()` UDF had *already* been built
+correctly (explicit `dict[str, None]` insertion-ordered construction, with a comment naming this
+exact concern) in an earlier session -- the bug was specific to the ARC-side function that never
+got the same treatment, not a systemic pattern repeated everywhere.
+
+**Verification**: after the fix, four consecutive full-column diffs across independent
+back-to-back reruns (`awards_cif_arc_only.parquet`, every column except `provenance`) came back
+**byte-identical** -- zero differences of any kind, including cluster_id sets, grant membership,
+`full_name_key`, and `resolution_status`. This doesn't prove Splink's own documented EM/clustering
+non-determinism (~40/22,927 clusters, "suspected parallel floating-point summation order",
+previously investigated and parked) is *fully* gone -- one clean run pair doesn't rule out rarer
+residual drift -- but it strongly suggests this bug was responsible for a meaningful share of what
+had been attributed to that residual.
+
+**Confirmed splits this session** (each backed by real external evidence -- ORCID records,
+Scopus/Web of Science profiles, biographies, co-authored papers, raw ARC grant-page
+announcement/current snapshots -- never on pattern-matching alone): Xin-Ming Chen/Jer Ming Chen
+(clinical sciences vs. UNSW acoustics, externally confirmed via a real 2010 International Congress
+on Acoustics award report), David Price (Melbourne performing-arts 2002 vs. Melbourne
+applied-math/epidemiology 2024 -- ruled out definitively once the 2024 ORCID-holder's own PhD
+didn't start until 2015), Richard Taylor (UNSW/UNE public health vs. UQ materials physics), Peter
+Anderson (UQ plant-immunity biochemist, confirmed via a real bioRxiv preprint co-authored with the
+exact CI/PI pair on that grant, vs. Melbourne paediatrics), Michael Anderson (UWA psychologist vs.
+USyd arts/drama-education professor), Christopher Brown (environmental scientist, Griffith->UTas,
+vs. a materials engineer the raw ARC grant page itself shows was removed between the Announcement
+and Current investigator snapshots), Jian Liu (UQ->Curtin nanotechnology vs. Curtin chemical
+engineering), Qing Wang (ANU computer scientist vs. Melbourne forestry geneticist -- found via the
+new bulk ORCID lookup), Wei Shi (Monash/WEHI bioinformatics professor, featureCounts creator, vs.
+Deakin), Jie Wang (UQ physical chemist vs. Jie **Jin** Wang, a University of Sydney/Centre for Eye
+Research Australia epidemiologist -- ARC's raw data had truncated her full given name to just
+"Jie", confirmed via a real co-authored AusDiab Study paper listing her alongside the grant's own
+co-investigator Tien Wong), Michael Walsh (Sydney Indigenous-languages/culture context vs. a UWA
+herbicide-resistance weed scientist, later moved to Charles Sturt University's Gulbali Research
+Institute).
+
+**Confirmed single-person overrides** (`manual_confirmed_not_suspicious.csv`, real ORCID or
+biography found but the FOR-code-division heuristic still fires): Yang Song (AI/computer-vision
+DECRA+Future-Fellowship, then applied to a drowning-prevention public-health project with
+well-known UNSW AI researcher Toby Walsh -- ORCID found only after the plain name search gave up
+at 425 too-common candidates, before the institution-targeted search feature existed), Michael A P
+Taylor (University of South Australia 1991-2024, Scopus-confirmed senior transport-engineering
+researcher whose broad subject spread -- Business/Management, Economics, Environmental Science,
+Decision Sciences -- exactly matches his own 6-grant FOR-code spread), Hong-Yuan Liu (confirmed via
+a raw ARC grant-page announcement/current snapshot showing "Hong Liu" simply expanded to "Hong-Yuan
+Liu" on the same grant record, plus a real research-profile summary spanning materials/mechanical
+engineering topics matching all four of his grants), Ying Zhu (Melbourne HR-management professor
+turned UniSA Asian-business director -- "Asian labor laws" as a real specialization bridges the
+apparent management/law field gap), David Robert Walker AM FASSA FAHA (Deakin Professor of
+Australian Studies since 1991, a leading authority on Australian perceptions of Asia -- no ORCID
+exists for him, recorded via biography), Zhi-Yong Li (QUT ARC Future Fellow / honorary UQ
+professor, biomechanics of plaque rupture and stroke risk -- his own real institution, QUT, is one
+of three eligible orgs on the previously-ambiguous "Sydney" grant, resolving that multi-org
+ambiguity in favour of one person rather than against it).
+
+**A genuine, still-open structural limit found along the way, not chased further**:
+`DP200101970_ZhiYongLi`'s Sydney-administered grant has three eligible organisations (QUT/Sydney/
+UTS) with no per-investigator institution field in ARC's raw data at all -- resolved here only
+because the person's own real institution happened to independently match one of the three. A
+case where none of the eligible orgs matches anything external would be a genuine, unresolvable-
+from-this-data-source dead end, not a gap in review effort.
+
+**Final state**: `resolution_status` 22,950 RESOLVED / **0 UNRESOLVED**; `01a_diagnose.py`
+reports all hard checks passed (0 failures, down from the 501 at the start of the
+ARC-only/OAX-enriched pipeline split). 310/310 tests passing.
+
+**Separately clarified, not part of this work**: `reliability_tier == "4u"` (479 clusters) is a
+different axis entirely -- `resolution_status`/A2/A3 measure **over-merge** risk (did two
+different people get wrongly combined into one cluster), now fully clean. `4u` measures the
+opposite, **under-merge** risk (a single-grant, no-ORCID person whose surname collides with
+another cluster that a permissive compatibility check couldn't rule out as the same person) via
+`gap_candidates` -- the already-documented, still-open "no standalone merge() operator, under-merge
+is structurally undetectable today" gap (see "Next Priority" below). Spot-checked: `gap_candidates`
+lists everything *not disproven*, not everything *likely the same person* (e.g. one real cluster's
+candidate list includes 7 different given names sharing only the surname "Smith") -- 479 is an
+upper bound on possible under-merge, not a count of confirmed problems, and was not investigated
+further this session.
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.

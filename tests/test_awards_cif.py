@@ -537,6 +537,46 @@ class TestComputeReliability:
         out = compute_reliability([c])
         assert out[0].reliability_tier == "4u"
 
+    def _suspicious_cluster(self) -> AwardsCIF:
+        # "wei_wang" is a real, genuinely common full_name_key (tf ~7.5e-5, well above
+        # RARE_NAME_TF) in the production oax_tf_full_name.parquet table this function reads
+        # directly -- Civil Engineering (division 40) + Information Systems (division 46) is
+        # the same real division pair documented as NOT in ACCEPTABLE_DIVISION_PAIRS (the
+        # DE230100180_WeiWang case cluster_checks.py's own tests use), so this cluster is
+        # reliably flagged suspicious without needing to fake the tf lookup.
+        civil = _for2020("4005", "Civil engineering")
+        infosys = _for2020("4609", "Information systems")
+        return _build_awards_cif("A", [
+            _item("G1_A", full_name_key="wei_wang", for2020_codes=[civil]),
+            _item("G2_A", full_name_key="wei_wang", for2020_codes=[infosys]),
+        ])
+
+    def test_suspicious_cluster_stays_unresolved_by_default(self):
+        out = compute_reliability([self._suspicious_cluster()])
+        assert out[0].resolution_status == "UNRESOLVED"
+
+    def test_confirmed_not_suspicious_csv_overrides_to_resolved(self, tmp_path, monkeypatch):
+        csv_path = tmp_path / "manual_confirmed_not_suspicious.csv"
+        csv_path.write_text("cluster_id,notes\nA,test override\n")
+        monkeypatch.setattr(
+            "src.utils.awards_cif._MANUAL_CONFIRMED_NOT_SUSPICIOUS_CSV", csv_path
+        )
+        out = compute_reliability([self._suspicious_cluster()])
+        assert out[0].resolution_status == "RESOLVED"
+
+    def test_confirmed_not_suspicious_does_not_override_multi_orcid(self, tmp_path, monkeypatch):
+        # A live ORCID conflict is a hard data fact, not a heuristic false positive a human
+        # can pre-clear -- it must still force UNRESOLVED even if this cluster_id is listed.
+        csv_path = tmp_path / "manual_confirmed_not_suspicious.csv"
+        csv_path.write_text("cluster_id,notes\nA,test override\n")
+        monkeypatch.setattr(
+            "src.utils.awards_cif._MANUAL_CONFIRMED_NOT_SUSPICIOUS_CSV", csv_path
+        )
+        c = self._suspicious_cluster()
+        c.orcid_status = "MULTI_ORCID"
+        out = compute_reliability([c])
+        assert out[0].resolution_status == "UNRESOLVED"
+
 
 # ---------------------------------------------------------------------------
 # persist_awards_cif / load_awards_cif -- round-trip through a real parquet file (tmp_path),

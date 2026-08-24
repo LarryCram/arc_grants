@@ -1,0 +1,82 @@
+"""
+src/utils/orcid_bulk_lookup.py
+
+Query the local Zenodo "Easy ORCID" bulk snapshot (orcid_persons.parquet +
+orcid_affiliations.parquet, /home/lc/s/orcid/ -- see CLAUDE.md's "ORCID Public API
+integration"/Zenodo dataset sections) for name+institution candidate matches. Built to
+support the UNRESOLVED-cluster review: this local snapshot answers in milliseconds with
+no rate limit, so it's the first thing to check before reaching for the live ORCID API
+or asking for manual web verification -- not a replacement for either, since the
+snapshot has real, known coverage gaps (see CLAUDE.md: per-record ROR grounding is
+sparse; this is a frozen 2024 crawl, not live).
+
+Institution matching is EXACT against org_name (case-insensitive), not substring
+against every admin_orgs.csv alias -- an earlier loose-alias attempt this session
+produced heavy false positives (a bare "University of Technology" alias for UTS
+matching unrelated Chinese campuses). Callers should pass admin_orgs.csv's own
+institution_name values (OpenAlex-style names like "UNSW Sydney"), which is what real
+ORCID employment entries actually use -- not ARC's raw admin_org legal name.
+
+CLI: .venv/bin/python -m src.utils.orcid_bulk_lookup "First" "Last" [institution ...]
+"""
+import sys
+
+import duckdb
+
+ORCID_PERSONS = "/home/lc/s/orcid/orcid_persons.parquet"
+ORCID_AFFIL = "/home/lc/s/orcid/orcid_affiliations.parquet"
+
+
+def find_candidates(first_name: str, family_name: str, institution_names: list[str] | None = None) -> list[dict]:
+    """Return every local-snapshot person whose name or an alias matches
+    "{first_name} {family_name}" exactly (case-insensitive), each with its full
+    employment/education history and which entries (if any) match institution_names."""
+    con = duckdb.connect()
+    full = f"{first_name} {family_name}"
+    rows = con.execute(
+        """
+        SELECT p.orcid, p.name, p.aliases, p.n_pubmed_works
+        FROM read_parquet(?) p
+        WHERE lower(p.name) = lower(?)
+           OR list_contains(list_transform(p.aliases, x -> lower(x)), lower(?))
+        """,
+        [ORCID_PERSONS, full, full],
+    ).fetchall()
+
+    wanted = {i.lower() for i in institution_names} if institution_names else set()
+    candidates = []
+    for orcid, name, aliases, n_works in rows:
+        affil = con.execute(
+            """
+            SELECT kind, org_name, start, "end", role
+            FROM read_parquet(?)
+            WHERE orcid = ?
+            ORDER BY start
+            """,
+            [ORCID_AFFIL, orcid],
+        ).fetchall()
+        matched = [a for a in affil if a[1] and a[1].lower() in wanted]
+        candidates.append({
+            "orcid": orcid, "name": name, "aliases": list(aliases) if aliases is not None else [],
+            "n_pubmed_works": n_works, "affiliations": affil, "matched_institutions": matched,
+        })
+    return candidates
+
+
+def main() -> None:
+    if len(sys.argv) < 3:
+        print('usage: python -m src.utils.orcid_bulk_lookup "First" "Last" [institution ...]')
+        return
+    first, family = sys.argv[1], sys.argv[2]
+    insts = sys.argv[3:] or None
+    candidates = find_candidates(first, family, insts)
+    print(f"{len(candidates)} candidate(s) for '{first} {family}'" + (f" (checking against {insts})" if insts else ""))
+    for c in candidates:
+        tag = "  <-- INSTITUTION MATCH" if c["matched_institutions"] else ""
+        print(f"\n{c['orcid']}  {c['name']}  aliases={c['aliases']}  pubmed_works={c['n_pubmed_works']}{tag}")
+        for kind, org, start, end, role in c["affiliations"]:
+            print(f"    {kind:10s} {org}  {start or '?'}-{end or 'present'}  {role or ''}")
+
+
+if __name__ == "__main__":
+    main()

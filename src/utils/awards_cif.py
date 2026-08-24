@@ -64,6 +64,7 @@ _MANUAL_ORCIDS_CSV = _DATA_PERSISTED / "manual_orcids.csv"
 _MANUAL_MERGES_CSV = _DATA_PERSISTED / "manual_merges.csv"
 _ENRICHMENT_BLOCKLIST_CSV = _DATA_PERSISTED / "enrichment_blocklist.csv"
 _MANUAL_RESOLUTIONS_CSV = _DATA_PERSISTED / "manual_resolutions.csv"
+_MANUAL_CONFIRMED_NOT_SUSPICIOUS_CSV = _DATA_PERSISTED / "manual_confirmed_not_suspicious.csv"
 
 CLUSTER_THRESHOLD = 0.9  # same value as 01_prepare_arc.py -- high precision, prefer splitting over merging
 RARE_NAME_TF = 2e-6  # OAX full_name_key TF below this -> rare name (tier 2 vs 3). Distinct from
@@ -260,13 +261,22 @@ def _name_forms(first_name: str, family_name: str) -> tuple[list[str], list[str]
     f_toks = name_part_tokens(hn.first) + name_part_tokens(hn.middle)
     fam_norm = strip_diacriticals(hn.last).lower().strip() if hn.last else ""
 
-    first_names = list(set(f_toks + [t[0] for t in f_toks if t]))
+    # dict.fromkeys(), not set() -- set() iteration order is randomized per-process
+    # (PYTHONHASHSEED), and _first_name_canonical()'s max(key=len) breaks length-ties by
+    # iteration order, so a set() here made which given-name token "wins" a tie
+    # non-deterministic across separate pipeline runs (found live 2026-08-23: "Xiao Dong
+    # Chen"/"Son Lam Phung"-style equal-length compound given names flipped full_name_key,
+    # which flipped is_suspicious_for2020()'s verdict, between two back-to-back reruns with
+    # zero other changes). dict.fromkeys() preserves first-occurrence order, so the
+    # first-listed given-name token deterministically wins any length tie -- also the more
+    # correct semantic (the first-listed given name is usually the person's primary one).
+    first_names = list(dict.fromkeys(f_toks + [t[0] for t in f_toks if t]))
     family_names = [fam_norm] if fam_norm else []
 
     if not f_toks and fam_norm:
         first_names.append(fam_norm[0])
 
-    return list(set(first_names)), family_names
+    return list(dict.fromkeys(first_names)), family_names
 
 
 def _first_initial(first_names: list[str]) -> str | None:
@@ -641,6 +651,22 @@ def _build_awards_cif(cluster_id: str, items: list[AwardCIFItem]) -> AwardsCIF:
     """Aggregate a group of items into one AwardsCIF -- mirrors 01_prepare_arc.py's
     _aggregate_clusters(), sorted deduplicated lists per field, modal full_name_key."""
     orcids = sorted({it.orcid for it in items if it.orcid})
+    # Counter.most_common(1) breaks ties by insertion order (a stable property of Python's
+    # dict/heapq machinery) -- but insertion order here is `items`' own order, which is NOT
+    # guaranteed stable run-to-run (upstream Splink clustering has documented, accepted
+    # non-determinism -- see CLAUDE.md's EM-training/seed notes). Found live 2026-08-23: a
+    # genuine 50/50 first-name tie ("Xiao Dong Chen" tokenizing to "xiao"/"dong" with equal
+    # frequency across his own grant records) made full_name_key flip between "xiao_chen" and
+    # "dong_chen" across two back-to-back reruns with zero other changes, which flipped
+    # is_suspicious_for2020()'s verdict and therefore resolution_status. Sorting by unique_id
+    # first fixes the *tie-break*, not Splink's own upstream clustering drift (out of scope,
+    # already a parked, accepted residual) -- this only guarantees that whichever items DO end
+    # up in a cluster together always produce the same full_name_key, regardless of what order
+    # they arrived in.
+    # Canonical order for the whole object, not just the full_name_key computation below --
+    # grant_ids=[it.unique_id for it in items] (and anything else iterating .items without its
+    # own explicit sort) inherits this determinism for free rather than needing its own fix.
+    items = sorted(items, key=lambda it: it.unique_id)
     fnk_counts = Counter(it.full_name_key for it in items if it.full_name_key)
 
     return AwardsCIF(
@@ -1780,7 +1806,12 @@ def dedup_oax_candidates(
     for c in clusters:
         if len(c.oax_candidates) < 2:
             continue
-        group = set(c.oax_candidates)
+        # sorted, not set() -- set() iteration order is randomized per-process
+        # (PYTHONHASHSEED), and this feeds max(wcs, key=wcs.get) below, whose tie-break (two
+        # candidates with equal works_count) would otherwise silently differ across runs. Same
+        # class of bug found and fixed 2026-08-23 in _name_forms() (see that function's
+        # docstring); dedup itself doesn't need any particular order, just a stable one.
+        group = sorted(set(c.oax_candidates))
         removed: set[str] = set()
 
         orcid_to_ids: dict[str, list[str]] = defaultdict(list)
@@ -1796,7 +1827,7 @@ def dedup_oax_candidates(
                 if total > 0 and wcs[best] / total > TOP_CUT:
                     removed.update(oid for oid in ids if oid != best)
 
-        remaining = group - removed
+        remaining = [oid for oid in group if oid not in removed]  # list, not set - to keep this same order-preserving
         topic_to_ids: dict[str, list[str]] = defaultdict(list)
         for oid in remaining:
             for t in oax_topics.get(oid, []):
@@ -1812,7 +1843,7 @@ def dedup_oax_candidates(
                 )
 
         if removed:
-            c.oax_candidates = sorted(group - removed)
+            c.oax_candidates = sorted(oid for oid in group if oid not in removed)
             c.record_event("oax_split_record_dedup", removed=sorted(removed))
 
     return clusters
@@ -1863,8 +1894,13 @@ def compute_gap_candidates(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     def _fnm(family_names):
         return max(family_names, key=len) if family_names else None
 
+    # Sorted by cluster_id, not clusters' own incoming order -- that order isn't guaranteed
+    # stable run-to-run, and it directly determined gap_candidates' list order below (append
+    # order within each family-name group). Content was already correct (same set every run);
+    # this just makes the order deterministic too, matching the same fix applied to
+    # full_name_key/grant_ids in _build_awards_cif().
     by_fnm: dict[str, list[AwardsCIF]] = defaultdict(list)
-    for c in clusters:
+    for c in sorted(clusters, key=lambda c: c.cluster_id):
         fnm = _fnm(c.family_names)
         if fnm:
             by_fnm[fnm].append(c)
@@ -1893,10 +1929,37 @@ def compute_gap_candidates(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
                     n_compat += 1
 
     for c in clusters:
-        c.gap_candidates = gap[c.cluster_id]
+        c.gap_candidates = sorted(gap[c.cluster_id])
 
     print(f"  Gap 1: {n_compat} compatible pairs, {n_incompat} incompatible pairs")
     return clusters
+
+
+def _load_confirmed_not_suspicious() -> set[str]:
+    """data_persisted/manual_confirmed_not_suspicious.csv -- cluster_ids a human has reviewed
+    (typically via external evidence: co-authorship, employment history, news/press coverage)
+    and confirmed are genuinely one person, despite is_suspicious_for2020() flagging them.
+
+    Exists because is_suspicious_for2020() is a pure, stateless function of a cluster's own
+    current full_name_key/for2020_codes/n_grants -- it is recomputed identically on every
+    01_prepare_arc.py run and has no memory of prior human review. Without this file, a
+    confirmed-correct cluster that happens to span FOR2020 divisions outside
+    ACCEPTABLE_DIVISION_PAIRS would be re-flagged UNRESOLVED forever, including immediately
+    after a manual_splits.csv split correctly separates it from a wrongly-merged companion --
+    the split fixes the membership, not the whitelist gap that flagged the surviving piece.
+    Found and fixed 2026-08-23 after exactly that happened to several splits in one session
+    (Michael Anderson's arts-education pair, Jian Liu's nanotechnology-career pieces) --
+    user: "that is silly - a recipe for going around in circles."
+
+    Deliberately NOT a substitute for fixing division_mismatch_for2020()'s own whitelist gaps
+    (see cluster_checks.py's module docstring) -- this is the same two-tier pattern as every
+    other data_persisted/manual_*.csv: a human-confirmed override recorded permanently,
+    reviewed once, not re-litigated on every run. Keyed on cluster_id like manual_splits.csv/
+    manual_orcids.csv -- stable as long as the cluster's own grant_ids don't change again."""
+    if not _MANUAL_CONFIRMED_NOT_SUSPICIOUS_CSV.exists():
+        return set()
+    with open(_MANUAL_CONFIRMED_NOT_SUSPICIOUS_CSV, newline="") as f:
+        return {row["cluster_id"].strip() for row in csv.DictReader(f) if row["cluster_id"].strip()}
 
 
 def compute_reliability(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
@@ -1910,6 +1973,10 @@ def compute_reliability(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     2026-08-16, since an ORCID on a minority of a cluster's own grant records was found to say
     nothing about the records that don't carry it), or has MULTI_ORCID (an unresolved ORCID
     conflict, forced UNRESOLVED separately below regardless of is_suspicious_for2020's verdict).
+    A cluster_id listed in data_persisted/manual_confirmed_not_suspicious.csv is always RESOLVED
+    regardless of is_suspicious_for2020's verdict -- see _load_confirmed_not_suspicious() -- but
+    MULTI_ORCID still overrides even that, since a live ORCID conflict is a hard data fact, not
+    a heuristic false positive a human can pre-clear.
 
     Division check (2026-08-13): uses cluster_checks.is_suspicious_for2020() -- the same shared
     function 01_prepare_arc.py's production pipeline now uses too, both built on for2020_codes'
@@ -1928,9 +1995,12 @@ def compute_reliability(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     """
     tf_df = pd.read_parquet(PROCESSED_DATA / "oax_tf_full_name.parquet")
     tf_lookup = dict(zip(tf_df["full_name_key"], tf_df["tf_full_name_key"]))
+    confirmed_not_suspicious = _load_confirmed_not_suspicious()
 
     for c in clusters:
         suspicious = is_suspicious_for2020(c.full_name_key, c.for2020_codes, tf_lookup, c.n_grants)
+        if suspicious and c.cluster_id in confirmed_not_suspicious:
+            suspicious = False
         c.resolution_status = "UNRESOLVED" if suspicious else "RESOLVED"
         if c.orcid_status == "MULTI_ORCID":
             c.resolution_status = "UNRESOLVED"

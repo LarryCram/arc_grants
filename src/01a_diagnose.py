@@ -20,7 +20,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import PROCESSED_DATA
 from src.utils.cluster_checks import is_suspicious_for2020
-from src.utils.awards_cif import load_award_cif_items
+from src.utils.awards_cif import load_award_cif_items, AwardCIFItem, _load_confirmed_not_suspicious
 
 PASS = "✓"
 FAIL = "✗"
@@ -46,6 +46,78 @@ def _show_clusters(df: pd.DataFrame, n: int = 10) -> None:
         names  = "; ".join(r["full_names"][:4])
         orcids = ", ".join(r["orcids"]) if list(r["orcids"]) else "—"
         print(f"       {r['cluster_id']}  n={r['n_grants']}  [{orcids}]  {names}")
+
+
+def _cluster_detail_data(cluster_id: str, gmap: pd.DataFrame, items: list[AwardCIFItem], grants: pd.DataFrame) -> dict:
+    """Structured per-grant breakdown for one cluster: scheme/year/admin_org/FOR per grant,
+    plus every co-investigator recorded on that grant (across ALL clusters, not just this
+    one) with their own ORCID if on file. Built from load_award_cif_items()'s own items list
+    and grants_flat.parquet -- the same sources this file's checks already treat as canonical
+    -- rather than a fresh ad hoc join, so it can't drift from what A/B/C are actually
+    testing. Returns a dict (not text) so both --detail's console output and any downstream
+    review report render from the same one assembly. For manual review of A2/A3
+    (UNRESOLVED / is_suspicious_for2020) hits."""
+    my_uids = set(gmap[gmap["cluster_id"] == cluster_id]["unique_id"])
+    my_items = [it for it in items if it.unique_id in my_uids]
+    if not my_items:
+        return {"cluster_id": cluster_id, "found": False}
+
+    grant_codes = sorted({it.grant_code for it in my_items})
+    by_grant: dict[str, list[AwardCIFItem]] = {}
+    for it in items:
+        by_grant.setdefault(it.grant_code, []).append(it)
+
+    grant_rows = []
+    for gc in grant_codes:
+        grow = grants[grants["grant_code"] == gc]
+        scheme = grow.iloc[0]["scheme_name"] if len(grow) else None
+        year_val = grow.iloc[0]["funding_commence_year"] if len(grow) else None
+        year = int(year_val) if pd.notna(year_val) else None
+        admin_org = grow.iloc[0]["admin_org"] if len(grow) else None
+        mine_here = [it for it in my_items if it.grant_code == gc]
+        for_codes = mine_here[0].for2020_codes if mine_here else []
+        for_list = [{"code": e["code"], "name": e["name"], "is_primary": e.get("is_primary", False)} for e in for_codes]
+        if not for_list and mine_here and mine_here[0].for_name:
+            for_list = [{"code": mine_here[0].for_code, "name": mine_here[0].for_name, "is_primary": True}]
+        investigators = [
+            {
+                "first_name": it.first_name, "family_name": it.family_name,
+                "role_code": it.role_code, "orcid": it.orcid,
+                "is_this_cluster": it.unique_id in my_uids,
+            }
+            for it in sorted(
+                by_grant.get(gc, []),
+                key=lambda x: (x.unique_id not in my_uids, x.family_name.lower(), x.first_name.lower()),
+            )
+        ]
+        grant_rows.append({
+            "grant_code": gc, "scheme": scheme, "year": year, "admin_org": admin_org,
+            "for_codes": for_list, "investigators": investigators,
+        })
+
+    return {
+        "cluster_id": cluster_id, "found": True,
+        "n_grants": len(grant_codes),
+        "orcids_on_file": sorted({it.orcid for it in my_items if it.orcid}),
+        "grants": grant_rows,
+    }
+
+
+def _cluster_detail(cluster_id: str, gmap: pd.DataFrame, items: list[AwardCIFItem], grants: pd.DataFrame) -> str:
+    """Text rendering of _cluster_detail_data(), for console/--detail use."""
+    d = _cluster_detail_data(cluster_id, gmap, items, grants)
+    if not d["found"]:
+        return f"### {cluster_id}\n(no items found under this cluster_id)"
+    lines = [f"### {d['cluster_id']}  ({d['n_grants']} grants)"]
+    lines.append(f"ARC ORCID(s) on file: {d['orcids_on_file'] or 'none'}")
+    for g in d["grants"]:
+        for_str = ", ".join(f"{e['code']}:{e['name']}" for e in g["for_codes"]) or "?"
+        lines.append(f"- **{g['grant_code']}** ({g['scheme']}, {g['year']}, {g['admin_org']}) — FOR: {for_str}")
+        for it in g["investigators"]:
+            marker = "  <== this cluster" if it["is_this_cluster"] else ""
+            o = it["orcid"] or "-"
+            lines.append(f"    {it['first_name']} {it['family_name']} ({it['role_code']}, ORCID {o}){marker}")
+    return "\n".join(lines)
 
 
 # ── load data ──────────────────────────────────────────────────────────────────
@@ -90,7 +162,9 @@ def _load() -> tuple:
     tf_df = pd.read_parquet(PROCESSED_DATA / "oax_tf_full_name.parquet")
     tf_lookup = dict(zip(tf_df["full_name_key"], tf_df["tf_full_name_key"]))
 
-    return persons, gmap, inv_f, prep, tf_lookup
+    grants = pd.read_parquet(PROCESSED_DATA / "grants_flat.parquet")
+
+    return persons, gmap, inv_f, prep, tf_lookup, items, grants
 
 
 # ── A: false positives ─────────────────────────────────────────────────────────
@@ -113,9 +187,13 @@ def check_A(persons, gmap, inv_f, prep, tf_lookup) -> int:
         failures += len(unres)
         _show_clusters(unres)
 
-    # A3: is_suspicious_for2020 across ALL clusters (must agree with A2)
+    # A3: is_suspicious_for2020 across ALL clusters (must agree with A2) -- same
+    # manual_confirmed_not_suspicious.csv override compute_reliability() applies, or a
+    # human-reviewed cluster would show here as a phantom A2/A3 disagreement forever.
+    confirmed_not_suspicious = _load_confirmed_not_suspicious()
     suspect = persons[persons.apply(
-        lambda r: is_suspicious_for2020(r["full_name_key"], r["for2020_codes"], tf_lookup, r["n_grants"]),
+        lambda r: is_suspicious_for2020(r["full_name_key"], r["for2020_codes"], tf_lookup, r["n_grants"])
+        and r["cluster_id"] not in confirmed_not_suspicious,
         axis=1,
     )]
     icon = FAIL if len(suspect) else PASS
@@ -317,10 +395,22 @@ def check_C(persons, gmap, inv_f) -> int:
 # ── main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    persons, gmap, inv_f, prep, tf_lookup, items, grants = _load()
+
+    if len(sys.argv) > 1 and sys.argv[1] == "--detail":
+        for cid in sys.argv[2:]:
+            print(_cluster_detail(cid, gmap, items, grants))
+            print()
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "--json":
+        import json
+        data = [_cluster_detail_data(cid, gmap, items, grants) for cid in sys.argv[2:]]
+        print(json.dumps(data, indent=2))
+        return
+
     print("=== 01a: arc_persons quality diagnostics ===")
     print(f"    Loading from {PROCESSED_DATA}")
-
-    persons, gmap, inv_f, prep, tf_lookup = _load()
     print(f"    {len(persons)} clusters  |  {len(gmap)} grant→cluster mappings")
 
     fa = check_A(persons, gmap, inv_f, prep, tf_lookup)
