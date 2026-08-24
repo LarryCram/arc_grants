@@ -1128,6 +1128,131 @@ candidate list includes 7 different given names sharing only the surname "Smith"
 upper bound on possible under-merge, not a count of confirmed problems, and was not investigated
 further this session.
 
+## `01a_diagnose.py` verification infrastructure formalized; two real under-merge gate defects
+found and fixed; `4u` population driven 479 → 35 via targeted manual review (2026-08-24)
+
+Triggered by a spec left in an editor buffer asking to verify the core identity invariant ("every
+ACIF refers to a single real person, every real person has a single ACIF") and give `Dossier()` an
+ARC-story header. Scoped via `AskUserQuestion` to formalizing the *existing* detection ceiling as
+reusable code and *sizing* (not newly detecting/fixing) the under-merge population via a sample of
+`reliability_tier=="4u"` clusters — explicitly not a new `merge()` operator or new detection logic.
+That boundary held only until the sizing exercise surfaced real, demonstrable defects in the
+*existing* gate, and the user separately escalated the scope once the risk of proceeding to OAX
+linking with a large stale under-merge population became concrete (see below) — both are legitimate
+tightening/verification of what already existed, not new detection surface, and this file's own
+prior "no new under-merge detection" note (last section) is superseded by this one.
+
+**Part A of the plan (verification infrastructure) is done; Part B (`Dossier()` ARC-story
+header, `dossier_build_arc.py`/`dossier_build_oax.py` split) was not started this session** —
+plan file `/home/lc/.claude/plans/how-do-yo-know-linked-diffie.md` still current for Part B.
+
+**`src/01a_diagnose.py`** gained a structured, importable result type on top of the existing
+console-report behavior: `HardCheckResult` (per-check-failure `set[str]` fields + `n_failures`),
+`ClusterVerdict`, `verify_cluster(cluster_id, result)`, and `run_diagnostics(...) -> HardCheckResult`
+— `check_A/B/C` now populate `result`'s sets at the point each failing subset is already computed
+(B1 explicitly uses the full `orcid_rows`/`dup_orcids` frames, not the `head(10)` console-preview
+slice — a deliberate regression-guard, also covered by a dedicated test). `main()` now exits
+non-zero on any hard failure — this file is now usable as a real gate, which it wasn't before.
+New `--sample-4u [N] [seed]` CLI flag (`sample_4u_clusters()` + `render_4u_sample_report()`,
+default 30/42) renders a per-cluster markdown sizing report; `tests/test_01a_diagnose.py` (new,
+20 tests) covers the pure-function layer via hand-built DataFrame fixtures.
+
+`cluster_detail_data()`/`cluster_detail_text()` (per-cluster/per-grant detail: investigators,
+FOR codes, HEP institutions, nested `gap_candidates` one level deep) relocated from
+`01a_diagnose.py`'s private `_cluster_detail_data()`/`_cluster_detail()` to public functions in
+`src/utils/awards_cif.py`, so a future `dossier_build_arc.py` can reuse the same mechanism rather
+than a third reimplementation. `AwardCIFItem` gained `is_fellowship: bool` (from ARC's own raw
+`isFellowship` field, already extracted, never previously surfaced past `00_extract_arc.py`).
+
+**Gate defect 1 — `first_names_compatible()` was far too permissive for a "rule out" check.**
+User-caught via a real `gap_candidates` pair (`LP0235872_AnthonyBaker` vs `DP0209711_AlanBaker`):
+`_name_forms()` always self-adds a person's own derived initial to their `first_names` set (needed
+for Splink's `family_name+first_initial` blocking), so the function — reused unmodified from that
+blocking context — treated ANY two full names sharing a first letter as "compatible," not just a
+real nickname/variant relationship. An existing test had explicitly asserted this as *intentional*
+design (Jennifer/James "permissively compatible" on shared initial 'j'); rather than silently
+overriding documented, tested behavior, the tension was presented via `AskUserQuestion` before
+touching anything. User's diagnosis, confirmed correct: "the code is remembering the splink
+blocking rule, not a test of definitely different." Fixed: when both sides have a full given name,
+require an exact match; the initial-based fallback only applies when at least one side has no full
+name to compare. (User separately corrected an overstated caveat of my own — common
+English/Australian nicknames like Bill/William, Bob/Robert, Ted/Edward, Peggy/Margaret don't share
+a first letter with the formal name at all; Jack/John is the exception, not the rule — so the
+tightening has even less real downside than first framed.)
+
+**Gate defect 2 — `compute_gap_candidates()` was blind to ARC scheme-eligibility windows.**
+User-caught: gap-candidate pairs included overlapping-DE cases and DP/DE pairs 12–22 years apart,
+neither of which can be one career (DECRA is a narrowly-windowed one-shot early-career award;
+Future Fellowship is mid-career — the already-established "Tao Liu" FT/DE precedent from the prior
+session's manual-splits work, generalized into code). New `_scheme_incompat()`/`_scheme_years()`/
+`DE_ELIGIBILITY_YEARS=12` in `awards_cif.py`: two different DE grant_codes, a DE paired with an FT,
+or a DE more than 12 years after another scheme's earliest year, all rule a pair out of
+`gap_candidates`. Verified concretely against real sample data before building (multiple real
+DE-vs-DE and DP-vs-DE cases with double-digit-year gaps) rather than assumed.
+
+**Combined population effect of both gate fixes**: `4u` 479 → **80**, `Gap 1` compatible pairs
+2,016 → 285. `resolution_status` unaffected throughout (0 UNRESOLVED). Full test suite passing
+at every step.
+
+**Manual-verification batch on the 80-cluster/271-pair population** (still 2026-08-24, later the
+same session): the user pushed to shrink `4u` further *before* OAX linking, not defer it — leaving
+genuine same-person duplicates unresolved risks OAX assigning two different OpenAlex author
+portfolios to one real ARC person, compounding the problem rather than just deferring it. A
+connected-components analysis (union-find over exact-full-given-name + same-institution pairs)
+collapsed the 271 raw pairs into **14 distinct candidate-merge groups** — a far more tractable unit
+than 271 separate decisions. Each was checked individually (never bulk-accepted on pattern alone)
+via `src/utils/orcid_bulk_lookup.py`'s local Zenodo ORCID snapshot first, then user-supplied live
+ORCID/Scopus/LinkedIn/biography evidence where the local snapshot missed:
+
+- **Merged, ORCID-confirmed** (9 people, ~44 fragment clusters collapsed): Xiaolin Wang (UOW
+  Distinguished Professor, spintronics/advanced materials, 15 clusters → 1, ORCID
+  0000-0003-4150-0848 — the single largest fragment in the whole population, confirmed via his own
+  Wikipedia page + UOW staff profile), Stephen Bell (UQ, extended a prior 2-cluster merge to 4),
+  Michael Adams (QUT→UMelb, extended a prior merge), Anthony Harris (Monash health economist),
+  Paul Burke (ANU, DECRA-then-DP energy/development economist), Paul Thomas (Adelaide, Professor
+  of Reproduction and Development since 2006), Mark Baker (Macquarie proteomics — the local
+  snapshot's own affiliation list ended at UOW 1998 with no listed return to Macquarie, resolved
+  only once the user supplied his live Macquarie Medical School faculty page confirming current
+  Honorary Professor status; a reminder that an ORCID's self-reported list can be incomplete
+  without indicating a different person), **Andrew Martin (Scientia Professor of Educational
+  Psychology, UNSW — 12 clusters → 1, spanning a genuine WSU→Sydney→UNSW career move across three
+  institutions and 2002–2018; his own faculty bio's "12 ARC grants" count matched the merged
+  cluster count exactly, independently validating the merge)**, and Benjamin Smith's ecosystem-
+  scientist half (Director of Research, Hawkesbury Institute for the Environment, WSU).
+- **Merged, biography-only** (no ORCID exists): Benjamin Smith's anthropologist half (CAEPR/ANU,
+  native title and Indigenous land-claims research) — same precedent as the earlier
+  `DP0343717_DavidWalker` case.
+- **Correctly NOT merged despite matching the institution+name pattern**: Benjamin Smith's third
+  originally-grouped cluster (a 2022 WSU/ANU ecology/climate-change grant) — per-grant FOR-code
+  inspection showed a 16-year gap and completely disjoint field from the other two, which turned
+  out to belong to the ecosystem scientist above, not the anthropologist. Caught only because each
+  candidate group's *per-grant* detail was checked before merging, not the FOR-code union alone —
+  the union would have hidden this split entirely. A concrete demonstration that the
+  connected-components grouping is a good candidate generator but not reliable enough to bulk-trust.
+- **Left unresolved, no confirmable evidence despite real attempts**: Jun Li (UniSA/Mawson
+  Institute — several distinct "Jun Li"s found, including a thin LinkedIn-only match the user
+  explicitly chose not to merge on given how many other "Jun Li"s exist), David Evans (UTas), John
+  Evans (QUT).
+
+Every merge went through the existing `manual_orcids.csv`/`manual_merges.csv` mechanism (chained
+multi-drop merges onto one `cluster_keep`, resolved via `apply_manual_merges()`'s existing
+transitive-closure logic — no code change needed); two of the newly-merged clusters (Xiaolin Wang,
+Benjamin Smith's anthropologist half) tripped `is_suspicious_for2020()`'s FOR-division heuristic
+once merged (a genuinely broad materials-physics career; native-title anthropology legitimately
+touching an "Agriculture, land and farm management" FOR code) and were recorded in
+`manual_confirmed_not_suspicious.csv`, same pattern as every prior such case this project has
+documented.
+
+**Final state**: `reliability_tier=='4u'` **479 → 35** (80 at the point the manual-verification
+batch started); `resolution_status` 0 UNRESOLVED throughout every rerun; `01a_diagnose.py` all
+hard checks clean at every step; 341/341 tests passing (`tests/test_01a_diagnose.py` new, 20
+tests). The remaining 35 are predominantly the weaker no-institution-overlap and bare-initial
+categories from the original breakdown, plus same-institution cases (Jun Li, David Evans, John
+Evans) already checked and found unconfirmable — treated as close to the practical floor for this
+pass rather than continuing to grind case-by-case, given every remaining lookup this batch that
+lacked a clean ORCID or biography hit came back empty. Not pursued further this session, pending
+the user's decision on whether to continue into the weaker categories or proceed to OAX linking.
+
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
 

@@ -265,23 +265,33 @@ def is_case_a(full_names: list) -> bool:
 
 
 def first_names_compatible(names_s: list, names_t: list) -> bool:
-    """True if at least one token in T is compatible with some token in S.
+    """True if S and T's given-name evidence cannot be ruled out as the same person.
 
-    Cascade (per token in T):
-      - full name: exact match in S's full names, OR initial matches S's initials
-      - initial:   matches S's initials (derived from S's full names + S's bare initials)
-    Applied symmetrically by caller: incompatible if either direction returns False.
+    Requires an EXACT full given-name match when BOTH sides have at least one full (non-initial)
+    token recorded. Tightened 2026-08-24 -- the original version treated any two full names
+    sharing just a first letter as "compatible" (e.g. "Anthony" and "Alan"), which is Splink's
+    own family_name+first_initial blocking-rule mentality (deliberately loose, since blocking
+    only needs to generate candidate pairs for later scoring, never rule anything out) borrowed
+    for a genuinely different job: compute_gap_candidates() needs a strict "can these be ruled
+    out" test, not a blocking heuristic, and the old behavior let almost any same-surname pair
+    through as a gap_candidate regardless of how different their given names actually were
+    (found live via a 4u sample review, e.g. Anthony Baker vs Alan Baker).
+
+    Falls back to initial-only matching ONLY when at least one side has NO full given-name token
+    recorded anywhere across its own grants -- a genuine ARC-source ambiguity (that side's real
+    given name was simply never captured, only an initial), the one case initial-level matching
+    is actually justified for. A full name is never accepted merely because it starts with the
+    same letter as another FULL name on the other side.
     """
-    s_full  = {n for n in names_s if len(n) > 1}
+    s_full = {n for n in names_s if len(n) > 1}
+    t_full = {n for n in names_t if len(n) > 1}
+
+    if s_full and t_full:
+        return bool(s_full & t_full)
+
     s_inits = {n for n in names_s if len(n) == 1} | {n[0] for n in s_full}
-    for t in names_t:
-        if len(t) > 1:
-            if t in s_full or t[0] in s_inits:
-                return True
-        else:
-            if t in s_inits:
-                return True
-    return False
+    t_inits = {n for n in names_t if len(n) == 1} | {n[0] for n in t_full}
+    return bool(s_inits & t_inits)
 
 
 def for2020_primary_fields(codes: list[dict]) -> set[str]:

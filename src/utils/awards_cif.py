@@ -128,6 +128,13 @@ class AwardCIFItem:
     # in-scope grants have a non-HEP admin_org, e.g. medical research institutes).
     hep_codes: list[str] = field(default_factory=list)
 
+    # ARC's own raw isFellowship flag for THIS person on THIS grant (investigators_raw.parquet's
+    # is_fellowship column, extracted directly in 00_extract_arc.py) -- added 2026-08-24. Was
+    # previously absent from AwardCIFItem entirely, even though a downstream Dossier-reporting
+    # consumer (analysis/utils/dossier.py's AwardContext) already declared a same-named field
+    # that nothing ever populated.
+    is_fellowship: bool = False
+
 
 @dataclass
 class CandidateWork:
@@ -522,6 +529,7 @@ def load_award_cif_items(
                 i.family_name,
                 i.role_code,
                 i.orcid,
+                i.is_fellowship,
                 g.admin_org,
                 o.institution_id AS institution_oax_id,
                 g.funding_commence_year,
@@ -617,6 +625,7 @@ def load_award_cif_items(
             family_name=r["family_name"],
             role_code=r["role_code"],
             orcid=orcid,
+            is_fellowship=bool(r["is_fellowship"]),
             admin_org=r["admin_org"],
             institution_oax_id=r["institution_oax_id"],
             funding_commence_year=r["funding_commence_year"],
@@ -1879,17 +1888,190 @@ def compute_orcid_for(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     return clusters
 
 
+def cluster_detail_data(
+    cluster_id: str, gmap: pd.DataFrame, items: list[AwardCIFItem], grants: pd.DataFrame,
+    gap_candidate_ids: list[str] | None = None,
+) -> dict:
+    """Structured per-grant breakdown for one cluster: scheme/year/admin_org/FOR per grant,
+    plus every co-investigator recorded on that grant (across ALL clusters, not just this
+    one) with their own ORCID, cluster_id, and is_fellowship status. Built from
+    load_award_cif_items()'s own items list, arc_grant_cluster_map.parquet, and
+    grants_flat.parquet -- the same sources 01a_diagnose.py's A/B/C checks already treat as
+    canonical -- rather than a fresh ad hoc join, so it can't drift from what those checks are
+    actually testing. Returns a dict (not text) so console output, JSON export, and any
+    downstream review report (e.g. a Dossier's ARC-story header) all render from the same one
+    assembly. Relocated here from src/01a_diagnose.py (2026-08-24) so it's importable by
+    non-diagnostic consumers without a second implementation.
+
+    gap_candidate_ids, if given, nests each named cluster's OWN cluster_detail_data() (called
+    with gap_candidate_ids=None) under d["gap_candidates"] -- exactly one level, never
+    recursive, since gap_candidates is a symmetric relation (A's list contains B, B's list
+    contains A) and recursing further would revisit clusters indefinitely."""
+    my_uids = set(gmap[gmap["cluster_id"] == cluster_id]["unique_id"])
+    my_items = [it for it in items if it.unique_id in my_uids]
+    if not my_items:
+        return {"cluster_id": cluster_id, "found": False}
+
+    uid_to_cluster = dict(zip(gmap["unique_id"], gmap["cluster_id"]))
+
+    grant_codes = sorted({it.grant_code for it in my_items})
+    by_grant: dict[str, list[AwardCIFItem]] = {}
+    for it in items:
+        by_grant.setdefault(it.grant_code, []).append(it)
+
+    grant_rows = []
+    for gc in grant_codes:
+        grow = grants[grants["grant_code"] == gc]
+        scheme = grow.iloc[0]["scheme_name"] if len(grow) else None
+        year_val = grow.iloc[0]["funding_commence_year"] if len(grow) else None
+        year = int(year_val) if pd.notna(year_val) else None
+        admin_org = grow.iloc[0]["admin_org"] if len(grow) else None
+        mine_here = [it for it in my_items if it.grant_code == gc]
+        for_codes = mine_here[0].for2020_codes if mine_here else []
+        for_list = [{"code": e["code"], "name": e["name"], "is_primary": e.get("is_primary", False)} for e in for_codes]
+        if not for_list and mine_here and mine_here[0].for_name:
+            for_list = [{"code": mine_here[0].for_code, "name": mine_here[0].for_name, "is_primary": True}]
+        investigators = [
+            {
+                "first_name": it.first_name, "family_name": it.family_name,
+                "role_code": it.role_code, "orcid": it.orcid,
+                "is_this_cluster": it.unique_id in my_uids,
+                "cluster_id": uid_to_cluster.get(it.unique_id),
+                "is_fellowship": it.is_fellowship,
+            }
+            for it in sorted(
+                by_grant.get(gc, []),
+                key=lambda x: (x.unique_id not in my_uids, x.family_name.lower(), x.first_name.lower()),
+            )
+        ]
+        grant_rows.append({
+            "grant_code": gc, "scheme": scheme, "year": year, "admin_org": admin_org,
+            "for_codes": for_list, "investigators": investigators,
+            "hep_codes": mine_here[0].hep_codes if mine_here else [],
+        })
+
+    return {
+        "cluster_id": cluster_id, "found": True,
+        "n_grants": len(grant_codes),
+        "orcids_on_file": sorted({it.orcid for it in my_items if it.orcid}),
+        "grants": grant_rows,
+        "gap_candidates": [
+            cluster_detail_data(gc_id, gmap, items, grants) for gc_id in (gap_candidate_ids or [])
+        ],
+    }
+
+
+def cluster_detail_text(d: dict, heading_level: int = 3) -> str:
+    """Text/markdown rendering of a cluster_detail_data() dict (already fetched, not re-fetched
+    here -- the two are deliberately decoupled so a caller can fetch once and render more than
+    once, or render a dict built some other way). Recurses one level into d["gap_candidates"]
+    at heading_level+1, matching cluster_detail_data()'s own one-level cap."""
+    if not d["found"]:
+        return f"{'#' * heading_level} {d['cluster_id']}\n(no items found under this cluster_id)"
+    lines = [f"{'#' * heading_level} {d['cluster_id']}  ({d['n_grants']} grants)"]
+    lines.append(f"ARC ORCID(s) on file: {d['orcids_on_file'] or 'none'}")
+    for g in d["grants"]:
+        for_str = ", ".join(f"{e['code']}:{e['name']}" for e in g["for_codes"]) or "?"
+        lines.append(f"- **{g['grant_code']}** ({g['scheme']}, {g['year']}, {g['admin_org']}) — FOR: {for_str}")
+        for it in g["investigators"]:
+            marker = "  <== this cluster" if it["is_this_cluster"] else ""
+            o = it["orcid"] or "-"
+            fell = ", fellowship" if it.get("is_fellowship") else ""
+            lines.append(f"    {it['first_name']} {it['family_name']} ({it['role_code']}, ORCID {o}{fell}) [{it.get('cluster_id')}]{marker}")
+    for gc in d.get("gap_candidates", []):
+        lines.append("")
+        lines.append(cluster_detail_text(gc, heading_level=heading_level + 1))
+    return "\n".join(lines)
+
+
+def sample_4u_clusters(pool: pd.DataFrame, n: int = 30, seed: int = 42) -> list[str]:
+    """Deterministic random sample of cluster_ids from `pool` (caller filters to
+    reliability_tier=='4u' -- or whatever other subset -- first; kept a pure, testable sampling
+    primitive over whatever frame it's given, not coupled to that column name). Sorted for
+    stable, reproducible output order regardless of pool's own row order."""
+    if len(pool) <= n:
+        return sorted(pool["cluster_id"].tolist())
+    return sorted(pool.sample(n=n, random_state=seed)["cluster_id"].tolist())
+
+
+# DECRA (DE) is a narrowly-defined early-career award -- ARC's own eligibility rule requires
+# the PhD to have been conferred within a bounded number of years before application (career-
+# interruption extensions can add years, but not decades). This bounds how far apart, in time,
+# a DECRA can plausibly sit from any other ARC-funded grant the same real person holds. Set
+# deliberately conservative (generous, not tight) so this only flags genuinely implausible
+# pairings, not edge cases -- found live 2026-08-24 via a 4u sample review: real gap_candidate
+# pairs included two independently-recorded DECRAs 12 years apart (DE120100016_KhoaNguyen 2012
+# vs DE240100408_TuanKhoaNguyen 2024), two DECRAs in essentially the same year
+# (DE140100735_SangWonLee 2014 vs DE130100614_SangHongLee 2013 -- ARC does not fund the same
+# person's DECRA proposal twice under two different grant codes), and DP/LP grants predating a
+# DECRA by 12-22 years.
+DE_ELIGIBILITY_YEARS = 12
+
+
+def _scheme_years(items: list[AwardCIFItem]) -> list[tuple[str, int | None, str]]:
+    """(scheme_prefix, funding_commence_year, grant_code) per item -- the raw material
+    _scheme_incompat() needs; kept as a separate, testable step."""
+    out = []
+    for it in items:
+        year = int(it.funding_commence_year) if it.funding_commence_year else None
+        out.append((it.grant_code[:2], year, it.grant_code))
+    return out
+
+
+def _scheme_incompat(sy_a: list[tuple[str, int | None, str]], sy_b: list[tuple[str, int | None, str]]) -> bool:
+    """True when the two sides' own scheme/year histories make them structurally impossible to
+    be the same real person, independent of name/FOR-division/ORCID evidence -- ARC
+    scheme-eligibility windows are a hard career-stage fact, not a heuristic. Three checks, all
+    confirmed against real cases this project has found (see DE_ELIGIBILITY_YEARS's docstring
+    and the already-resolved Tao Liu FT/DE case, 2026-08-21):
+      1. Both sides hold a DE grant under a DIFFERENT grant_code -- DECRA is a one-shot award,
+         so two independently-recorded DECRAs can never be one career.
+      2. One side holds an FT (Future Fellowship, mid-career) and the other a DE (DECRA,
+         early-career) -- the two eligibility windows cannot overlap for one career.
+      3. Either side's DE grant is more than DE_ELIGIBILITY_YEARS after the OTHER side's
+         earliest grant of any scheme -- already having ARC funding under one's own name that
+         long before a DECRA is inconsistent with DECRA's early-career eligibility window."""
+    de_a = [t for t in sy_a if t[0] == "DE"]
+    de_b = [t for t in sy_b if t[0] == "DE"]
+
+    if de_a and de_b and {gc for _, _, gc in de_a} != {gc for _, _, gc in de_b}:
+        return True
+
+    ft_a = any(t[0] == "FT" for t in sy_a)
+    ft_b = any(t[0] == "FT" for t in sy_b)
+    if (ft_a and de_b) or (ft_b and de_a):
+        return True
+
+    years_a = [y for _, y, _ in sy_a if y is not None]
+    years_b = [y for _, y, _ in sy_b if y is not None]
+    de_years_a = [y for _, y, _ in de_a if y is not None]
+    de_years_b = [y for _, y, _ in de_b if y is not None]
+    if de_years_a and years_b and min(de_years_a) - min(years_b) > DE_ELIGIBILITY_YEARS:
+        return True
+    if de_years_b and years_a and min(de_years_b) - min(years_a) > DE_ELIGIBILITY_YEARS:
+        return True
+
+    return False
+
+
 def compute_gap_candidates(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     """Populate gap_candidates -- other cluster_ids sharing the same (longest) family name that
     cannot be ruled out as the same person. Mirrors 01_prepare_arc.py's _compute_gap_candidates():
-    pairwise within each family-name group, incompatible on any of name / FOR-division / ORCID ->
-    kept separate; otherwise both sides record each other as a gap candidate.
+    pairwise within each family-name group, incompatible on any of name / FOR-division / ORCID /
+    scheme-eligibility -> kept separate; otherwise both sides record each other as a gap
+    candidate.
 
     Feeds compute_reliability()'s tier 4 vs 4u distinction -- must run first.
 
     Division check (2026-08-12): uses for2020_codes' numeric divisions via
     _pairwise_division_mismatch(), not the old for_names + for_divisions.csv route -- see that
-    function's docstring for why (no adjacency tolerance, stricter than before)."""
+    function's docstring for why (no adjacency tolerance, stricter than before).
+
+    Scheme-eligibility check (2026-08-24): see _scheme_incompat()'s own docstring. Reads each
+    cluster's own .items (still populated at this point in the pipeline -- compute_gap_candidates
+    runs before persistence, and nothing clears .items along the way) rather than taking a
+    separate items parameter, so this function's signature and every existing call site stay
+    unchanged."""
 
     def _fnm(family_names):
         return max(family_names, key=len) if family_names else None
@@ -1921,7 +2103,8 @@ def compute_gap_candidates(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
                     len(c1.orcids) > 0 and len(c2.orcids) > 0
                     and not set(c1.orcids) & set(c2.orcids)
                 )
-                if name_incompat or div_incompat or orcid_incompat:
+                scheme_incompat = _scheme_incompat(_scheme_years(c1.items), _scheme_years(c2.items))
+                if name_incompat or div_incompat or orcid_incompat or scheme_incompat:
                     n_incompat += 1
                 else:
                     gap[c1.cluster_id].append(c2.cluster_id)

@@ -14,6 +14,7 @@ instead by the full-cohort verification against arc_persons.parquet -- see the p
 import sys
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -35,6 +36,8 @@ from src.utils.awards_cif import (
     load_awards_cif,
     _load_hep_crosswalk,
     _load_institution_hep_crosswalk,
+    cluster_detail_data,
+    cluster_detail_text,
 )
 
 
@@ -49,13 +52,18 @@ def _item(
     institution_oax_id=None,
     full_name_key=None,
     for2020_codes=None,
+    first_name="",
+    family_name="",
+    role_code="CI",
+    hep_codes=None,
+    is_fellowship=False,
 ) -> AwardCIFItem:
     return AwardCIFItem(
         unique_id=unique_id,
         grant_code=unique_id.split("_")[0],
-        first_name="",
-        family_name="",
-        role_code="CI",
+        first_name=first_name,
+        family_name=family_name,
+        role_code=role_code,
         orcid=orcid,
         admin_org=None,
         institution_oax_id=institution_oax_id,
@@ -67,6 +75,8 @@ def _item(
         family_names=family_names or [],
         full_name_key=full_name_key,
         for2020_codes=for2020_codes or [],
+        hep_codes=hep_codes or [],
+        is_fellowship=is_fellowship,
     )
 
 
@@ -717,3 +727,142 @@ class TestHepCrosswalks:
         crosswalk = _load_institution_hep_crosswalk()
         # ~42 real Australian HEPs have a resolvable institution_id, not all 114 admin_orgs rows
         assert 30 <= len(crosswalk) <= 60
+
+
+# ---------------------------------------------------------------------------
+# cluster_detail_data / cluster_detail_text (relocated + widened from
+# src/01a_diagnose.py, 2026-08-24) -- built from load_award_cif_items()'s own items list,
+# arc_grant_cluster_map.parquet, and grants_flat.parquet. Small hand-built gmap/grants
+# DataFrames here, matching this project's real column names.
+# ---------------------------------------------------------------------------
+
+def _gmap(rows: list[tuple[str, str]]) -> pd.DataFrame:
+    """rows: list of (unique_id, cluster_id)."""
+    return pd.DataFrame(rows, columns=["unique_id", "cluster_id"])
+
+
+def _grants_df(rows: list[dict]) -> pd.DataFrame:
+    cols = ["grant_code", "scheme_name", "funding_commence_year", "admin_org"]
+    return pd.DataFrame(rows, columns=cols)
+
+
+class TestClusterDetailData:
+    def _two_investigator_setup(self):
+        target = _item(
+            "G1_Jane", first_name="Jane", family_name="Smith", role_code="CI",
+            for2020_codes=[_for2020("3705", "Geology")],
+        )
+        other = _item(
+            "G1_Bob", first_name="Bob", family_name="Jones", role_code="CI",
+            orcid="0000-0001-0001-0001",
+        )
+        items = [target, other]
+        gmap = _gmap([("G1_Jane", "A"), ("G1_Bob", "B")])
+        grants = _grants_df([
+            {"grant_code": "G1", "scheme_name": "Discovery Projects",
+             "funding_commence_year": 2020.0, "admin_org": "The University of Sydney"},
+        ])
+        return items, gmap, grants
+
+    def test_basic_structure_and_this_cluster_flag(self):
+        items, gmap, grants = self._two_investigator_setup()
+        d = cluster_detail_data("A", gmap, items, grants)
+        assert d["found"] is True
+        assert d["cluster_id"] == "A"
+        assert d["n_grants"] == 1
+        g = d["grants"][0]
+        assert g["grant_code"] == "G1"
+        assert g["scheme"] == "Discovery Projects"
+        assert g["year"] == 2020
+        assert g["admin_org"] == "The University of Sydney"
+        invs = g["investigators"]
+        assert invs[0]["first_name"] == "Jane" and invs[0]["is_this_cluster"] is True
+        assert invs[1]["first_name"] == "Bob" and invs[1]["is_this_cluster"] is False
+
+    def test_found_false_for_unknown_cluster(self):
+        items, gmap, grants = self._two_investigator_setup()
+        d = cluster_detail_data("NOPE", gmap, items, grants)
+        assert d["found"] is False
+
+    def test_investigators_sorted_this_cluster_first_then_alphabetical(self):
+        target = _item("G1_Jane", first_name="Jane", family_name="Smith")
+        z = _item("G1_Zed", first_name="Zed", family_name="Zebra")
+        a = _item("G1_Amy", first_name="Amy", family_name="Adams")
+        items = [z, target, a]
+        gmap = _gmap([("G1_Jane", "A"), ("G1_Zed", "B"), ("G1_Amy", "C")])
+        grants = _grants_df([{"grant_code": "G1", "scheme_name": "DP",
+                               "funding_commence_year": 2020.0, "admin_org": "Sydney"}])
+        d = cluster_detail_data("A", gmap, items, grants)
+        names = [i["family_name"] for i in d["grants"][0]["investigators"]]
+        assert names == ["Smith", "Adams", "Zebra"]  # this-cluster first, then alphabetical
+
+    def test_cluster_id_and_is_fellowship_keys_populated(self):
+        target = _item("G1_Jane", first_name="Jane", family_name="Smith")
+        other = _item("G1_Bob", first_name="Bob", family_name="Jones", is_fellowship=True)
+        items = [target, other]
+        gmap = _gmap([("G1_Jane", "A"), ("G1_Bob", "B")])
+        grants = _grants_df([{"grant_code": "G1", "scheme_name": "DP",
+                               "funding_commence_year": 2020.0, "admin_org": "Sydney"}])
+        d = cluster_detail_data("A", gmap, items, grants)
+        invs = {i["first_name"]: i for i in d["grants"][0]["investigators"]}
+        assert invs["Jane"]["cluster_id"] == "A"
+        assert invs["Bob"]["cluster_id"] == "B"
+        assert invs["Bob"]["is_fellowship"] is True
+        assert invs["Jane"]["is_fellowship"] is False
+
+    def test_hep_codes_on_grant_row(self):
+        target = _item("G1_Jane", first_name="Jane", family_name="Smith", hep_codes=["USYD", "UNSW"])
+        items = [target]
+        gmap = _gmap([("G1_Jane", "A")])
+        grants = _grants_df([{"grant_code": "G1", "scheme_name": "DP",
+                               "funding_commence_year": 2020.0, "admin_org": "Sydney"}])
+        d = cluster_detail_data("A", gmap, items, grants)
+        assert d["grants"][0]["hep_codes"] == ["USYD", "UNSW"]
+
+    def test_gap_candidate_ids_nests_one_level_only(self):
+        a = _item("G1_Jane", first_name="Jane", family_name="Smith")
+        b = _item("G2_Bob", first_name="Bob", family_name="Jones")
+        items = [a, b]
+        gmap = _gmap([("G1_Jane", "A"), ("G2_Bob", "B")])
+        grants = _grants_df([
+            {"grant_code": "G1", "scheme_name": "DP", "funding_commence_year": 2020.0, "admin_org": "Sydney"},
+            {"grant_code": "G2", "scheme_name": "DP", "funding_commence_year": 2021.0, "admin_org": "Melbourne"},
+        ])
+        d = cluster_detail_data("A", gmap, items, grants, gap_candidate_ids=["B"])
+        assert len(d["gap_candidates"]) == 1
+        nested = d["gap_candidates"][0]
+        assert nested["cluster_id"] == "B"
+        assert nested["found"] is True
+        # one level only -- the nested dict's own gap_candidates must be empty, not recursed
+        assert nested["gap_candidates"] == []
+
+
+class TestClusterDetailText:
+    def test_renders_nested_gap_candidates_at_deeper_heading(self):
+        a = _item("G1_Jane", first_name="Jane", family_name="Smith")
+        b = _item("G2_Bob", first_name="Bob", family_name="Jones")
+        items = [a, b]
+        gmap = _gmap([("G1_Jane", "A"), ("G2_Bob", "B")])
+        grants = _grants_df([
+            {"grant_code": "G1", "scheme_name": "DP", "funding_commence_year": 2020.0, "admin_org": "Sydney"},
+            {"grant_code": "G2", "scheme_name": "DP", "funding_commence_year": 2021.0, "admin_org": "Melbourne"},
+        ])
+        d = cluster_detail_data("A", gmap, items, grants, gap_candidate_ids=["B"])
+        text = cluster_detail_text(d)
+        assert "### A" in text
+        assert "#### B" in text  # one level deeper than the parent's ###
+
+    def test_not_found_renders_placeholder(self):
+        text = cluster_detail_text({"cluster_id": "X", "found": False})
+        assert "X" in text
+        assert "no items found" in text
+
+
+class TestAwardCIFItemIsFellowship:
+    def test_defaults_to_false(self):
+        it = _item("G1_Jane")
+        assert it.is_fellowship is False
+
+    def test_round_trips_via_item_factory(self):
+        it = _item("G1_Jane", is_fellowship=True)
+        assert it.is_fellowship is True

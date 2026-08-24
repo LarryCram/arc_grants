@@ -222,9 +222,17 @@ class TestFirstNamesCompatible:
     def test_exact_full_name_match(self):
         assert first_names_compatible(["james", "j"], ["james", "j"]) is True
 
-    def test_different_full_names_same_initial_compatible(self):
-        # jennifer vs james share initial 'j' -> permissively compatible
-        assert first_names_compatible(["james", "j"], ["jennifer", "j"]) is True
+    def test_different_full_names_same_initial_now_incompatible(self):
+        # jennifer vs james share only the initial 'j' -- tightened 2026-08-24 (see the
+        # function's own docstring): two DIFFERENT full names sharing a first letter tell us
+        # nothing and must not pass; this was the exact mechanism that let real, unrelated
+        # people (e.g. Anthony Baker vs Alan Baker) through as gap_candidates noise.
+        assert first_names_compatible(["james", "j"], ["jennifer", "j"]) is False
+
+    def test_real_case_anthony_vs_alan_incompatible(self):
+        # The actual case that surfaced this: Anthony Baker and Alan Baker share a surname and
+        # first-letter but nothing else -- must be ruled incompatible, not left as a gap_candidate.
+        assert first_names_compatible(["anthony", "a"], ["alan", "a"]) is False
 
     def test_different_initial_incompatible(self):
         # maria vs james -- no overlap at any level
