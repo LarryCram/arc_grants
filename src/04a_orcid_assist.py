@@ -1,7 +1,14 @@
 """
-src/05_orcid_assist.py
+src/04a_orcid_assist.py
 
-Batch-fetches ORCID public API records for OAX candidates in the deferred set.
+Optional helper attached to 04_resolve_links.py's own defer bucket -- renamed from
+05_orcid_assist.py (2026-08-25) once it became clear "05" misleadingly read as "the next
+mandatory sequential stage," when it's actually optional, human-assist tooling with nothing
+downstream depending on its own output (matching the existing 00b_/00c_ letter-suffix
+convention for helpers attached to a specific stage rather than stages themselves).
+
+Batch-fetches ORCID public API records for OAX candidates in the deferred set
+(arc_ambiguous_deferred.parquet, 04_resolve_links.py's own output).
 Scores each candidate against the ARC person's FOR field tokens via ORCID keywords.
 Outputs high-confidence suggestions to a staging CSV for human review before
 promoting to data_persisted/manual_resolutions.csv.

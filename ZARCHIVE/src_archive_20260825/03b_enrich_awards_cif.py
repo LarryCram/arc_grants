@@ -33,6 +33,7 @@ from src.utils.awards_cif import (
 )
 
 _ARC_OAX_LINKS = PROCESSED_DATA / "arc_oax_links.parquet"
+_LINK_ARC_OAX_SOURCE = Path(__file__).resolve().parent / "03_link_arc_oax.py"
 
 
 def main():
@@ -45,9 +46,16 @@ def main():
     assert_fresh(
         "03b_enrich_awards_cif (arc_oax_links.parquet)",
         outputs=[_ARC_OAX_LINKS],
-        inputs=[ARC_ONLY_PARQUET, PROCESSED_DATA / "openalex_authors_prep.parquet"],
+        inputs=[
+            ARC_ONLY_PARQUET, PROCESSED_DATA / "openalex_authors_prep.parquet",
+            _LINK_ARC_OAX_SOURCE,
+        ],
     )
-
+    # No self-check on AWARDS_CIF_PARQUET (this script's own output) against its own source --
+    # a producer checking its own output against its own source is a self-blocking paradox for a
+    # script that unconditionally rebuilds (confirmed directly 2026-08-25). 06_build_oeuvre.py's
+    # own gate is the correct place that protection lives, checking this file from the consumer
+    # side.
     clusters = load_awards_cif(ARC_ONLY_PARQUET)
     print(f"  Loaded {len(clusters):,} ARC-only AwardsCIF from {ARC_ONLY_PARQUET.name}")
     clusters = enrich_with_oax_candidates(clusters)
