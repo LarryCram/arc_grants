@@ -1,7 +1,8 @@
 """
-src/02_prepare_oax.py
+src/00c_prepare_oax.py
 
-Prepare OpenAlex HEP-context authors for Splink linkage.
+Loader: prepares OpenAlex HEP-context authors for Splink linkage. Rebuild only when stale
+relative to authorships_hep.parquet/works_hep.parquet -- a few times a year, not every run.
 
 Phase 1 – author_hep: group authorships_hep by author, aggregating institution
     IDs (from HEP authorships), field distribution with fractions (from HEP
@@ -17,6 +18,7 @@ Phase 3 – TF tables for Splink term-frequency adjustment.
     → oax_tf_full_name.parquet
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -26,12 +28,83 @@ from nameparser import HumanName
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import OAX_AUTHORS, PROCESSED_DATA
-from src.utils.names import (
-    canonicalize_name_punctuation, expand_diacritic_variants, max_by_len, name_part_tokens,
-    parse_given, strip_diacriticals, strip_postnominals,
+from src.utils.names import max_by_len, name_part_tokens, parse_given, strip_postnominals
+from src.utils.name_diacritic_variants import (
+    DIACRITIC_CHARS, DIACRITIC_VARIANT_TABLE_FILENAME, build_diacritic_variant_table,
+    canonicalize_name_punctuation, expand_diacritic_variants, load_diacritic_variant_table,
+    persist_diacritic_variant_table, strip_diacriticals,
 )
 
 PROC = PROCESSED_DATA
+_DATA_PERSISTED = Path(__file__).resolve().parents[1] / "data_persisted"
+
+
+def _oax_authors_newest_mtime() -> float:
+    """Newest mtime among OAX_AUTHORS' own parquet files -- the freshness signal for the raw
+    snapshot itself (changes only on an OpenAlex snapshot migration, a few times a year), distinct
+    from author_hep.parquet/openalex_authors_prep.parquet's own derived-output mtimes."""
+    return max(p.stat().st_mtime for p in Path(OAX_AUTHORS).glob("*.parquet"))
+
+
+def ensure_diacritic_table_fresh(force: bool = False) -> dict[str, list[str]]:
+    """Load data_persisted/name_diacritic_variants.csv if it's fresh relative to OAX_AUTHORS'
+    own snapshot files; otherwise rebuild from the full table and persist. Mirrors ensure_fresh()'s
+    own missing-or-stale-triggers-rebuild pattern, gated on the true raw-snapshot source rather
+    than any derived intermediate -- this table only needs rebuilding on a snapshot migration, not
+    on every code/data_persisted edit elsewhere in the pipeline."""
+    out = _DATA_PERSISTED / DIACRITIC_VARIANT_TABLE_FILENAME
+    if not force and out.exists() and out.stat().st_mtime >= _oax_authors_newest_mtime():
+        print(f"  {DIACRITIC_VARIANT_TABLE_FILENAME} fresh -- loading cached table.")
+        return load_diacritic_variant_table(out)
+    table = build_diacritic_table()
+    persist_diacritic_variant_table(table, out)
+    print(f"  Rebuilt {DIACRITIC_VARIANT_TABLE_FILENAME}: {len(table):,} entries.")
+    return table
+
+
+def build_diacritic_table() -> dict[str, list[str]]:
+    """The OAX-corpus-derived diacritic equivalence table (see build_diacritic_variant_table()'s
+    docstring), scanned from the FULL raw OAX_AUTHORS dimension table (119M rows) -- not
+    author_hep.parquet (the HEP-context-filtered 2.78M-row subset), since a genuine bare/digraph
+    pairing can only be discoverable via a fragment record that never made it into the HEP-filtered
+    population (2026-08-25 correction -- an earlier version of this function scoped to
+    author_hep.parquet, which is wrong: the whole point of this table is to widen blocking
+    candidates that ARE missing from the HEP-filtered set). Lives here, not in awards_cif.py,
+    because it's built FROM OAX data -- the loader builds it, the orchestrator (01_prepare_arc.py)
+    calls ensure_diacritic_table_fresh() explicitly and passes the result down as a plain
+    parameter, so awards_cif.py's ARC-only functions never reach into OAX data themselves
+    (2026-08-25, moved out of awards_cif.py after it was found buried inside
+    load_award_cif_items(), an implicit side-effecting call inconsistent with how
+    openalex_authors_prep.parquet itself is handled -- built/ensured-fresh up front, not
+    mid-computation). Callers should use ensure_diacritic_table_fresh() rather than this directly,
+    to get the persist/staleness behavior -- this is the unconditional-rebuild half only.
+
+    A SQL-side regexp_matches() pre-filter (RE2 engine -- confirmed via direct testing that
+    DuckDB's SIMILAR TO silently fails to match on a bracket character class built from
+    multi-byte Unicode characters, returning 0 rows against a table known to contain millions of
+    matches; regexp_matches() with the identical character class works correctly) cuts the ~119M
+    rows down to ~2.1M diacritic-bearing rows before this is fetched into Python -- avoids an
+    otherwise ~15-minute full-table Python scan. Measured at full scale: ~34s SQL fetch (2.1M rows
+    / 6.87M candidate name strings) + ~17s to build the table (319,273 entries) = ~51s total.
+    """
+    char_class = re.escape("".join(sorted(DIACRITIC_CHARS)))
+    con = duckdb.connect()
+    rows = con.execute(
+        f"""
+        SELECT display_name, display_name_alternatives
+        FROM read_parquet('{OAX_AUTHORS}/*.parquet')
+        WHERE regexp_matches(display_name, '[{char_class}]')
+           OR len(list_filter(display_name_alternatives,
+                               x -> regexp_matches(x, '[{char_class}]'))) > 0
+        """
+    ).fetchall()
+    con.close()
+    corpus_names: list[str] = []
+    for display_name, alts in rows:
+        if display_name:
+            corpus_names.append(display_name)
+        corpus_names.extend(alts or [])
+    return build_diacritic_variant_table(corpus_names)
 
 
 def oax_name_arrays(display_name: str, alts: list[str]) -> dict:
@@ -86,6 +159,20 @@ def oax_name_arrays(display_name: str, alts: list[str]) -> dict:
         "family_names_display": list(family_from_display),
         "family_names_alt": list(family_from_alts),
     }
+
+
+def ensure_fresh(force: bool = False) -> bool:
+    """Rebuild only if openalex_authors_prep.parquet is missing or older than
+    authorships_hep.parquet/works_hep.parquet. Returns True if it rebuilt."""
+    auth_hep  = PROC / "authorships_hep.parquet"
+    works_hep = PROC / "works_hep.parquet"
+    out_oax   = PROC / "openalex_authors_prep.parquet"
+    if not force and out_oax.exists() and auth_hep.exists() and works_hep.exists():
+        if out_oax.stat().st_mtime >= max(auth_hep.stat().st_mtime, works_hep.stat().st_mtime):
+            print("  openalex_authors_prep.parquet fresh -- skipping rebuild.")
+            return False
+    main()
+    return True
 
 
 def main():

@@ -12,7 +12,7 @@ blocks used by Phase 2's clustering -- coauthor, institution, field, subfield, t
 already sitting on every Stage-3 survivor row, unused, despite being exactly the kind of
 independent evidence that would have caught the Adam Hulme contamination case directly, see
 CLAUDE.md). Same (value, tf=count/n) shape as the existing oax_tf_*.parquet tables in
-02_prepare_oax.py; year is bucketed (YEAR_BUCKET_WIDTH-year width) rather than treated as one
+00c_prepare_oax.py; year is bucketed (YEAR_BUCKET_WIDTH-year width) rather than treated as one
 column per exact year, so two works from one real, continuous career still share a feature.
 
 Source population: Stage 3 survivors (quality- AND field-filtered), not Stage 1 (quality-filtered
@@ -179,12 +179,15 @@ def compute_and_persist_idf_tables(
             con.close()
 
 
-# --- Step 3: IDF-weighted feature matrices, cross-section development only ---
+# --- Step 3: IDF-weighted feature matrices, cross-section development ---
 #
 # Scoped to a small, named set of cluster_ids at a time (the cross-section in
-# piling_cross_section.csv, or any other explicit list) -- not intended for full-population use
-# yet, per the plan's TODO ordering (steps 3-7 validate on the cross-section before step 8
-# considers a full run).
+# piling_cross_section.csv, or any other explicit list) -- these particular functions were built
+# for cross-section validation only (steps 3-7 of the original plan). Full-population use is a
+# separate, later-added function, persist_piling_results() (see its own docstring below) -- this
+# comment previously read as if the whole module were cross-section-only, which stopped being
+# true once that function was added and actually run (confirmed 2026-08-25: 3,769,100 rows /
+# 22,495 clusters on disk at PILING_RESULTS, the most recent of several full-population runs).
 
 CROSS_SECTION_CSV = PROCESSED_DATA / "piling_cross_section.csv"
 

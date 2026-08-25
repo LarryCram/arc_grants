@@ -11,10 +11,10 @@ follow-up"), a registered client clears that wall.
 2026-08-21: this is now the SOLE ORCID /record cache for the whole project. Previously three
 independent stores existed (this one; 00b_enrich_orcid.py's own diskcache.Cache at
 DISKCACHE_DIR/orcid_records; and src/utils/orcid_cache.py's per-file JSON store under
-PROCESSED_DATA/orcid_cache/, used by 05_orcid_assist.py) and had silently diverged (10,455 vs
+PROCESSED_DATA/orcid_cache/, used by 04a_orcid_assist.py) and had silently diverged (10,455 vs
 18,099 vs 4,216 entries with real, non-overlapping content). All three were migrated into this
 cache (seed_from_anonymous_cache() for the diskcache, a one-off script for the per-file JSON
-store) and both 00b_enrich_orcid.py and 05_orcid_assist.py now fetch/cache through this module's
+store) and both 00b_enrich_orcid.py and 04a_orcid_assist.py now fetch/cache through this module's
 functions -- there is exactly one place ORCID records are stored going forward.
 src/utils/orcid_cache.py's fetch_orcid()/per-file mechanism is retired; its pure accessor
 functions (orcid_addresses, orcid_keywords, orcid_external_ids, orcid_works_count) are unchanged

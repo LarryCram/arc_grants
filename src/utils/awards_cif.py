@@ -39,7 +39,8 @@ import splink.comparison_level_library as cll
 
 from config.settings import PROCESSED_DATA, ADMIN_ORGS_CSV, GRANT_SUMMARIES_CSV, ARC_GRANTS_CSV, DISKCACHE_DIR, OAX_AUTHORS, TOP_CUT, DUCKDB_TMP_DIR
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
-from src.utils.names import canonicalize_name_punctuation, make_expanded_for_tokens, name_part_tokens, strip_diacriticals, strip_postnominals, for_name_tokens
+from src.utils.names import make_expanded_for_tokens, name_part_tokens, strip_postnominals, for_name_tokens
+from src.utils.name_diacritic_variants import canonicalize_name_punctuation, diacritic_variants
 from src.utils.for_resolve import (
     upgrade_for_code, upgrade_for_name, resolve_arc_for_entry, for2020_group_name,
 )
@@ -127,6 +128,19 @@ class AwardCIFItem:
     # this grant's eligible orgs resolve to an Australian HEP (rare but real -- ~0.55% of
     # in-scope grants have a non-HEP admin_org, e.g. medical research institutes).
     hep_codes: list[str] = field(default_factory=list)
+
+    # This grant's own set of OAX institution ids (2026-08-25) -- current admin_org UNION
+    # announcement_admin_org UNION eligible_orgs, each resolved via
+    # _load_institution_oax_crosswalk(). Deliberately a set, not the single scalar
+    # institution_oax_id above (kept unchanged as "the current admin org" field): a grant whose
+    # administering institution changed during its life (confirmed real at scale -- 13.03% of
+    # grants the pipeline treats as "single institution" via n_eligible_orgs==1 actually differ
+    # between snapshots, e.g. DP110100989) is genuine additional evidence for Splink's
+    # comparison, not noise to discard by only keeping whichever value happens to be current.
+    # Same "loose evidence, precise scoring" reasoning already applied to family_names/
+    # first_names_multichar -- more evidence is safe here because this feeds AwardsCIF.inst_arr
+    # (a Splink comparison), not a hard-exclusion gate on its own.
+    inst_ids: list[str] = field(default_factory=list)
 
     # ARC's own raw isFellowship flag for THIS person on THIS grant (investigators_raw.parquet's
     # is_fellowship column, extracted directly in 00_extract_arc.py) -- added 2026-08-24. Was
@@ -257,16 +271,28 @@ class AwardsCIF:
 
 # ── construction: load_award_cif_items ──────────────────────────────────────────
 
-def _name_forms(first_name: str, family_name: str) -> tuple[list[str], list[str]]:
+def _name_forms(
+    first_name: str, family_name: str, diacritic_table: dict[str, list[str]] | None = None,
+) -> tuple[list[str], list[str]]:
     """Mirrors 01_prepare_arc.py's arc_name_arrays(): given-name tokens (+ their initials)
-    and a single normalized family-name form, from ARC's raw first_name/family_name fields."""
+    and normalized family-name form(s), from ARC's raw first_name/family_name fields.
+
+    `diacritic_table` (2026-08-25, see build_diacritic_variant_table()) widens both given- and
+    family-name forms with corpus-confirmed variants -- the reason this matters for ARC
+    specifically: ARC's raw data never contains a literal diacritic character at all (always
+    plain ASCII, sometimes bare "Muhlhaus", sometimes already digraph-transliterated
+    "Gruetzner" by whoever typed it in), so family_names could previously only ever hold the one
+    form ARC itself recorded -- the corpus table supplies the confirmed OTHER ASCII spelling,
+    closing a real gap where a genuine match was structurally unreachable by Splink blocking
+    (DP0345157_HansMuhlhaus, see CLAUDE.md 2026-08-25)."""
     full = f"{first_name or ''} {family_name or ''}".strip()
     hn = HumanName(strip_postnominals(canonicalize_name_punctuation(full)))
     if not hn.last and hn.first:
         hn.last = hn.first
 
     f_toks = name_part_tokens(hn.first) + name_part_tokens(hn.middle)
-    fam_norm = strip_diacriticals(hn.last).lower().strip() if hn.last else ""
+    family_names = diacritic_variants(hn.last, diacritic_table) if hn.last else []
+    fam_norm = family_names[0] if family_names else ""
 
     # dict.fromkeys(), not set() -- set() iteration order is randomized per-process
     # (PYTHONHASHSEED), and _first_name_canonical()'s max(key=len) breaks length-ties by
@@ -277,8 +303,11 @@ def _name_forms(first_name: str, family_name: str) -> tuple[list[str], list[str]
     # zero other changes). dict.fromkeys() preserves first-occurrence order, so the
     # first-listed given-name token deterministically wins any length tie -- also the more
     # correct semantic (the first-listed given name is usually the person's primary one).
-    first_names = list(dict.fromkeys(f_toks + [t[0] for t in f_toks if t]))
-    family_names = [fam_norm] if fam_norm else []
+    given_toks = list(f_toks)
+    if diacritic_table:
+        for ft in f_toks:
+            given_toks.extend(diacritic_table.get(ft, []))
+    first_names = list(dict.fromkeys(given_toks + [t[0] for t in given_toks if t]))
 
     if not f_toks and fam_norm:
         first_names.append(fam_norm[0])
@@ -424,25 +453,30 @@ def load_grant_for2020_codes() -> dict[str, list[dict]]:
     }
 
 
-def _load_admin_orgs_rows() -> tuple[list[dict], dict[str, str]]:
-    """admin_orgs.csv rows, plus canonical organisationName -> hep_code (any non-null hep_code
-    found under any alias row sharing that canonical name -- see _load_hep_crosswalk()'s
-    docstring for why resolution goes through the canonical name, not each alias row
-    individually). Shared by _load_hep_crosswalk() (alias name -> hep_code) and
-    _load_institution_hep_crosswalk() (OpenAlex institution_idx -> hep_code) so both read the
-    CSV once and apply the same defensive resolution.
+def _load_admin_orgs_rows() -> tuple[list[dict], dict[str, str], dict[str, str]]:
+    """admin_orgs.csv rows, plus canonical organisationName -> hep_code AND organisationName ->
+    institution_id (OAX URL, e.g. "https://openalex.org/I204824540") -- any non-null value found
+    under any alias row sharing that canonical name (see _load_hep_crosswalk()'s docstring for
+    why resolution goes through the canonical name, not each alias row individually). Shared by
+    _load_hep_crosswalk() (alias name -> hep_code), _load_institution_hep_crosswalk() (OpenAlex
+    institution_idx -> hep_code), and _load_institution_oax_crosswalk() (alias name ->
+    institution_id) so all three read the CSV once and apply the same defensive resolution.
     """
     import csv as _csv
     canonical_hep: dict[str, str] = {}
+    canonical_institution_id: dict[str, str] = {}
     rows = []
     with open(ADMIN_ORGS_CSV, newline="", encoding="utf-8") as f:
         for row in _csv.DictReader(f):
             rows.append(row)
             name = row.get("organisationName", "").strip()
             hep = row.get("hep_code", "").strip()
+            inst_id = row.get("institution_id", "").strip()
             if name and hep and name not in canonical_hep:
                 canonical_hep[name] = hep
-    return rows, canonical_hep
+            if name and inst_id and name not in canonical_institution_id:
+                canonical_institution_id[name] = inst_id
+    return rows, canonical_hep, canonical_institution_id
 
 
 def _load_hep_crosswalk() -> dict[str, str]:
@@ -461,7 +495,7 @@ def _load_hep_crosswalk() -> dict[str, str]:
     alias sharing that canonical name, so a future forgotten alias doesn't silently resolve to
     "no HEP" the way it did here.
     """
-    rows, canonical_hep = _load_admin_orgs_rows()
+    rows, canonical_hep, _canonical_inst_id = _load_admin_orgs_rows()
     crosswalk: dict[str, str] = {}
     for row in rows:
         alias = row.get("organisationName_alias", "").strip()
@@ -469,6 +503,27 @@ def _load_hep_crosswalk() -> dict[str, str]:
         hep = canonical_hep.get(name)
         if alias and hep:
             crosswalk[alias] = hep
+    return crosswalk
+
+
+def _load_institution_oax_crosswalk() -> dict[str, str]:
+    """admin_orgs.csv organisationName_alias -> institution_id (OAX URL), same canonical-group
+    defensive resolution as _load_hep_crosswalk() -- for building AwardCIFItem.inst_ids (the
+    per-grant set of OAX institution ids, see load_award_cif_items()), which must use the SAME
+    id space as OAX's own inst_ids field (institution_id, e.g. "https://openalex.org/I204824540")
+    for 03_link_arc_oax.py's ArrayIntersectAtSizes("inst_arr", ...) comparison to work at all --
+    confirmed directly (2026-08-25) that this is a DIFFERENT code space from hep_code (e.g. "UOW"),
+    so hep_codes/_load_hep_crosswalk() cannot be reused for this purpose despite the superficial
+    similarity.
+    """
+    rows, _canonical_hep, canonical_institution_id = _load_admin_orgs_rows()
+    crosswalk: dict[str, str] = {}
+    for row in rows:
+        alias = row.get("organisationName_alias", "").strip()
+        name = row.get("organisationName", "").strip()
+        inst_id = canonical_institution_id.get(name)
+        if alias and inst_id:
+            crosswalk[alias] = inst_id
     return crosswalk
 
 
@@ -480,7 +535,7 @@ def _load_institution_hep_crosswalk() -> dict[int, str]:
     ~42/114 admin_orgs.csv rows are real Australian HEPs with a resolvable institution_id at all;
     everything else (foreign institutions, non-HEP research institutes) correctly has no entry.
     """
-    rows, canonical_hep = _load_admin_orgs_rows()
+    rows, canonical_hep, _canonical_inst_id = _load_admin_orgs_rows()
     crosswalk: dict[int, str] = {}
     for row in rows:
         name = row.get("organisationName", "").strip()
@@ -498,6 +553,7 @@ def _load_institution_hep_crosswalk() -> dict[int, str]:
 
 def load_award_cif_items(
     con: duckdb.DuckDBPyConnection | None = None,
+    diacritic_table: dict[str, list[str]] | None = None,
 ) -> tuple[list[AwardCIFItem], dict[str, dict], dict[str, dict]]:
     """Load Award-CI/F items: investigators_raw.parquet joined to grants_flat.parquet and
     (for the FOR-code upgrade) grant_summaries.csv, filtered to KEEP_ROLES ∩ KEEP_SCHEMES,
@@ -512,6 +568,12 @@ def load_award_cif_items(
     itself carries no provenance (it's a raw atomic unit, not a resolved identity) --
     cluster_items() is responsible for recording a provenance event on any AwardsCIF whose items
     were corrected, once that cluster actually exists.
+
+    diacritic_table: the OAX-corpus-derived bare<->digraph equivalence table (see
+    00c_prepare_oax.py::build_diacritic_table()), widening _name_forms()'s given-/family-name
+    variants. Built from OAX data, so it's the caller's job to build/load it and pass it in --
+    this function stays ARC-only (no OAX read of its own) if the caller passes None/{} (the
+    default), same as omitting it entirely, just without the widened variants.
     """
     corrections = _load_manual_name_corrections()
     orcid_corrections = _load_manual_orcid_corrections()
@@ -531,6 +593,7 @@ def load_award_cif_items(
                 i.orcid,
                 i.is_fellowship,
                 g.admin_org,
+                g.announcement_admin_org,
                 o.institution_id AS institution_oax_id,
                 g.funding_commence_year,
                 g.primary_for_name,
@@ -555,6 +618,8 @@ def load_award_cif_items(
     expanded_for_tokens = make_expanded_for_tokens(str(_FOR_CONCORDANCE_CSV))
     grant_for2020_codes = load_grant_for2020_codes()
     hep_crosswalk = _load_hep_crosswalk()
+    institution_oax_crosswalk = _load_institution_oax_crosswalk()
+    diacritic_table = diacritic_table or {}
 
     items: list[AwardCIFItem] = []
     n_dropped_non_hep_admin = 0
@@ -591,7 +656,7 @@ def load_award_cif_items(
         for_name = upgrade_for_name(r["for2008_code"], r["primary_for_name"])
         for_code = upgrade_for_code(r["for2008_code"]) or r["for2008_code"]
 
-        first_names, family_names = _name_forms(first_name, r["family_name"])
+        first_names, family_names = _name_forms(first_name, r["family_name"], diacritic_table)
         family_name_main = max(family_names, key=len) if family_names else None
         first_initial = _first_initial(first_names)
         first_name_canonical = _first_name_canonical(first_names)
@@ -607,16 +672,29 @@ def load_award_cif_items(
         # FT100100511 (admin_org='Charles Darwin University', eligible_orgs=['Queensland
         # Institute of Medical Research']) -- confirmed by the user as a real institution
         # change (QIMR -> CDU) upon receiving the fellowship, not a data error in either
-        # field. admin_org (extract_grant_flat() prefers the *current*
-        # administering-organisation attrs field over the announcement-time one) can
-        # therefore be more current than eligible_orgs, which is built entirely from the
-        # announcement-time organisations-at-announcement list. Without this union, the scope
-        # filter above (which already validates admin_org resolves to a HEP) and hep_codes
-        # itself could disagree for the same item.
+        # field. Unchanged, untouched by the 2026-08-25 inst_ids addition below -- already
+        # resolved, not part of today's fix, kept exactly as it was.
         eligible_orgs = set(r["eligible_orgs"] or [])
         if r["admin_org"]:
             eligible_orgs.add(r["admin_org"])
         hep_codes = sorted({hep_crosswalk[name] for name in eligible_orgs if name in hep_crosswalk})
+
+        # inst_ids (2026-08-25): this grant's own ARC-org set -- exactly admin_org (current) and
+        # announcement_admin_org, nothing from eligible_orgs (a deliberately different, narrower
+        # set than hep_codes' own input above -- "Other Eligible"/"Collaborating Organisation"
+        # aren't this specific investigator's own institution any more reliably than admin_org
+        # is, and this set feeds a Splink comparison plus 04_resolve_links.py's institution
+        # gate, where that distinction matters). Mapped cleanly to OAX institution ids via
+        # institution_oax_crosswalk; rebuilt fresh every load_award_cif_items() call, never
+        # persisted separately. Confirmed real at scale: 13.03% of grants the pipeline trusts as
+        # "single institution" via n_eligible_orgs==1 actually differ between snapshots (e.g.
+        # DP110100989: Wollongong at announcement, Australian Catholic University current, same
+        # investigators throughout).
+        arc_org_names = {n for n in (r["admin_org"], r["announcement_admin_org"]) if n}
+        inst_ids = sorted({
+            institution_oax_crosswalk[name] for name in arc_org_names
+            if name in institution_oax_crosswalk
+        })
 
         items.append(AwardCIFItem(
             unique_id=r["unique_id"],
@@ -628,6 +706,7 @@ def load_award_cif_items(
             is_fellowship=bool(r["is_fellowship"]),
             admin_org=r["admin_org"],
             institution_oax_id=r["institution_oax_id"],
+            inst_ids=inst_ids,
             funding_commence_year=r["funding_commence_year"],
             for_name=for_name,
             for_code=for_code,
@@ -685,7 +764,15 @@ def _build_awards_cif(cluster_id: str, items: list[AwardCIFItem]) -> AwardsCIF:
         first_names=sorted({fn for it in items for fn in it.first_names}),
         family_names=sorted({fn for it in items for fn in it.family_names}),
         orcids=orcids,
-        inst_arr=sorted({it.institution_oax_id for it in items if it.institution_oax_id}),
+        # 2026-08-25: widened from the single-scalar institution_oax_id per item to the full
+        # inst_ids union (current admin_org + announcement_admin_org per grant, across every
+        # grant this ACIF has) -- see AwardCIFItem.inst_ids' own docstring. Feeds
+        # 03_link_arc_oax.py's ArrayIntersectAtSizes("inst_arr", ...) Splink comparison as loose
+        # evidence (more is safe here, same reasoning as family_names/first_names_multichar) and
+        # 04_resolve_links.py's institution-overlap gate, where len(inst_arr)==1 replaces the
+        # old per-grant arc_all_single_org check (see that file's own docstring for why those
+        # two are NOT equivalent -- the new check is stricter and correct, not a simplification).
+        inst_arr=sorted({oid for it in items for oid in it.inst_ids}),
         hep_codes=sorted({hc for it in items for hc in it.hep_codes}),
         for_names=sorted({it.for_name for it in items if it.for_name}),
         for_codes=sorted({it.for_code for it in items if it.for_code}),
@@ -1518,8 +1605,12 @@ def apply_manual_merges(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
 def merge_same_grant_coinvestigators(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     """Auto-merge same-blocking-key clusters on the same single-org grant -- mirrors
     _merge_same_grant_coinvestigators(). If a grant's only eligible organisation is one
-    university, two clusters sharing (family_name_main, first_initial) on that grant are the
-    same person. Skips pairs whose clusters already carry distinct non-empty ORCIDs."""
+    university, two clusters sharing ANY family-name spelling variant (not just one collapsed
+    via max_by_len -- see the 2026-08-25 fix note, same class of bug confirmed on
+    DP0345157_HansMuhlhaus in the ARC<->OAX linking blocking rule, applicable here too since a
+    cluster's aggregated family_names can genuinely hold 2+ distinct ARC-side spellings) +
+    first_initial on that grant are the same person. Skips pairs whose clusters already carry
+    distinct non-empty ORCIDs."""
     grants = pd.read_parquet(PROCESSED_DATA / "grants_flat.parquet")
     if "n_eligible_orgs" not in grants.columns:
         return clusters
@@ -1529,14 +1620,14 @@ def merge_same_grant_coinvestigators(clusters: list[AwardsCIF]) -> list[AwardsCI
 
     key_groups: dict[tuple, set[str]] = defaultdict(set)
     for c in clusters:
-        fam = max(c.family_names, key=len) if c.family_names else None
         ini = _first_initial(c.first_names)
-        if fam is None or ini is None:
+        if not c.family_names or ini is None:
             continue
         for gid in c.grant_ids:
             grant_code = gid.rsplit("_", 1)[0]
             if grant_code in single_org:
-                key_groups[(grant_code, fam, ini)].add(c.cluster_id)
+                for fam in c.family_names:
+                    key_groups[(grant_code, fam, ini)].add(c.cluster_id)
 
     groups = [ids for ids in key_groups.values() if len(ids) >= 2]
     if not groups:
@@ -1888,6 +1979,72 @@ def compute_orcid_for(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     return clusters
 
 
+def widen_names_with_orcid_bulk_db(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
+    """Additive name-form widening from the local ORCID bulk snapshot
+    (orcid_bulk_lookup.py's orcid_persons.parquet -- ~4.8M ORCID records, no rate limit,
+    ~0.6s for this project's whole HAS_ORCID population). For every cluster with >=1 resolved
+    ORCID, fetches that ORCID's own self-reported `name` + `aliases` and unions their parsed
+    tokens into full_names/first_names/family_names -- never removes or overrides anything
+    already there, matching this project's established "more evidence, never fewer" pattern
+    (diacritic variants, family_names set-overlap blocking).
+
+    Deliberately NOT a data-quality check (2026-08-25 direct user redirect, mid-build): an ad
+    hoc pass comparing ARC's existing family name against the bulk record's own name for every
+    HAS_ORCID cluster found 31/14,852 apparent mismatches; manual inspection showed most were
+    formatting artifacts (Mc Credden vs mccredden, van der Heijden vs vanderheijden, O'Brien vs
+    obrien) this project's own tokenization doesn't fully normalise, not genuine errors --
+    separating a real typo from a genuine married-name/variant needs real case-by-case
+    judgement, exactly the manual burden this project has been trying to reduce. Folding the
+    extra name forms in additively sidesteps that judgement call entirely: worst case it's
+    redundant, best case it recovers a genuine variant nothing else would have caught.
+
+    Runs after compute_orcid_for() (needs c.orcids finalised -- ORCID promotion/enrichment/
+    manual overrides all happen earlier, inside refine_clusters()). This only widens
+    awards_cif_arc_only.parquet's own name fields; the actual benefit shows up downstream, in
+    03_link_arc_oax.py's ARC<->OAX blocking (which reads family_names/first_names from this
+    file), since 01_prepare_arc.py's own ARC-internal Splink dedupe_only run has already
+    completed by the time this step runs -- widening here can't retroactively change
+    ARC-internal cluster membership, by design (confirmed acceptable, not a gap: 2026-08-25).
+    """
+    from src.utils.orcid_bulk_lookup import fetch_by_orcid
+
+    all_orcids = sorted({oid for c in clusters for oid in c.orcids if oid})
+    if not all_orcids:
+        return clusters
+    bulk = fetch_by_orcid(all_orcids)
+    bulk_names_by_orcid: dict[str, list[str]] = {}
+    for _, row in bulk.iterrows():
+        names = ([row["name"]] if row["name"] else [])
+        names += list(row["aliases"]) if row["aliases"] is not None else []
+        bulk_names_by_orcid[row["orcid"]] = [n for n in names if n]
+
+    n_widened = 0
+    for c in clusters:
+        new_full: set[str] = set()
+        new_first: set[str] = set()
+        new_family: set[str] = set()
+        for oid in c.orcids:
+            for raw_name in bulk_names_by_orcid.get(oid, []):
+                new_full.add(raw_name)
+                fn, fam = _name_forms(raw_name, "")
+                new_first.update(fn)
+                new_family.update(fam)
+        added = (
+            (new_full - set(c.full_names))
+            | (new_first - set(c.first_names))
+            | (new_family - set(c.family_names))
+        )
+        if added:
+            c.full_names = sorted(set(c.full_names) | new_full)
+            c.first_names = sorted(set(c.first_names) | new_first)
+            c.family_names = sorted(set(c.family_names) | new_family)
+            n_widened += 1
+
+    print(f"  ORCID bulk-DB name widening: {n_widened} clusters gained >=1 new name form "
+          f"({len(bulk_names_by_orcid)}/{len(all_orcids)} ORCIDs found in local snapshot)")
+    return clusters
+
+
 def cluster_detail_data(
     cluster_id: str, gmap: pd.DataFrame, items: list[AwardCIFItem], grants: pd.DataFrame,
     gap_candidate_ids: list[str] | None = None,
@@ -2071,45 +2228,57 @@ def compute_gap_candidates(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     cluster's own .items (still populated at this point in the pipeline -- compute_gap_candidates
     runs before persistence, and nothing clears .items along the way) rather than taking a
     separate items parameter, so this function's signature and every existing call site stay
-    unchanged."""
+    unchanged.
 
-    def _fnm(family_names):
-        return max(family_names, key=len) if family_names else None
+    Grouping (2026-08-25): candidate pairs are generated from ANY shared family_names token, not
+    one collapsed via max_by_len() -- same class of bug as the ARC<->OAX linking blocking rule
+    fixed the same day (see 03_link_arc_oax.py's blocking_rules_to_generate_predictions): a
+    cluster's own family_names can hold 2+ genuinely distinct ARC-side spellings, and picking
+    only the longest one for grouping can silently miss a real shared-surname pair whose other
+    cluster happened to collapse to a different variant. Each qualifying pair is deduplicated
+    (via a set of sorted cluster_id tuples) before the compatibility checks run, so a pair
+    sharing multiple tokens is still only evaluated once -- the original single-token grouping
+    could never double-count a pair, and this preserves that."""
 
     # Sorted by cluster_id, not clusters' own incoming order -- that order isn't guaranteed
     # stable run-to-run, and it directly determined gap_candidates' list order below (append
     # order within each family-name group). Content was already correct (same set every run);
     # this just makes the order deterministic too, matching the same fix applied to
     # full_name_key/grant_ids in _build_awards_cif().
-    by_fnm: dict[str, list[AwardsCIF]] = defaultdict(list)
+    by_token: dict[str, list[AwardsCIF]] = defaultdict(list)
     for c in sorted(clusters, key=lambda c: c.cluster_id):
-        fnm = _fnm(c.family_names)
-        if fnm:
-            by_fnm[fnm].append(c)
+        for fam in c.family_names:
+            by_token[fam].append(c)
 
-    gap: dict[str, list[str]] = {c.cluster_id: [] for c in clusters}
-    n_compat = n_incompat = 0
-    for fnm, grp in by_fnm.items():
+    by_id = {c.cluster_id: c for c in clusters}
+    candidate_pairs: set[tuple[str, str]] = set()
+    for fam, grp in by_token.items():
         if len(grp) < 2:
             continue
         for i, c1 in enumerate(grp):
             for c2 in grp[i + 1:]:
-                name_incompat = (
-                    not first_names_compatible(c1.first_names, c2.first_names) or
-                    not first_names_compatible(c2.first_names, c1.first_names)
-                )
-                div_incompat = _pairwise_division_mismatch(c1.for2020_codes, c2.for2020_codes)
-                orcid_incompat = (
-                    len(c1.orcids) > 0 and len(c2.orcids) > 0
-                    and not set(c1.orcids) & set(c2.orcids)
-                )
-                scheme_incompat = _scheme_incompat(_scheme_years(c1.items), _scheme_years(c2.items))
-                if name_incompat or div_incompat or orcid_incompat or scheme_incompat:
-                    n_incompat += 1
-                else:
-                    gap[c1.cluster_id].append(c2.cluster_id)
-                    gap[c2.cluster_id].append(c1.cluster_id)
-                    n_compat += 1
+                candidate_pairs.add(tuple(sorted((c1.cluster_id, c2.cluster_id))))
+
+    gap: dict[str, list[str]] = {c.cluster_id: [] for c in clusters}
+    n_compat = n_incompat = 0
+    for cid1, cid2 in sorted(candidate_pairs):
+        c1, c2 = by_id[cid1], by_id[cid2]
+        name_incompat = (
+            not first_names_compatible(c1.first_names, c2.first_names) or
+            not first_names_compatible(c2.first_names, c1.first_names)
+        )
+        div_incompat = _pairwise_division_mismatch(c1.for2020_codes, c2.for2020_codes)
+        orcid_incompat = (
+            len(c1.orcids) > 0 and len(c2.orcids) > 0
+            and not set(c1.orcids) & set(c2.orcids)
+        )
+        scheme_incompat = _scheme_incompat(_scheme_years(c1.items), _scheme_years(c2.items))
+        if name_incompat or div_incompat or orcid_incompat or scheme_incompat:
+            n_incompat += 1
+        else:
+            gap[c1.cluster_id].append(c2.cluster_id)
+            gap[c2.cluster_id].append(c1.cluster_id)
+            n_compat += 1
 
     for c in clusters:
         c.gap_candidates = sorted(gap[c.cluster_id])
@@ -2227,20 +2396,31 @@ AWARDS_CIF_PARQUET = PROCESSED_DATA / "awards_cif.parquet"
 ARC_ONLY_PARQUET = PROCESSED_DATA / "awards_cif_arc_only.parquet"
 
 
-def build_arc_only_population(con: duckdb.DuckDBPyConnection | None = None) -> list[AwardsCIF]:
-    """The genuinely ARC/ORCID-only half of identity resolution -- no OpenAlex data read or
-    required. This is what 01_prepare_arc.py calls and persists to awards_cif_arc_only.parquet:
+def build_arc_only_population(
+    con: duckdb.DuckDBPyConnection | None = None,
+    diacritic_table: dict[str, list[str]] | None = None,
+) -> list[AwardsCIF]:
+    """The genuinely ARC/ORCID-only half of identity resolution -- no OpenAlex data read of its
+    own. This is what 01_prepare_arc.py calls and persists to awards_cif_arc_only.parquet:
     a checkable, inspectable checkpoint that exists and is complete BEFORE any connection to
     OAX is made (03_link_arc_oax.py reads this file, never the OAX-enriched one, closing off
     the circularity that motivated this split).
 
     load_award_cif_items -> cluster_items -> refine_clusters -> set_aside_indigenous_research
-    -> compute_orcid_for -> compute_gap_candidates -> compute_reliability
+    -> compute_orcid_for -> widen_names_with_orcid_bulk_db -> compute_gap_candidates
+    -> compute_reliability
 
     compute_orcid_for() reads only the local ORCID diskcache (00b_enrich_orcid.py's own output,
-    not OAX); compute_gap_candidates()/compute_reliability() operate purely on fields already
+    not OAX); widen_names_with_orcid_bulk_db() reads a separate local ORCID bulk snapshot (see
+    its own docstring) -- neither is OpenAlex/OAX data, so "no OpenAlex data read of its own"
+    still holds. compute_gap_candidates()/compute_reliability() operate purely on fields already
     populated by the steps above them (family_names, for2020_codes, orcids) -- confirmed by
     direct code read, not assumed, before this split was made.
+
+    diacritic_table: passed straight through to load_award_cif_items() -- see its own docstring.
+    Built from OAX data by 00c_prepare_oax.py::ensure_diacritic_table_fresh(), so the caller
+    (01_prepare_arc.py) builds/loads it and passes it in here; this function never reaches into
+    OAX data itself, keeping the "no OpenAlex data read of its own" claim above actually true.
     """
     own_con = con is None
     con = con or duckdb.connect()
@@ -2249,11 +2429,12 @@ def build_arc_only_population(con: duckdb.DuckDBPyConnection | None = None) -> l
             con.execute("SET enable_progress_bar = false")
             con.execute("SET memory_limit = '24GB'")
             con.execute(f"SET temp_directory = '{DUCKDB_TMP_DIR}'")
-        items, corrections, orcid_corrections = load_award_cif_items(con)
+        items, corrections, orcid_corrections = load_award_cif_items(con, diacritic_table)
         clusters = cluster_items(items, corrections, orcid_corrections)
         clusters = refine_clusters(clusters)
         clusters = set_aside_indigenous_research(clusters)
         clusters = compute_orcid_for(clusters)
+        clusters = widen_names_with_orcid_bulk_db(clusters)
         clusters = compute_gap_candidates(clusters)
         clusters = compute_reliability(clusters)
     finally:

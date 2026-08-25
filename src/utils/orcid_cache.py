@@ -4,7 +4,7 @@ Shared ORCID record fetcher with disk cache.
 Cache location: PROCESSED_DATA/orcid_cache/{orcid}.json
 One file per ORCID, containing the full /record endpoint response.
 
-Both 00b_enrich_orcid.py and 05_orcid_assist.py use this so they share
+Both 00b_enrich_orcid.py and 04a_orcid_assist.py use this so they share
 the same cache and format.
 """
 

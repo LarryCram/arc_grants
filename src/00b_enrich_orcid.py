@@ -44,7 +44,8 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import PROCESSED_DATA, DISKCACHE_DIR, ADMIN_ORGS_CSV
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
-from src.utils.names import strip_diacriticals, name_part_tokens
+from src.utils.names import name_part_tokens
+from src.utils.name_diacritic_variants import strip_diacriticals
 from src.utils.io import setup_stdout_utf8
 from src.utils.orcid_cache import orcid_addresses, orcid_external_ids, orcid_works_count
 from src.utils.era_journals import load_era_lookup, orcid_for_codes
@@ -326,7 +327,7 @@ def main(dry_run: bool = False,
     # consolidated onto orcid_client.py's single canonical record cache (previously only used
     # by ad hoc session lookups) after the project accumulated three separate ORCID record
     # stores (this one, orcid_client.py's, and orcid_cache.py's per-file JSON used by
-    # 05_orcid_assist.py) that had silently diverged. See the one-off migration that copied
+    # 04a_orcid_assist.py) that had silently diverged. See the one-off migration that copied
     # every entry from all three into this cache before this change landed.
     record_cache = default_cache()
     search_cache = diskcache.Cache(str(DISKCACHE_DIR / "orcid_searches"))

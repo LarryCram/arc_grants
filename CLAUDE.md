@@ -591,7 +591,7 @@ the genuine checkable-before-OAX checkpoint), `arc_oax_links.parquet` (03_link_a
 reads the arc-only file, unchanged otherwise), `awards_cif.parquet` (new
 `src/03b_enrich_awards_cif.py`, runs after 03, the final OAX-enriched population everything
 downstream consumes). `06_build_oeuvre.py` no longer rebuilds the whole population from scratch
-— it just loads 03b's output. `04_resolve_links.py`/`05_orcid_assist.py`/`01a_diagnose.py`/
+— it just loads 03b's output. `04_resolve_links.py`/`04a_orcid_assist.py`/`01a_diagnose.py`/
 `00a_analyse_arc.py` repointed to the arc-only file (all their reads are ARC-internal fields,
 confirmed by checking every query, not assumed); `analysis/00_samples.py`/`02_accuracy_check.py`/
 `05_explore.py`/`07_analyse_ecr_fellowships.py`/`dossier_build.py` repointed to the enriched
@@ -605,15 +605,12 @@ actually read) — removed rather than repointed.
 
 Also added `seed=42` to both `estimate_u_using_random_sampling()` calls (Splink's own
 u-probability random sampling — the one documented source of run-to-run clustering
-nondeterminism). **Confirmed empirically this is NOT sufficient alone**: a direct double-run
-test (seed set, plus a stable `ORDER BY unique_id` added to `load_award_cif_items()`'s base
-query, tried as a second candidate fix) still showed ~40/22,927 clusters differing between runs.
-Root cause is deeper in Splink's own EM training/clustering internals (suspected parallel
-floating-point summation order) — investigated only as far as ruling out input-row ordering and
-the random-sampling step, not pursued further into Splink's internals per explicit user decision
-("stop here, keep the seed fix, accept residual drift"). Both fixes kept (real, understood,
-partial improvements); the residual is accepted, matching this file's own prior documented
-precedent for the same phenomenon.
+nondeterminism) and a stable `ORDER BY unique_id` to `load_award_cif_items()`'s base query. Both
+real, correct fixes, kept. (A ~40/22,927-cluster cross-run difference observed at the time this
+session, and initially attributed to Splink's own internals, turned out — see "UNRESOLVED
+population driven to zero" below — to be a `set()`-iteration-order bug in this codebase's own
+`_name_forms()`, unrelated to Splink; that attribution was never verified and should not be
+treated as a real finding.)
 
 ### Four real ORCID-collision cases found via `01a_diagnose.py`'s B1 check, all individually verified against live ORCID records
 
@@ -874,9 +871,9 @@ accumulated in this codebase and silently diverged -- `orcid_client.py`'s own
 `orcid_records_authenticated` (10,455 entries), `00b_enrich_orcid.py`'s separate
 `orcid_records` diskcache (18,099 entries, populated before the authenticated client existed),
 and `orcid_cache.py`'s per-file JSON store under `PROCESSED_DATA/orcid_cache/` (4,216 entries,
-used by `05_orcid_assist.py`). Consolidated onto `orcid_client.py`'s cache as the sole store
+used by `04a_orcid_assist.py`). Consolidated onto `orcid_client.py`'s cache as the sole store
 (24,631 entries after migrating all three, ~3,848 + ~10,328 genuinely new records recovered from
-the other two) -- both `00b_enrich_orcid.py` and `05_orcid_assist.py` now fetch/cache through it
+the other two) -- both `00b_enrich_orcid.py` and `04a_orcid_assist.py` now fetch/cache through it
 exclusively; the other two stores are inert, left on disk rather than deleted.
 
 ## ORCID `expanded-search` endpoint: institution-targeted search, built into 00b_enrich_orcid.py (2026-08-21)
@@ -1059,11 +1056,12 @@ got the same treatment, not a systemic pattern repeated everywhere.
 **Verification**: after the fix, four consecutive full-column diffs across independent
 back-to-back reruns (`awards_cif_arc_only.parquet`, every column except `provenance`) came back
 **byte-identical** -- zero differences of any kind, including cluster_id sets, grant membership,
-`full_name_key`, and `resolution_status`. This doesn't prove Splink's own documented EM/clustering
-non-determinism (~40/22,927 clusters, "suspected parallel floating-point summation order",
-previously investigated and parked) is *fully* gone -- one clean run pair doesn't rule out rarer
-residual drift -- but it strongly suggests this bug was responsible for a meaningful share of what
-had been attributed to that residual.
+`full_name_key`, and `resolution_status`. An earlier session's ~40/22,927-cluster cross-run
+difference had been attributed to "Splink's own EM/clustering internals" without ever actually
+verifying that -- this result shows no such thing is needed to explain it: this bug alone
+accounts for it. One clean run-pair doesn't prove zero residual drift under all conditions, but
+there is currently no evidence of any Splink-level non-determinism once inputs are seeded and
+ordered.
 
 **Confirmed splits this session** (each backed by real external evidence -- ORCID records,
 Scopus/Web of Science profiles, biographies, co-authored papers, raw ARC grant-page
@@ -1257,6 +1255,27 @@ the user's decision on whether to continue into the weaker categories or proceed
 Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
 
 **Pending code TODOs:**
+- **`sequencing and character of accuracy_checks.md`'s own checklist -- kept as a live TODO
+  (2026-08-25), not parked.** The user's own working notes, unchanged; none of its items are
+  built yet. Covers: a repair-reporting mechanism for any OAX author id mapped to 2+ ARC persons;
+  earliest-year-on-duplicate-title logic (a work's true publication year, when the same paper
+  appears under 2 titles, is the earlier of the two); a flag/hide rule for implausible 2026+
+  publication years; a work-subfield-vs-ARC-FOR-code consistency cross-check (feeds into, or is
+  fed by, `04c_subfield_cooccurrence_baseline.py`); a bound on academic age (first pub after
+  1950, age under 60) to catch wrongly-attributed decades-old works; an "oax_id problem vs work
+  problem" decision rule using a person's other works as corroborating evidence; a year-
+  continuity check (suspicious gaps in a career timeline); and an ECR/MCR/senior academic-age-
+  at-award check keyed to a not-yet-fully-compiled fellowship-scheme-to-career-stage list
+  (APD/APDI/DECRA=early, FF/QEII=mid, FL=senior, per the note's own draft), with real
+  as-yet-undefined exceptions (e.g. career breaks).
+- **Extract `author_position` on the next OpenAlex snapshot conversion/ETL run** (2026-08-25,
+  user decision -- see `docs/author_position_investigation.md` for the full investigation and
+  its own "What to actually do" 3-step plan): check the raw native snapshot carries the field
+  (likely, given the public API returns it), re-extract it as an explicit persisted column --
+  never inferred from row order, which this project's own investigation found unreliable on
+  both the write and read side -- then verify against real known works (n>1) before trusting it
+  for anything downstream. Not urgent on its own; do it opportunistically the next time the
+  snapshot conversion is run for any other reason, not as a standalone task.
 - **No standalone `AwardsCIF` merge() operator exists — under-merge is structurally
   undetectable today** (2026-08-20, found while auditing the 76 ARC clusters with 2+ distinct
   `family_names` values). `awards_cif.py` has a low-level `_merge_awards_cifs(canonical,
@@ -1277,7 +1296,14 @@ Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
   mechanism currently in this pipeline. Needs: a real `merge(acif_a, acif_b, evidence) ->
   AwardsCIF` operator, callable post-hoc from any pipeline stage, plus something to actually
   *propose* candidate pairs to feed it (cross-ACIF similarity via shared OAX candidates, shared
-  coauthors, or similar) — neither exists yet.
+  coauthors, or similar) — neither exists yet. **The candidate-pair proposer must specifically
+  include the cross-grant B3 signal** (same blocking key + shared co-investigator + same
+  admin_org — `01a_diagnose.py`'s existing B3 check, currently informational-only, never wired
+  to an action; would catch cases like Jun Li, still unresolved as of the 2026-08-24 review for
+  lack of confirmable external evidence, exactly the kind of case a systematic proposer might
+  surface that manual search alone didn't) — folded in here 2026-08-25 rather than tracked as
+  its own separate line item, since building it in isolation would duplicate logic the general
+  operator needs anyway.
 - **Three confirmed candidate wrong-merges found via a full-population same-grant/same-ORCID
   screen, needing human review via `manual_splits.csv`** (2026-08-20). Method that actually
   worked, after two false starts: naive raw-string comparison of `first_name + family_name`
@@ -1342,20 +1368,24 @@ Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
   `\s+` to `[\s,]+`. Verified against both real cases plus the existing `"Anthony Thomas AC FAA"`
   regression case; `tests/test_names.py`/`tests/test_prepare_arc_udfs.py` (48 tests) still pass.
 
-  **A genuinely distinct, unfixed issue surfaced by the same investigation, not a data error**:
-  reversed given-name/family-name order is a real cultural naming-convention feature for some
-  names (Kotagiri Ramamohanarao / Ramamohanarao Kotagiri — Telugu; Pathegama Ranjith / Ranjith
-  Pathegama — Sri Lankan), not something with a "correct" order to normalize toward — ARC's
-  database forces every name into fixed `firstName`/`familyName` fields regardless of whether
-  that convention applies. This breaks strict slot-respecting matching (family-to-family,
+  **A genuinely distinct issue surfaced by the same investigation, not a data error, fixed
+  2026-08-25**: reversed given-name/family-name order is a real cultural naming-convention
+  feature for some names (Kotagiri Ramamohanarao / Ramamohanarao Kotagiri — Telugu; Pathegama
+  Ranjith / Ranjith Pathegama — Sri Lankan), not something with a "correct" order to normalize
+  toward — ARC's database forces every name into fixed `firstName`/`familyName` fields regardless
+  of whether that convention applies. This broke strict slot-respecting matching (family-to-family,
   given-to-given) silently: if every ARC record for someone uses one order and OAX's own
   `display_name` uses the other, the shared token sits in `family_names` on one side and
   `first_names` on the other, and no comparison that only ever compares matching slots would see
   them as related at all — same silent-failure shape as the Clarke contamination bug, from
-  ordering rather than collapsing. Needs an order-agnostic supplementary comparison/blocking rule
-  (pool `first_names ∪ family_names` per side, check for overlap regardless of slot) alongside,
-  not instead of, the slot-respecting comparison — not yet designed in detail or scheduled against
-  the Stage 1/Stage 2 rework below.
+  ordering rather than collapsing. **Fixed**: `03_link_arc_oax.py` gained an explicit
+  order-inversion blocking rule (`l.first_name = r.family_name_main AND l.family_name_main =
+  r.first_name`) plus a standalone `name_order_swap` comparison to score it — see that file's own
+  "Blocking design" docstring for full detail. This is narrower than the order-agnostic full-pool
+  design originally sketched here (which would also catch e.g. a genuinely reordered compound
+  given name, not just a clean first↔family swap) — the narrower version was what a user-supplied
+  Splink blocking-rules reference specified directly, confirmed sufficient for the named cases
+  above, and shipped rather than pursuing further design work beyond what was actually given.
 - **Stop collapsing `family_name_main` to a single scalar for Splink blocking — block on set
   overlap instead** (2026-08-20, high priority, found via two independently-confirmed real cases:
   `DE220100680_SarahMonazamErfani` and `DE130100970_TraceyClarke`). Root cause: OpenAlex's
@@ -1382,38 +1412,96 @@ Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
   is deliberately loose (generates every plausible pair for scoring to narrow down), and no SQL
   join can substitute for Splink's actual probabilistic scoring step. Sizing this side properly
   requires actually building fix (1) below and re-running Splink, not a diagnostic query.
-  Two fixes discussed, not yet built, in order of robustness: (1) cheap — replace `max_by_len()`
-  with a frequency/plurality pick (count how many alternates resolve to each candidate surname,
-  take the majority — Clarke's 7:1 would resolve trivially), with `family_names_display` preferred
-  as an exact-tie fallback; fixes all ~13 call sites at once since they're the same operation.
-  (2) deeper, more robust against any *future* contamination pattern — change the Splink blocking
-  rule itself to match on "shares ≥1 family-name token with the *set* of candidate names" rather
-  than exact-equality on one collapsed representative string; removes the "need to choose somehow"
-  step entirely at the point it actually causes harm, since ARC's own side (`family_names`) is
-  already multi-valued and only the OAX side currently forces a lossy reduction. Not yet decided
-  which to build first; (1) is a pure data-prep change, (2) touches Splink's actual comparison/
-  blocking configuration.
-- 03 Splink inst comparison: when all ARC grants are single-org (`all_single_org` bool in arc_persons), give strong negative weight to inst_arr mismatch (requires conditioning Splink comparison level weights on this flag)
+  **Fixed 2026-08-25 (option (2), the deeper fix) — `03_link_arc_oax.py` now blocks on
+  `list_has_any(l.family_names, r.family_names)` in addition to the scalar `family_name_main`
+  rule** (a disjunctive union, not a replacement — see that file's own comment for the mechanism),
+  with a matching "Set overlap" comparison level so a pair reaching Splink only via this rule
+  scores as real evidence rather than falling to `ElseLevel`. Confirmed against a real,
+  previously-unmatched case, `DP0345157_HansMuhlhaus` (see the "corpus-grounded diacritic
+  equivalence table" section below for the fuller incident). `family_name_main`/`max_by_len()`
+  itself is unchanged and still used for the exact-match comparison level and TF-adjustment — this
+  fix widens what can generate a candidate pair, it doesn't remove the scalar. Option (1)
+  (frequency/plurality pick) was not built; the same class of bug in the two ARC-internal
+  Python-side grouping functions (`merge_same_grant_coinvestigators()`,
+  `compute_gap_candidates()`) was fixed the same day with genuine set-overlap grouping.
+- ~~03 Splink inst comparison: when all ARC grants are single-org, give strong negative weight to
+  inst_arr mismatch (requires conditioning Splink comparison level weights on this flag)~~ —
+  **closed 2026-08-25, already solved a different way.** The proposal was to bake this into
+  `03_link_arc_oax.py`'s own `ArrayIntersectAtSizes("inst_arr", ...)` comparison weights, changing
+  the match_probability Splink itself computes. That was never built, but the same underlying
+  signal (every contributing grant has `n_eligible_orgs == 1`) is already live in
+  `04_resolve_links.py`'s disambiguation cascade — Step 1b, the "single-org institution gate"
+  (`arc_all_single_org`, lines ~89-94/318-336): excludes zero-institution-overlap candidates
+  outright from a single-org person's pool whenever at least one other candidate does overlap.
+  This is the `resolved_by='inst_gate'` bucket in every resolved-output summary (424 most
+  recently). A hard, auditable, separately-bucketed exclusion rule downstream is arguably cleaner
+  than reweighting Splink's own probabilistic score would have been — building the originally-
+  proposed version now would risk duplicating or fighting with a mechanism already working.
 - ~~6-digit FOR → OAX topic field score~~ — **dropped, not applicable**: `research_classification`
   explicitly refuses FOR-family → `OAX_TOPIC` (raises `ValueError`; the finest reachable from a
   FOR input is `OAX_SUBFIELD`, which `_field_score` already uses via `for_resolve.oax_subfield_name()`).
   Also moot against actual data — ARC's own `for_code` is 4-digit only (`^\d{4}` regex in
   `01_prepare_arc.py`), so no 6-digit FOR code exists here to resolve from.
-- Refactor cluster to dataclass with stable opaque id and explicit provenance fields
-- Refactor 00b to target arc_persons (resolution_status==RESOLVED, orcid_status==NO_ORCID)
-- Cross-grant B3 rule: same blocking key + shared co-i + same admin_org → auto-merge (catches Jun Li)
-- Complete 00b run: 7,084 ARC-ORCID records still need fetching (running 2026-06-18; was 11,566)
-- Strengthen reliability_tier: add ARC for_names vs orcid_for_codes agreement signal for HAS_ORCID clusters
-- **Decide on `xpac`/`is_xpac`** (2026-08-08): `/home/lc/k/openalex_jul26/parquet_converted/`
-  (path as of the 2026-08-14 drive consolidation; was `/home/lc/m/...` when this note was written)
-  has `xpac/` and `xpac_raw/` directories alongside `compact/`, mirroring the same table set
-  (authorships, references, work_abstracts, works, work_sdgs, work_topics) — **not currently
-  read by anything in this codebase** (`analysis/01_fetch_oeuvres.py` and everything else only
-  reads `OPENALEX_COMPACT_DIR`). Row counts differ meaningfully (`compact/works` 317.8M vs
-  `xpac/works` 192.6M — not a duplicate), and `xpac/work_topics` was modified *after*
-  `compact/work_topics` on the same day, suggesting it may be a newer or still-in-progress
-  extraction batch. Needs a decision: merge into `compact/`, read alongside it, or leave
-  untouched — deferred, revisit before treating any future oeuvres fetch as complete/final.
+- ~~Refactor cluster to dataclass with stable opaque id and explicit provenance fields~~ —
+  **closed 2026-08-25**. Provenance: already done (`cluster_history`, carried over from the
+  `AwardsCIF` rebuild). Stable opaque id: `cluster_id` stays the derived, human-readable string
+  (`grant_code_Name`; a merge picks `canonical = min(ids)`), deliberately NOT replaced with a
+  true opaque surrogate key on `AwardsCIF` itself — user decision: the real risk this was meant
+  to guard against (a human reading more permanence/meaning into `cluster_id` than it warrants)
+  is better addressed by giving `Dossier()` its own transient, build-time ACIF id when it's
+  constructed (Part B of the still-pending `how-do-yo-know-linked-diffie.md` plan), not by
+  changing the underlying pipeline's own identifier. Separately de-risked: this session's
+  non-determinism fixes (`dict.fromkeys()` instead of `set()` in `_name_forms()` etc.) got four
+  consecutive full reruns to byte-identical cluster membership, so `cluster_id` reassignment
+  across reruns — the practical failure mode this TODO was originally protecting against — isn't
+  currently a live risk the way it looked when this was first written.
+- ~~Refactor 00b to target arc_persons (resolution_status==RESOLVED, orcid_status==NO_ORCID)~~ —
+  **superseded 2026-08-25, not built as originally framed**. The motivating concern (ORCID's
+  daily anonymous-usage quota) no longer applies — `00b_enrich_orcid.py` uses a registered API
+  client (20-year token) since the 2026-08-19/20 session, not anonymous requests. A materially
+  better use of the same underlying idea was built instead:
+  `awards_cif.py::widen_names_with_orcid_bulk_db()`, called from `build_arc_only_population()`
+  right after `compute_orcid_for()`. For every cluster with a resolved ORCID, bulk-fetches that
+  ORCID's own self-reported `name` + `aliases` from a local Zenodo "Easy ORCID" snapshot
+  (`orcid_bulk_lookup.py`'s `orcid_persons.parquet`, ~4.8M records, no rate limit, ~0.6s for this
+  project's whole ~18K-ORCID population) and unions the parsed tokens into
+  `full_names`/`first_names`/`family_names` — purely additive, never removes or overrides
+  anything already there. Measured on a real full rerun: 4,084/22,910 clusters gained ≥1 new name
+  form (14,852/17,989 ARC ORCIDs found in the local snapshot); downstream through
+  `03`→`03b`→`04`, candidate pairs grew 194,959→207,718 and the `orcid`-bucket resolution count
+  rose 7,418→7,612, though the final resolved headline barely moved (22,564→22,563, 98.5%→98.5%)
+  — a real but modest quality shift (more resolutions via strong ORCID evidence, fewer via weaker
+  topic-dedup fallback), not a big top-line mover. Considered and explicitly rejected: doing this
+  widening at item-load time, before `01_prepare_arc.py`'s own ARC-internal Splink `dedupe_only`
+  clustering, so the widened names could influence clustering itself (not just the later ARC↔OAX
+  link) — would reintroduce real over-merge risk (a mistyped ARC-recorded ORCID could newly cause
+  two unrelated ARC records to block-and-merge via a shared wrong-ORCID's bulk-DB name), only
+  covers ARC's raw `i.orcid` (a smaller population than the cluster-level enriched/promoted/
+  manual-override ORCID this function actually uses), and would make merge provenance harder to
+  audit. The real potential upside there — catching genuine ARC-internal under-merge via ORCID
+  alias evidence — belongs behind the still-open `merge()`-operator work above as a reviewed
+  candidate-pair proposer, not as a silent input to Splink's own clustering.
+
+  Also considered and set aside: a bulk reverse-validation check (does an ARC record's *already
+  claimed* ORCID actually match the name on file, catching data-entry typos) — an ad hoc pass
+  found 31/14,852 apparent family-name mismatches, but manual inspection showed most were
+  formatting artifacts this project's tokenization doesn't fully normalise (`Mc Credden` vs
+  `mccredden`, `van der Heijden` vs `vanderheijden`, `O'Brien` vs `obrien`), not genuine errors —
+  separating a real typo from a genuine variant needs real case-by-case judgement. Not built as a
+  hard check for that reason; the additive widening above sidesteps the judgement call entirely.
+- **`xpac`/`is_xpac` — resolved 2026-08-25, don't adopt.** Originally flagged 2026-08-08 as an
+  undecided second OpenAlex extraction batch sitting unused alongside `compact/` (row counts
+  differ: `compact/works` 317.8M vs `xpac/works` 192.6M). Measured directly: `xpac/works`' own
+  `type` classification is markedly cruder than `compact/works`' — `compact` correctly labels
+  218.1M works `article`; `xpac` labels only 49.4M `article`, dumping 82.2M into `other` and
+  50.3M into `dataset` (types `compact` assigns only 11.4M and 24.5M respectively). This strongly
+  suggests `xpac` is a less-refined or different-vintage extraction, not a genuinely
+  complementary population `compact` is missing. Combined with the fact `analysis/utils/
+  exclusions.py`'s `ALLOWED_TYPES` type-filter (already built, already verified against the real
+  type distribution across the full oeuvres corpus before being settled) already does exactly
+  the kind of filtering that would have been the point of adopting `xpac` — the answer is: don't
+  adopt or merge `xpac`, the existing type-filter on the correctly-labelled `compact` source was
+  already the right call, now with a concrete reason why.
 - **Group-level ACIF-membership gate for oeuvre_build.py** (2026-08-16 design, 2026-08-17 partial
   build, **2026-08-18: channeling + persistence + Dossier wiring done**) -- see "Group-level
   ACIF-membership gate design", "`src/utils/work_piling.py` — Phase 2 piling infrastructure", and
@@ -1449,38 +1537,35 @@ Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
   real regression whitelisting the Wei Wang false-merge's own division pair, and a still-unexplained
   gap even after fixing that). Needs a slower pass grounded in real, named-case validation from the
   start, not aggregate statistics alone.
-- **`division_mismatch_for2020()` OAX_FIELD-finer-than-division gap** (2026-08-17, found tracing
-  `DP230101204_MohammadIslam`): a legitimate single-ANZSRC-division researcher can be wrongly
-  flagged as a cross-division mismatch whenever OAX_FIELD splits that one division into 2+ fields --
-  confirmed the whitelist's contents are provably irrelevant to this specific failure mode. Fix
-  belongs in the function's own gating logic, not the whitelist. Not yet fixed.
+- ~~`division_mismatch_for2020()` OAX_FIELD-finer-than-division gap~~ (2026-08-17, found tracing
+  `DP230101204_MohammadIslam`) -- **fixed 2026-08-21, this bullet was stale**: the 2026-08-21
+  session below (`ARC-only/OAX-enriched pipeline split...`) fixed exactly this
+  (`if len(divisions) < 2: return False`) while diagnosing why UNRESOLVED wasn't dropping as
+  expected, but never linked back to remove this bullet -- caught 2026-08-25 when a user
+  question about this exact TODO prompted checking the current code directly instead of trusting
+  the text here.
 
 ## Manual Resolution Techniques (Not Yet Automated in Pipeline)
 
-### Nickname / informal-name variants
-Many Australian researchers publish under informal given names not recorded in ARC data.
-The pipeline has no lookup table for these. Common patterns seen:
-- Bill = William, Tony = Anthony, Beth = Elizabeth
-- Geoff = Geoffrey, Greg = Gregory, Cris = Christiaan
-- Tim = Timothy, Chris = Christiaan, Rob = Robert
-**Potential pipeline addition**: a nickname expansion table applied to `first_name_canonical`
-during blocking (add both canonical and common nicknames as candidate first_initials).
+### Nickname / informal-name variants -- manual-only, not automatable
+Many researchers publish under an alias not recorded in ARC data, with a different first
+initial than their formal given name -- unreachable by `(family_name_main, first_initial)`
+blocking unless a shared ORCID or manual review happens to catch it. Confirmed real, not
+theoretical: the FT (Future Fellows) cohort review catalogued a genuine given-name-alias case,
+Jenny/Yingzi (J vs Y), caught only by manual review of that one cohort, not by anything
+structural in the pipeline. Same failure class as the `family_name_main` blocking bug fixed
+2026-08-25 (see "Next Priority"), on the given-name side instead of the surname side -- true
+population-wide scale is unmeasured.
 
-### Full-OAX surname search for no-affiliation records
-Researchers absent from `openalex_authors_prep.parquet` (AU-filtered) because their
-`last_known_institutions` is empty in the Feb26 snapshot. Manual path: scan raw OAX authors
-parquet by family name + field topic to find the record, then add to manual_resolutions.csv.
-Cases this session: BrienNorton (A5111895832), FrederickRavenhill (A5002864862).
-The pipeline cannot rescue these automatically — they are simply not Splink candidates.
-
-### Chinese compound given-name parsing failure
-OAX `display_name` "Wing Kong Chiu" → HumanName parses `first='Wing', middle='Kong'` but the
-prep code extracts `first_name='kong'` (middle used as first) → `first_initial='k'` not `'w'` →
-wrong blocking key → no Splink candidates generated.
-**Pattern**: OAX display_names of form "GivenA GivenB Surname" where GivenA+GivenB is a Chinese
-compound given name. HumanName may vary in which part it treats as first.
-**Potential fix**: add a cross-blocking rule on middle_initial in 03_link_arc_oax.py (partially
-done already) or detect compound-given-name patterns and index both initials.
+Unlike the surname fix, there is no code-side remedy for this specific pattern: "Yingzi" and
+"Jenny" have no lexical or phonetic relationship for a lookup table to encode -- an adopted
+Western given name is a personal choice, different for every individual, not a derivable mapping.
+(A table of bounded, genuine English diminutives -- Bill=William, Tony=Anthony -- is a separate,
+narrower idea that could in principle be built, but no confirmed case in this project's own data
+has actually needed one; Jenny/Yingzi, the one confirmed case, wouldn't be solved by it.) This
+stays a manual-discovery-only class of case, same as "ORCID mismatch / OAX entity-disambiguation
+errors" immediately below -- caught via ORCID other-names, biography, or coinvestigator/
+institution corroboration, never via blocking.
 
 ### ORCID mismatch / OAX entity-disambiguation errors
 In rare cases OAX has merged two real people into one record (or reassigned an ORCID to a wrong
@@ -1860,21 +1945,22 @@ switch, not a new problem). Revisiting this needs real, named-case validation fr
 statistics alone, which is what let the Wei Wang regression through undetected until the test
 suite caught it.
 
-**Separately found, real, NOT fixed**: a gap in `division_mismatch_for2020()`'s own gating logic,
-independent of whitelist contents entirely -- found tracing `DP230101204_MohammadIslam` (externally
+**Separately found, real -- fixed 2026-08-21, see that session's "ARC-only/OAX-enriched pipeline
+split" notes below**: a gap in `division_mismatch_for2020()`'s own gating logic, independent of
+whitelist contents entirely -- found tracing `DP230101204_MohammadIslam` (externally
 ORCID-confirmed via ORCID.org as correctly resolved by this pipeline's institution/HEP evidence,
 see the group-level gate section above). His two FOR codes ("Materials engineering," primary;
 "Numerical modelling and mechanical characterisation") both sit in ANZSRC division 40 (Engineering)
 -- only one division, ever -- but resolve to two different OAX fields ("Materials Science" and
 "Engineering"). The function's field-count gate sees 2 fields and doesn't return early, then falls
 through to the division-pair whitelist check, which -- with only one division present -- can never
-form a pair to test, so it unconditionally returns True (mismatch). Confirmed directly: substituting
-an all-inclusive whitelist (every possible division pair) still returns True for Islam's real codes
+form a pair to test, so it unconditionally returned True (mismatch). Confirmed directly: substituting
+an all-inclusive whitelist (every possible division pair) still returned True for Islam's real codes
 -- whitelist contents are provably irrelevant to this failure mode. A legitimate single-division
-researcher can be wrongly flagged whenever OAX_FIELD splits their one ANZSRC division into 2+
-fields. Correct fix is in the function's own gating logic (recognize "only one division present" as
-"nothing to check," return False before the pairwise branch), not in the whitelist -- left for a
-future session.
+researcher could be wrongly flagged whenever OAX_FIELD splits their one ANZSRC division into 2+
+fields. This paragraph originally ended "left for a future session" -- stale as of 2026-08-25: the
+fix (`if len(divisions) < 2: return False`, same file, same function) landed four days later in
+the 2026-08-21 session below, which never linked back here to say so.
 
 **Population after all fixes** (full `06_build_oeuvre.py` re-run): 22,920 AwardsCIF built, 104 set
 aside as Indigenous-focused (primary division 45, unchanged), 1,124 had non-primary division-45
@@ -2178,3 +2264,167 @@ this way; 4,636 ACIFs, ≈20% of the population, carry ≥1 affected candidate) 
 The `n_piles==0` bucket dropping from 96 to 16 is the gates working as intended (most were
 filter-starved, not genuinely unpileable). The growth in multi-pile buckets is a real, honest
 side effect flagged above under "Next Priority", not yet checked either way.
+
+## `03b_enrich_awards_cif.py` retired; `04_resolve_links.py` absorbs its job, fixing a confirmed 03b/04 disagreement (2026-08-25)
+
+A real architectural gap flagged earlier this session ("we have made a mess again" — see the
+project memory file's own note on this) was measured, then fixed, not just diagnosed: `03b`
+(`populate_oax_candidates()` → `dedup_oax_candidates()`, computing `awards_cif.parquet`'s
+`oax_candidates`) and `04_resolve_links.py` (computing the actual resolved winner) read the same
+two inputs (`arc_oax_links.parquet`, `awards_cif_arc_only.parquet`) but processed them
+completely independently — `04` had its own separate reimplementation of the same OAX-side
+split-record dedup (same-ORCID/same-topic, dominant-works_count collapse) as its own "Step
+0/0b", over a narrower HC-only (≥0.9) population, while `03b`'s `dedup_oax_candidates()` did
+the equivalent over the full ≥0.5 population. Nothing reconciled the two. Measured directly
+before touching anything: **165/22,563 (0.73%) cases** where `04`'s resolved `oax_id` either
+wasn't in `03b`'s own candidate pool at all (84 cases) or `03b`'s pool was empty while `04`
+still resolved something (81 cases, all `resolved_by='manual'`).
+
+**Root cause, once actually read rather than assumed**: `dedup_oax_candidates()` is not a
+weaker or different version of `04`'s own dedup — it's the *same* logic (confirmed by direct
+comparison, same `TOP_CUT` threshold, same `_oax_names_compat`-style name-compatibility guard),
+already correctly scoped as pure noise-removal-only (its own docstring: "never a choice between
+distinct real people... deliberately NOT ported" past that point). `04`'s independent Steps 0/0b
+were a pointless duplicate of already-correct code, just narrower.
+
+**Fix**: `03b_enrich_awards_cif.py` archived (`ZARCHIVE/src_archive_20260825/`). `04_resolve_links.py`
+rewritten (not patched) to call `enrich_with_oax_candidates()` (03b's own logic, unchanged) as
+its own first step, then restrict every downstream candidate pair to that already-deduped pool
+before disambiguating — the actual fix: whatever `04` resolves to is now guaranteed by
+construction to already be a member of the pool persisted to `awards_cif.parquet`, not merely
+usually consistent with it. `04`'s own former Steps 0/0b removed outright as redundant. `04` now
+also persists `awards_cif.parquet` itself (absorbing 03b's sole output responsibility) — a
+manual "resolve" override pointing at an `oax_id` outside the automated pool now extends the
+pool to include it, so a `manual_resolutions.csv`-driven answer (e.g. the BrienNorton/
+FrederickRavenhill class of case, found via manual full-OAX surname search, never a Splink
+candidate to begin with) stays consistent between both files too.
+
+**Verified, not assumed**: re-ran the exact same disagreement measurement after the fix —
+**mismatch cases: 84 → 0.** A distinct, pre-existing, unrelated finding surfaced doing this
+check carefully: 42 (down from the original 81) empty-pool cases remain, but every one of them
+is a `manual_resolutions.csv` row whose `arc_id` doesn't exist as a `cluster_id` anywhere in the
+*current* ARC population at all (confirmed directly) — a stale reference, presumably from before
+some ARC-side rename/merge/split reshaped cluster membership since that override was written.
+This is not something the consolidation introduced: the old `04` would have silently added the
+same phantom "resolved" rows, it just was never checked against anything that could expose it.
+Deliberately not auto-fixed here — a human may recognise the old `arc_id` under its current name
+and know the right correction; guessing risks silently discarding real manually-confirmed work,
+exactly the failure this whole consolidation was trying to avoid elsewhere. Flagged, not
+resolved — a real, separate small cleanup task for `manual_resolutions.csv` itself.
+
+**Population effect of the consolidation** (full `03`→`04` rerun): `unique_hc` resolutions rose
+8,935→11,363 (cases that used to need `04`'s own Step 0/0b now resolve directly, since the
+upstream dedup already collapsed their pool to one HC survivor before `04`'s cascade ever runs —
+a reclassification, not new information); resolved total moved 22,563→22,529 (98.5%→98.3%),
+with ambiguous-deferred growing 141→179 — a real, expected redistribution from unifying two
+differently-scoped dedup passes into one, not investigated case-by-case beyond confirming the
+core consistency property holds. 376/376 tests passing throughout (5 new tests added earlier
+this session for the unrelated `widen_names_with_orcid_bulk_db()` work; none needed for this
+fix, since none of `04`'s existing pure-function logic changed — the fix is structural, in what
+data reaches it).
+
+`run_pipeline.sh` updated (drops the 03b line); `01_prepare_arc.py`, `03_link_arc_oax.py`, and
+`06_build_oeuvre.py`'s own cross-references (including `06`'s functional freshness-check source
+constant, which pointed at `03b_enrich_awards_cif.py`) updated to point at `04_resolve_links.py`
+instead.
+
+## `inst_arr` widened to a real ARC-org set (admin_org + announcement_admin_org); single-org gate rebuilt on it (2026-08-25)
+
+Follow-on from the 03b/04 consolidation above -- investigating a specific manual-split
+candidate (`DP0559048_StuartJohnstone`, an ORCID-confirmed Wollongong professor whose cluster
+also carries an Australian Catholic University grant) surfaced a real, general pipeline bug, not
+just a one-off case. Full chain, each step verified against real data before the next:
+
+1. **The false-positive signal**: a bulk ORCID-employment-vs-ARC-institution scan (built to
+   re-derive an earlier session's lost 44-case wrongful-merge batch, see below) flagged
+   Johnstone alongside ~1,300 others. Spot-checking 8 real cases (user-directed, not
+   theorized) found the raw signal was noisy -- string-normalization bugs in the scratch script
+   (never in production code) explained some flags, but Johnstone's own live ORCID (user-supplied)
+   showed zero Australian Catholic University connection ever, in an otherwise complete,
+   continuous Wollongong career since 1999.
+2. **A wrong conclusion, caught before being written**: about to record `DP0559048_StuartJohnstone`
+   in `manual_splits.csv`, but the user caught the real explanation first -- `DP110100989`
+   (Wollongong at announcement, Australian Catholic University current, same 6 investigators
+   throughout) is a genuine mid-grant administrative institution transfer, not two different
+   people. **Confirmed at scale**: `admin_org` differs from `announcement_admin_org` for
+   **4,230/33,583 grants (12.60%)**; within the population the pipeline trusted as
+   "single-institution" (`n_eligible_orgs==1`), **3,756/28,823 (13.03%)** still show this. Of
+   those, 1,541 (41%) are unambiguous (exactly one investigator, so no question who moved --
+   confirmed via three real single-investigator examples, e.g. `DP1095404`: Dr George
+   Vamvounis, ARF, UQ->James Cook University, grant correctly followed the fellow); the remaining
+   59% are genuinely ambiguous for multi-investigator grants, per the general principle below.
+3. **The general principle** (direct user correction, twice, after two of my own overcomplicated
+   framings): ARC's raw investigator-level data has NO field tying a specific investigator to a
+   specific organisation. The moment more than one organisation is associated with a grant --
+   whether from multiple simultaneously-eligible orgs or an admin-org change over time -- no
+   institution can be attributed to any *specific* co-investigator on a multi-investigator grant.
+   A grant-level institution signal only ever says something about one specific person when that
+   grant has exactly one investigator.
+4. **The fix, converged on after several false starts**: build ONE clean set per grant item --
+   `{admin_org, announcement_admin_org}`, nothing from `eligible_orgs` (a separate, already-
+   resolved 2026-08-16 field for a different purpose, deliberately left untouched -- see below)
+   -- mapped to OAX institution ids via a new `_load_institution_oax_crosswalk()` (same
+   canonical-name defensive resolution as `_load_hep_crosswalk()`, but institution_id space, not
+   hep_code space -- confirmed these are genuinely different code spaces before assuming either
+   could substitute for the other). Rebuilt fresh every `load_award_cif_items()` call, never
+   persisted separately.
+   - `AwardCIFItem.inst_ids: list[str]` -- new field, this grant's own org set as OAX ids.
+     `institution_oax_id` (the current-admin-org scalar) kept unchanged alongside it -- two
+     different fields for two different jobs (the scalar for grouping/partitioning, e.g.
+     `apply_manual_splits()`'s institution-based split key, which needs one unambiguous value
+     per item, not a set; the new set for evidence).
+   - `AwardsCIF.inst_arr` -- widened from the old single-scalar-per-item aggregate to
+     `{oid for it in items for oid in it.inst_ids}`, the person's whole footprint across every
+     grant. Feeds `03_link_arc_oax.py`'s Splink comparison as loose evidence (more is safe here,
+     same "loose blocking, precise scoring" reasoning as `family_names`/`first_names_multichar`
+     earlier this session) -- unconditionally, regardless of investigator count, since scoring
+     evidence and a hard gate are different mechanisms needing different treatment (a correction
+     from an initial, overcomplicated draft that tried to gate the evidence-widening itself on
+     investigator count).
+   - `hep_codes` (a separate, already-resolved 2026-08-16 field, built from `eligible_orgs`) is
+     completely unchanged -- caught and reverted a real unintended side effect where an early
+     draft of this fix shared the same union variable between the two, silently widening
+     `hep_codes`' own scope as a byproduct of building `inst_ids`.
+5. **`04_resolve_links.py`'s single-org gate rebuilt on this set**: `arc_all_single_org` used to
+   be "does *every* contributing grant individually have `n_eligible_orgs==1`" -- true even for
+   someone whose grants are each individually single-org but point to *different* institutions
+   across a career (never looks across grants), wrongly certifying a genuine two-institution
+   career as "single org." Replaced with `len(inst_arr)==1` on the ACIF's own aggregate set --
+   not an equivalent simplification (corrected after initially presenting it as one) but a
+   stricter, more correct test: it looks at the person's whole footprint, so it qualifies fewer
+   clusters, and the ones it does qualify are more trustworthy. Measured before rebuilding:
+   84.2% of the gate's then-481 resolutions were already provably redundant with the ordinary
+   institution-overlap step immediately after it in the cascade (same winner either way, 0 wrong
+   answers), so tightening the gate was low-risk by construction, not just by argument.
+   `len(inst_arr)==0` was considered as a guard but confirmed unnecessary -- given the existing
+   award/role/HEP-admin_org scope gates, empirically 0/22,910 ACIFs ever have an empty set.
+6. **`00_extract_arc.py`** gained `announcement_admin_org` as its own persisted `grants_flat.parquet`
+   column -- the module's own docstring has claimed "both administering-organisation and
+   announcement-administering-organisation retained" since before this fix existed; `admin_org`
+   itself only ever kept one value (current, falling back to announcement only when current was
+   missing), silently discarding the announcement-time value whenever both were present and
+   differed. The docstring is finally accurate now.
+7. **The lost-44-case re-derivation this was originally chasing was abandoned, correctly**: the
+   ORCID-employment-vs-institution bulk check that started this whole investigation (built to
+   re-derive the 2026-08-08 session's unrecorded 44 wrongful-merge candidates -- see that
+   section's own note on why the original list is unrecoverable) never got fixed into something
+   trustworthy at bulk scale; the real, durable outcome of this session was the general
+   `inst_arr`/gate fix instead, found by taking one specific flagged case seriously rather than
+   trusting the bulk scan's raw numbers.
+
+**Verified end-to-end**: full `00`->`01`->`03`->`04` rerun, 22,910 AwardsCIF throughout,
+`resolution_status` 0 UNRESOLVED. `len(inst_arr)==1` population: 65.6% (15,032/22,910) --
+narrower than an intermediate measurement that also included `eligible_orgs` (44.9%), correctly
+tighter now that the set is exactly `{admin_org, announcement_admin_org}` per the final design.
+Stuart Johnstone's own `inst_arr` now correctly shows both Wollongong and ACU, so he no longer
+qualifies for the single-org gate at all -- exactly the fix. `arc_oax_links.parquet` HC-match
+rate 22,467->22,494/22,910 (98.1%->98.2%); `04`'s resolved total 22,529->22,541/22,910
+(98.3%->98.4%); `inst_gate` bucket 481->472 (smaller, stricter, as expected). 376/376 tests
+passing throughout every step.
+
+**`05_orcid_assist.py` renamed to `04a_orcid_assist.py`** (2026-08-25, separately) -- "05" read
+as "the next mandatory sequential stage," which it never was: it only consumes `04`'s own defer
+bucket (`arc_ambiguous_deferred.parquet`), nothing downstream depends on its output, and it's
+optional human-assist tooling (confirmed absent from `run_pipeline.sh`), not a required step --
+same shape as the existing `00b_`/`00c_` letter-suffix convention for helpers attached to a
+specific stage rather than stages themselves.

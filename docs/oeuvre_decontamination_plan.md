@@ -1,5 +1,9 @@
 # Oeuvre decontamination: detecting and correcting blended-identity OpenAlex records
 
+**Status (2026-08-25): proposal, not implemented.** Candidate starting design for CLAUDE.md's
+tracked "no `merge()` operator, under-merge structurally undetectable" gap -- not itself a
+separate live task. Come back to this file if that work resumes.
+
 ## Terminology and problem statement
 
 **Blended idx**: an OpenAlex `author_idx` that actually represents the merged publication

@@ -24,7 +24,8 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import PROCESSED_DATA, PROFILES_OUT, GRANT_SUMMARIES_CSV
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
-from src.utils.names import strip_diacriticals, name_part_tokens
+from src.utils.names import name_part_tokens
+from src.utils.name_diacritic_variants import strip_diacriticals
 from src.utils.io import setup_stdout_utf8
 
 

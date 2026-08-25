@@ -107,6 +107,9 @@ directly over relying on a summarized fetch, especially for something as order-s
 
 ## Status
 
-Deferred / out of scope for the current ECR bibliometric analysis work (see the plan referenced
-at the top of this note). Every co-author-related table in that plan uses country + track-record
-signals only — no author position field, no proxy inferred from row order.
+Resolved in principle (2026-08-25): the user's own decision is to extract `author_position` (per
+step 1-2 above) the next time the OpenAlex snapshot conversion/ETL is run, rather than as a
+standalone task now. See CLAUDE.md's "Next Priority" list for the durable reminder. Until that
+next conversion run happens, this project's current ECR bibliometric analysis work stays
+unaffected either way -- every co-author-related table in that plan already uses country +
+track-record signals only, no author position field, no proxy inferred from row order.

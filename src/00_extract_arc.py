@@ -155,6 +155,17 @@ def extract_grant_flat(attrs: dict, grant_code: str) -> dict:
         "funding_current":      attrs.get("funding-current"),
         "admin_org":            safe_str(attrs.get("administering-organisation") or
                                          attrs.get("announcement-administering-organisation")),
+        # 2026-08-25: the module docstring above has claimed "both retained" since before this
+        # field existed -- admin_org itself only ever kept ONE value (current, falling back to
+        # announcement only when current is missing), silently discarding the announcement-time
+        # value whenever both are present and differ. Confirmed real at scale: 13.03% of grants
+        # the pipeline treats as "single institution" via n_eligible_orgs==1 actually have a
+        # DIFFERENT admin org between snapshots (e.g. DP110100989: Wollongong at announcement,
+        # Australian Catholic University current, same investigators throughout). Persisted as
+        # its own explicit field, not folded anonymously into eligible_orgs below -- keeping the
+        # announcement-vs-current distinction visible is itself valuable evidence (the specific
+        # transfer story), not just set membership.
+        "announcement_admin_org": safe_str(attrs.get("announcement-administering-organisation")),
         "grant_summary":        safe_str(attrs.get("grant-summary")),
         "n_eligible_orgs":      len(n_eligible_names),
         "eligible_orgs":        sorted(eligible_orgs_names),

@@ -1,16 +1,27 @@
 """
 src/04_resolve_links.py
 
-Disambiguate ARC persons with multiple high-confidence OAX matches.
+Disambiguate ARC persons with multiple high-confidence OAX matches, AND produce the final
+OAX-enriched AwardsCIF population (awards_cif.parquet) -- this script now absorbs the job
+03b_enrich_awards_cif.py used to do separately (archived 2026-08-25, see
+ZARCHIVE/src_archive_20260825/03b_enrich_awards_cif.py and CLAUDE.md's "03b/04 consolidation"
+session notes for the incident this fixes: two independently-computed outputs reading the same
+inputs -- 03b's own dedup_oax_candidates() call and this file's own former Steps 0/0b, an
+independent reimplementation of the same OAX-side split-record dedup logic over a narrower,
+HC-only population -- with nothing reconciling them. Measured before the fix: 165/22,563
+disagreements between awards_cif.parquet's oax_candidates and this file's own resolved oax_id.
 
-Input:  arc_oax_links.parquet       (all HC + sub-HC candidate pairs)
-        awards_cif_arc_only.parquet (orcids, inst_arr per cluster -- ARC-only fields only,
-                                      reads the pre-OAX-enrichment checkpoint deliberately,
-                                      same file 03_link_arc_oax.py reads)
+Input:  arc_oax_links.parquet       (all candidate pairs >= OAX_CANDIDATE_THRESHOLD, 0.5)
+        awards_cif_arc_only.parquet (the full ARC-only population -- 01_prepare_arc.py's output)
         openalex_authors_prep.parquet (orcid, inst_ids per OAX author)
         OAX raw authors parquet (works_count)
 
-Output: arc_oax_resolved.parquet
+Output: awards_cif.parquet
+            The full ARC-only population + oax_candidates (the canonical, deduped candidate
+            pool -- see step 0 below). Replaces 03b_enrich_awards_cif.py's own output; every
+            other field is a pass-through of awards_cif_arc_only.parquet's own columns.
+
+        arc_oax_resolved.parquet
             arc_id, oax_id, match_probability, resolved_by, secondary_oax_ids
             One row per ARC person (only those with a resolved HC match).
             secondary_oax_ids: other HC candidates not chosen (e.g. split OAX records).
@@ -19,16 +30,40 @@ Output: arc_oax_resolved.parquet
             arc_id, oax_id, match_probability, inst_overlap
             All HC candidate rows for ARC persons that remain ambiguous after all steps.
 
-Resolution strategy (applied to HC matches only):
-  0. OAX same-ORCID pre-dedup: two OAX candidates sharing an ORCID are split records;
-     keep the one with more works, collapse others into secondary_oax_ids.
-  1. ORCID exact match: if exactly 1 HC candidate shares the ARC person's ORCID → resolve.
-  2. Institution overlap: restrict to candidates with maximum overlap (if any > 0).
-  3. Unique highest match_probability among remaining candidates → resolve.
-  4. Highest works_count: among remaining ties, pick the OAX record with most indexed works.
-  5. Still tied → defer (genuine common-name collisions).
+        arc_manual_unlinked.parquet
 
-ARC persons with 0 HC matches are in arc_unlinked_deferred.parquet (step 03).
+Pipeline, in order:
+  0. enrich_with_oax_candidates() (populate_oax_candidates -> dedup_oax_candidates, both from
+     awards_cif.py, UNCHANGED) -- the canonical candidate pool, over ALL candidate pairs
+     >= OAX_CANDIDATE_THRESHOLD, not just high-confidence. Collapses OpenAlex's own split-
+     record duplicates (same ORCID, or same specific topic with compatible names, dominant
+     works_count) and removes any candidate a human has confirmed via manual_resolutions.csv's
+     "unlink" rows. THIS is the single place OAX-side split-record dedup happens now -- 04's
+     own former Steps 0/0b are retired; everything below operates on the deduped pool, so a
+     resolution can never point at something dedup already excluded, by construction.
+  1. Disambiguation, applied to whatever HC pairs survive within the deduped pool:
+     1a. Name-character mismatch filter (drop clear non-matches, e.g. Peter vs Patricia).
+     1b. ORCID exact match: if exactly 1 surviving HC candidate shares the ARC person's ORCID.
+     1c. Single-org institution gate: if every contributing ARC grant has n_eligible_orgs==1,
+         exclude candidates with zero institution overlap when at least one candidate has some.
+     2.  Institution overlap: restrict to candidates with maximum overlap (if any > 0).
+     2b. Field match: restrict by OAX topics/subfields vs ARC FOR codes.
+     3.  Unique highest match_probability among remaining candidates.
+     4.  Highest works_count: one candidate holds >TOP_CUT share of combined works_count.
+     5.  Still tied -> defer (genuine common-name collisions).
+  2. Sub-HC rescue: arc_ids with zero surviving HC candidates but exactly one compatible
+     sub-HC candidate (0.7 <= p < 0.9) within the deduped pool.
+  3. Manual resolve/unlink (manual_resolutions.csv) applied last, as before -- a manual
+     "resolve" pointing at an oax_id NOT already in the cluster's deduped oax_candidates
+     extends the pool to include it (so awards_cif.parquet stays consistent with the human's
+     own confirmed answer -- the BrienNorton/FrederickRavenhill class of case, found via manual
+     full-OAX surname search, never a Splink candidate in the first place). Manual "unlink" rows
+     were already applied inside dedup_oax_candidates() above (removed before disambiguation
+     ever ran); the only unlink handling needed here is removing any resolved/deferred row that
+     still names an unlinked arc_id, same as before.
+
+ARC persons with 0 surviving candidates in the deduped pool (HC or sub-HC) are in neither
+arc_oax_resolved.parquet nor arc_ambiguous_deferred.parquet -- accounted for as "Unlinked".
 """
 
 import sys
@@ -36,32 +71,52 @@ from pathlib import Path
 
 import duckdb
 import pandas as pd
-from collections import defaultdict
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import PROCESSED_DATA, OAX_AUTHORS, TOP_CUT
 from src.utils.for_resolve import oax_subfield_name
+from src.utils.pipeline_freshness import assert_fresh
+from src.utils.awards_cif import (
+    load_awards_cif,
+    enrich_with_oax_candidates,
+    persist_awards_cif,
+    ARC_ONLY_PARQUET,
+    AWARDS_CIF_PARQUET,
+)
 
 LINK_THRESHOLD = 0.9
+SUBHC_MIN = 0.7
+
+_MANUAL_RESOLUTIONS_CSV = Path(__file__).resolve().parents[1] / "data_persisted" / "manual_resolutions.csv"
+_LINK_ARC_OAX_SOURCE = Path(__file__).resolve().parent / "03_link_arc_oax.py"
 
 
 def main():
-    arc_path  = PROCESSED_DATA / "awards_cif_arc_only.parquet"
+    arc_path  = ARC_ONLY_PARQUET
     oax_path  = PROCESSED_DATA / "openalex_authors_prep.parquet"
     link_path = PROCESSED_DATA / "arc_oax_links.parquet"
     out_resolved  = PROCESSED_DATA / "arc_oax_resolved.parquet"
     out_ambiguous = PROCESSED_DATA / "arc_ambiguous_deferred.parquet"
+    out_manual_unlinked = PROCESSED_DATA / "arc_manual_unlinked.parquet"
+
+    # Pre-flight -- verify arc_oax_links.parquet (this script's real dependency, along with
+    # awards_cif_arc_only.parquet) isn't older than ITS OWN sources. Absorbed from
+    # 03b_enrich_awards_cif.py's own former check, along with its job. No self-check on this
+    # script's OWN outputs (arc_oax_resolved.parquet / awards_cif.parquet), which are
+    # unconditionally rebuilt below regardless -- see CLAUDE.md's "self-blocking freshness-gate"
+    # note for why checking a producer's own output against its own source is always wrong.
+    assert_fresh(
+        "04_resolve_links (arc_oax_links.parquet)",
+        outputs=[link_path],
+        inputs=[arc_path, oax_path, _LINK_ARC_OAX_SOURCE],
+    )
 
     con = duckdb.connect()
 
-    print("[1/4] Loading data...")
+    print("[1/5] Loading data...")
     links = con.execute(f"SELECT * FROM read_parquet('{link_path}')").fetchdf()
     arc   = con.execute(f"SELECT cluster_id, orcids, inst_arr, for_codes, first_names, grant_ids FROM read_parquet('{arc_path}')").fetchdf()
     oax   = con.execute(f"SELECT unique_id, orcid, inst_ids, topic_names, subfield_names, first_name, family_name_main FROM read_parquet('{oax_path}')").fetchdf()
-
-    grants_flat_path = PROCESSED_DATA / "grants_flat.parquet"
-    gf = con.execute(f"SELECT grant_code, n_eligible_orgs FROM read_parquet('{grants_flat_path}')").fetchdf()
-    grant_n_orgs = dict(zip(gf["grant_code"], gf["n_eligible_orgs"]))
 
     arc["orcid"] = arc["orcids"].apply(lambda x: x[0] if x is not None and len(x) > 0 else None)
     arc_orcid     = dict(zip(arc["cluster_id"], arc["orcid"]))
@@ -70,20 +125,16 @@ def main():
     arc_firstnames = {r["cluster_id"]: [str(fn).lower().strip() for fn in (r["first_names"] if r["first_names"] is not None else [])]
                       for _, r in arc.iterrows()}
 
-    # Precompute: does every grant contributing to this cluster have n_eligible_orgs == 1?
-    # When true, inst_arr is definitively the person's own institution(s) and
-    # non-overlap with an OAX candidate is strong evidence against that candidate.
-    def _grant_codes(grant_ids):
-        if grant_ids is None or len(grant_ids) == 0:
-            return []
-        return [g.split("_")[0] for g in grant_ids]
-
-    arc_all_single_org = {
-        r["cluster_id"]: all(
-            grant_n_orgs.get(c, 999) == 1 for c in _grant_codes(r["grant_ids"])
-        )
-        for _, r in arc.iterrows()
-    }
+    # Single-institution gate (2026-08-25 rewrite): len(inst_arr)==1 on the ACIF's own
+    # aggregate institution set, not the old per-grant "n_eligible_orgs==1 on EVERY contributing
+    # grant" check. These are NOT equivalent -- the old check could be true for someone whose
+    # grants are each individually single-org but point to DIFFERENT institutions across their
+    # career (never looks across grants), wrongly certifying them as "single org" when they
+    # genuinely have two. inst_arr is now the union of admin_org + announcement_admin_org
+    # across every grant this ACIF has (see AwardCIFItem.inst_ids' own docstring) -- a person's
+    # whole footprint, not one grant at a time -- so len==1 is a stricter, more correct test:
+    # fewer clusters qualify, but the ones that do are more trustworthy.
+    arc_all_single_org = {cid: len(inst) == 1 for cid, inst in arc_inst.items()}
     oax_orcid     = dict(zip(oax["unique_id"],  oax["orcid"]))
     oax_inst      = dict(zip(oax["unique_id"],  oax["inst_ids"]))
     oax_topics    = dict(zip(oax["unique_id"],  oax["topic_names"]))
@@ -93,25 +144,45 @@ def main():
     oax_familyname= {r["unique_id"]: str(r["family_name_main"] or "").lower().strip()
                      for _, r in oax.iterrows()}
 
+    print("[2/5] Computing canonical OAX candidate pool (populate_oax_candidates -> dedup_oax_candidates)...")
+    clusters = load_awards_cif(arc_path)
+    clusters = enrich_with_oax_candidates(clusters, con)
+    oax_candidates_by_arc: dict[str, set[str]] = {c.cluster_id: set(c.oax_candidates) for c in clusters}
+    n_with_candidates = sum(1 for s in oax_candidates_by_arc.values() if s)
+    print(f"  {n_with_candidates:,} / {len(clusters):,} clusters have >=1 OAX candidate (deduped)")
+
+    # Restrict every candidate pair to the deduped pool -- the actual fix: anything this
+    # script resolves to is guaranteed to already be a member of the pool persisted to
+    # awards_cif.parquet below, by construction, not by two separately-computed outputs
+    # happening to agree.
+    links = links[links.apply(
+        lambda r: r["oax_id"] in oax_candidates_by_arc.get(r["arc_id"], set()), axis=1
+    )]
+
     hc = links[links["high_confidence"]].copy()
     per_arc = hc.groupby("arc_id").size()
 
-    # Fetch works_count for all HC candidate OAX IDs
-    print("[2/4] Fetching OAX works_count...")
+    print("[3/5] Fetching OAX works_count...")
     hc_oax_ids = hc["oax_id"].unique().tolist()
-    idxs_sql = ", ".join(i.replace("https://openalex.org/A", "") for i in hc_oax_ids)
-    wc_df = con.execute(f"""
-        SELECT author_idx, works_count
-        FROM read_parquet('{OAX_AUTHORS}/*.parquet')
-        WHERE author_idx IN ({idxs_sql})
-    """).fetchdf()
-    oax_works = {
-        f"https://openalex.org/A{idx}": wc
-        for idx, wc in zip(wc_df["author_idx"], wc_df["works_count"])
-    }
+    oax_works = {}
+    if hc_oax_ids:
+        idxs_sql = ", ".join(i.replace("https://openalex.org/A", "") for i in hc_oax_ids)
+        wc_df = con.execute(f"""
+            SELECT author_idx, works_count
+            FROM read_parquet('{OAX_AUTHORS}/*.parquet')
+            WHERE author_idx IN ({idxs_sql})
+        """).fetchdf()
+        oax_works = {
+            f"https://openalex.org/A{idx}": wc
+            for idx, wc in zip(wc_df["author_idx"], wc_df["works_count"])
+        }
     print(f"  Retrieved works_count for {len(oax_works):,} / {len(hc_oax_ids):,} OAX IDs")
 
-    # Persons with exactly 1 HC match — already resolved
+    # Persons with exactly 1 HC match within the deduped pool -- already resolved. A cluster
+    # whose pool dedup_oax_candidates() already collapsed to one HC survivor (what used to need
+    # this file's own Step 0/0b) correctly lands here now as unique_hc, not a regression --
+    # the true reason for resolution moved upstream, into the shared dedup step, from a
+    # duplicate reimplementation of the same logic that used to live only here.
     single_ids = per_arc[per_arc == 1].index
     resolved_single = hc[hc["arc_id"].isin(single_ids)][
         ["arc_id", "oax_id", "match_probability"]
@@ -119,14 +190,14 @@ def main():
     resolved_single["resolved_by"] = "unique_hc"
     resolved_single["secondary_oax_ids"] = [[] for _ in range(len(resolved_single))]
 
-    # Persons with 2+ HC matches — need disambiguation
+    # Persons with 2+ HC matches (post-dedup) — need disambiguation
     ambig_ids = per_arc[per_arc >= 2].index
     ambig = hc[hc["arc_id"].isin(ambig_ids)].copy()
 
-    print(f"  ARC persons with 1 HC match:    {len(single_ids):,}")
-    print(f"  ARC persons with 2+ HC matches: {len(ambig_ids):,}")
+    print(f"  ARC persons with 1 HC match (post-dedup):    {len(single_ids):,}")
+    print(f"  ARC persons with 2+ HC matches (post-dedup): {len(ambig_ids):,}")
 
-    print("[3/4] Disambiguating...")
+    print("[4/5] Disambiguating...")
 
     def _lst(v):
         return list(v) if v is not None else []
@@ -166,20 +237,6 @@ def main():
                 return True   # short ARC name, or prefix matches → compatible
         return False           # all ARC first names clearly differ from OAX
 
-    def _oax_names_compat(oax_ids):
-        """True when all OAX candidates in a group could plausibly be the same person.
-        Requires identical family_name_main AND mutually compatible first names
-        (same 3-char prefix among all full names; initials <4 chars pass through).
-        Used to guard oax_topic_dedup against collapsing genuinely different people."""
-        fams = {oax_familyname.get(oid, "") for oid in oax_ids}
-        if len(fams) != 1:
-            return False
-        full_firsts = [oax_firstname.get(oid, "") for oid in oax_ids if len(oax_firstname.get(oid, "")) >= 4]
-        if len(full_firsts) < 2:
-            return True   # at most one full first name → no conflict possible
-        prefix = full_firsts[0][:3]
-        return all(n[:3] == prefix for n in full_firsts[1:])
-
     ambig["inst_overlap"] = ambig.apply(
         lambda r: _inst_overlap(r["arc_id"], r["oax_id"]), axis=1
     )
@@ -203,89 +260,14 @@ def main():
         # dedup_oax_candidates().
         all_oax = sorted(set(group["oax_id"]))
 
-        # Step 0: OAX same-ORCID pre-dedup — two OAX IDs sharing an ORCID are
-        # split records of the same person; keep the dominant one (>80% of group
-        # works_count). If no single record is dominant, leave the group intact.
-        orcid_to_oax_ids = defaultdict(list)
-        for oax_id in all_oax:
-            orcid = oax_orcid.get(oax_id)
-            if orcid:
-                orcid_to_oax_ids[orcid].append(oax_id)
-        split_secondaries = set()
-        for ids in orcid_to_oax_ids.values():
-            if len(ids) > 1:
-                wcs = {oid: oax_works.get(oid, 0) for oid in ids}
-                total = sum(wcs.values())
-                best = max(wcs, key=wcs.get)
-                if total > 0 and wcs[best] / total > TOP_CUT:
-                    split_secondaries.update(oid for oid in ids if oid != best)
-        if split_secondaries:
-            group = group[~group["oax_id"].isin(split_secondaries)]
-        if len(group) == 1:
-            r = group.iloc[0]
-            resolved_rows.append({
-                "arc_id": r["arc_id"], "oax_id": r["oax_id"],
-                "match_probability": r["match_probability"],
-                "resolved_by": "oax_orcid_dedup",
-                "secondary_oax_ids": [x for x in all_oax if x != r["oax_id"]],
-            })
-            continue
-
-        # Step 0b: same-topic pre-dedup — two OAX candidates sharing ≥1 specific topic
-        # are likely split records of the same person; keep the one with more works.
-        # Limitation: this collapses the photonics-related splits of a common surname
-        # (e.g. Tucker) correctly, but leaves unrelated namesakes with different topics
-        # in the group. If those namesakes have even slight field overlap with the ARC
-        # FOR codes, step 2b's min_fs==0 guard won't fire and the case defers.
-        # A future improvement: treat a topic-sharing cluster as a confirmed OAX split
-        # when one member carries an ORCID (even if the ARC person lacks one), and
-        # use the ORCID-bearing member's identity to exclude out-of-field namesakes.
-        topic_to_oax_ids = defaultdict(list)
-        for oax_id in sorted(set(group["oax_id"])):
-            for t in _lst(oax_topics.get(oax_id)):
-                topic_to_oax_ids[t].append(oax_id)
-        # Protect any OAX record that matches the ARC person's own ORCID.
-        arc_person_orcid = arc_orcid.get(arc_id)
-        orcid_protected = {
-            oid for oid in set(group["oax_id"])
-            if arc_person_orcid and oax_orcid.get(oid) == arc_person_orcid
-        }
-        topic_secondaries = set()
-        for ids in topic_to_oax_ids.values():
-            if len(ids) > 1:
-                # Name-compatibility guard: only treat as split records when all
-                # candidates share the same family name and compatible first names.
-                # Prevents collapsing two different people who share a research topic.
-                if not _oax_names_compat(ids):
-                    continue
-                wcs = {oid: oax_works.get(oid, 0) for oid in ids}
-                best = max(wcs, key=wcs.get)
-                topic_secondaries.update(
-                    oid for oid in ids if oid != best and oid not in orcid_protected
-                )
-        if topic_secondaries:
-            group = group[~group["oax_id"].isin(topic_secondaries)]
-            split_secondaries.update(topic_secondaries)
-        if len(group) == 1:
-            r = group.iloc[0]
-            resolved_rows.append({
-                "arc_id": r["arc_id"], "oax_id": r["oax_id"],
-                "match_probability": r["match_probability"],
-                "resolved_by": "oax_topic_dedup",
-                "secondary_oax_ids": [x for x in all_oax if x != r["oax_id"]],
-            })
-            continue
-
-        # Step 0c: first-name character mismatch filter.
+        # Step 1a: first-name character mismatch filter.
         # If at least one candidate has a compatible first name, drop those that
         # clearly don't.  "Compatible" = either name is <4 chars (initial/short),
         # OR both names share their first 3 chars.  Only fires when the filter
         # would actually reduce the candidate set.
         compat = group["oax_id"].apply(lambda oid: _names_compat(arc_id, oid))
         if compat.any() and not compat.all():
-            name_excluded = set(group.loc[~compat, "oax_id"])
             group = group[compat]
-            split_secondaries.update(name_excluded)
         if len(group) == 1:
             r = group.iloc[0]
             resolved_rows.append({
@@ -296,7 +278,7 @@ def main():
             })
             continue
 
-        # Step 1: unique ORCID match
+        # Step 1b: unique ORCID match
         orcid_matches = group[group["orcid_match"]]
         if len(orcid_matches) == 1:
             r = orcid_matches.iloc[0]
@@ -307,7 +289,7 @@ def main():
             })
             continue
 
-        # Step 1b: single-org institution gate
+        # Step 1c: single-org institution gate
         # All contributing ARC grants have n_eligible_orgs == 1 → the ARC inst_arr
         # is the person's definitive institution. Exclude candidates with no overlap
         # when at least one candidate does overlap.
@@ -317,7 +299,6 @@ def main():
                 gated_out = set(group.loc[group["inst_overlap"] == 0, "oax_id"])
                 if gated_out:
                     group = group[group["inst_overlap"] > 0]
-                    split_secondaries.update(gated_out)
             if len(group) == 1:
                 r = group.iloc[0]
                 resolved_rows.append({
@@ -387,10 +368,9 @@ def main():
         columns=["arc_id", "oax_id", "match_probability", "inst_overlap"]
     )
 
-    # Sub-HC rescue: arc_ids with zero HC candidates that have at least one
-    # sub-HC pair (0.5 ≤ p < 0.9) surviving the name-compatibility filter.
-    # If exactly one candidate survives, resolve it as "name_filter".
-    SUBHC_MIN = 0.7
+    # Sub-HC rescue: arc_ids with zero HC candidates (within the deduped pool) that have at
+    # least one sub-HC pair (0.5 ≤ p < 0.9, also within the deduped pool) surviving the
+    # name-compatibility filter. If exactly one candidate survives, resolve it as "name_filter".
     hc_arc_ids = set(hc["arc_id"])
     sub_hc_rescue = links[
         (~links["high_confidence"])
@@ -434,8 +414,8 @@ def main():
     resolved_rescue = pd.DataFrame(rescue_rows)
     resolved = pd.concat([resolved_single, resolved_ambig, resolved_rescue], ignore_index=True)
 
-    print("[4/4] Applying manual resolutions...")
-    manual_path = Path(__file__).resolve().parents[1] / "data_persisted" / "manual_resolutions.csv"
+    print("[5/5] Applying manual resolutions and saving...")
+    manual_path = _MANUAL_RESOLUTIONS_CSV
     manual_unlinked = pd.DataFrame(columns=["arc_id", "note"])
     n_manual_resolve = n_manual_unlink = 0
     if manual_path.exists():
@@ -461,6 +441,11 @@ def main():
                     "secondary_oax_ids": others,
                 }])], ignore_index=True)
                 n_manual_resolve += 1
+                # Keep awards_cif.parquet's own oax_candidates consistent with a manual
+                # resolution even when it points outside the automated candidate pool (the
+                # BrienNorton/FrederickRavenhill class of case -- found via manual full-OAX
+                # surname search, never a Splink candidate in the first place, see CLAUDE.md).
+                oax_candidates_by_arc.setdefault(aid, set()).add(row["oax_id"])
             elif action == "unlink":
                 deferred = deferred[deferred["arc_id"] != aid]
                 resolved  = resolved[resolved["arc_id"] != aid]
@@ -474,30 +459,35 @@ def main():
     else:
         print("  (none)")
 
-    out_manual_unlinked = PROCESSED_DATA / "arc_manual_unlinked.parquet"
-
-    print("[5/5] Saving outputs...")
     resolved.to_parquet(out_resolved, index=False)
     deferred.to_parquet(out_ambiguous, index=False)
     manual_unlinked.to_parquet(out_manual_unlinked, index=False)
 
-    all_arc = con.execute(f"SELECT count(*) FROM read_parquet('{arc_path}')").fetchone()[0]
+    # Write the final, resolution-consistent oax_candidates back onto the AwardsCIF population
+    # and persist awards_cif.parquet -- absorbs 03b_enrich_awards_cif.py's own job (archived
+    # 2026-08-25), guaranteeing this file and arc_oax_resolved.parquet can never disagree about
+    # which OAX candidates exist for a given ARC person, since both now come from one pass.
+    for c in clusters:
+        c.oax_candidates = sorted(oax_candidates_by_arc.get(c.cluster_id, set()))
+    persist_awards_cif(clusters, AWARDS_CIF_PARQUET)
 
+    all_arc = len(clusters)
     by_counts = resolved["resolved_by"].value_counts() if len(resolved) else pd.Series(dtype=int)
     print(f"\n  Total ARC persons:              {all_arc:,}")
     print(f"  Resolved (1 HC match):          {by_counts.get('unique_hc', 0):,}")
     print(f"  Resolved (disambiguated):        {len(resolved) - by_counts.get('unique_hc', 0):,}")
-    for label in ["oax_orcid_dedup", "oax_topic_dedup", "orcid", "inst_gate", "inst_overlap", "field", "probability", "works_count", "name_filter", "manual"]:
+    for label in ["orcid", "inst_gate", "inst_overlap", "field", "probability", "works_count", "name_filter", "manual"]:
         n = by_counts.get(label, 0)
         if n:
             print(f"    of which by {label+':':16s} {n:,}")
     print(f"  Resolved total:                  {len(resolved):,}  ({100*len(resolved)/all_arc:.1f}%)")
     print(f"  Ambiguous deferred:              {deferred['arc_id'].nunique():,}")
     print(f"  Manual unlinked:                 {len(manual_unlinked):,}")
-    print(f"  Unlinked (no HC match):          {all_arc - len(resolved) - deferred['arc_id'].nunique() - len(manual_unlinked):,}")
+    print(f"  Unlinked (no candidate resolved): {all_arc - len(resolved) - deferred['arc_id'].nunique() - len(manual_unlinked):,}")
     print(f"\n  → {out_resolved}")
     print(f"  → {out_ambiguous}")
     print(f"  → {out_manual_unlinked}")
+    print(f"  → {AWARDS_CIF_PARQUET}")
 
 
 if __name__ == "__main__":

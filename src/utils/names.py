@@ -1,49 +1,20 @@
 """
-Shared name-normalisation helpers used across all pipeline layers.
+Shared name tokenisation/parsing helpers used across all pipeline layers. Diacritic-specific
+handling (bare/digraph matching, the corpus-grounded equivalence table) split out to
+name_diacritic_variants.py (2026-08-25) -- imported from here where still needed.
 """
 
-import itertools
 import re
-import unicodedata
 
 from nameparser import HumanName
 from nameparser.config import CONSTANTS
+
+from src.utils.name_diacritic_variants import canonicalize_name_punctuation, strip_diacriticals
 
 # Register Australian post-nominals so HumanName parses them as suffixes,
 # not as family name tokens (e.g. "Summerhayes OAM" → last="Summerhayes").
 for _pn in ("AC", "AO", "AM", "OAM"):
     CONSTANTS.suffix_acronyms.add(_pn)
-
-# Exotic Unicode hyphens → ASCII hyphen
-_EXOTIC_HYPHENS = re.compile(r"[­‐‑‒–—―−－]")
-
-# Every apostrophe/quote-mark variant seen in real name data -> canonical ASCII apostrophe.
-# U+2019 (curly right single quote) is the one that actually matters most in practice: OpenAlex's
-# own display_name uses it for O'Neill-style surnames (confirmed directly, 2026-08-19, comparing
-# ORCID's own straight-apostrophe family names against OpenAlex's -- ~40 of ~90 real ORCID<->OAX
-# name "mismatches" traced to exactly this, not a genuine spelling difference), while ARC/ORCID
-# data typically uses the plain ASCII one. strip_diacriticals() used to just drop it silently
-# (non-ASCII, no NFD diacritic decomposition -- same failure class as ø/ł/œ), which meant an
-# apostrophe-bearing surname could carry TWO different normalized forms depending purely on which
-# apostrophe character the source system happened to use.
-_QUOTE_VARIANTS = re.compile(r"[‘’ʼ`´ʹ′]")
-
-
-def canonicalize_name_punctuation(s: str) -> str:
-    """Preprocessor: collapse every apostrophe/quote-mark variant to a canonical ASCII
-    apostrophe and every hyphen/dash variant to a canonical ASCII hyphen. Must run BEFORE
-    HumanName() parses the string, not just afterward on already-extracted parts -- HumanName's
-    own splitting decisions (what counts as one compound token, where a name breaks) depend on
-    the punctuation actually being uniform, so canonicalizing only the output (as
-    strip_diacriticals() alone used to do) is too late to help. Call at every HumanName(...)
-    call site on the raw input string; strip_diacriticals() also applies it internally so
-    anything processed downstream gets it too, even from a caller that forgot to canonicalize
-    up front."""
-    if not s:
-        return s
-    s = _QUOTE_VARIANTS.sub("'", s)
-    s = _EXOTIC_HYPHENS.sub("-", s)
-    return s
 
 # Trailing Australian / British post-nominal awards (handles stacking: "AO FAA" or "FRS, FREng").
 # OL (Officer of the Order of Logohu, PNG) and FREng (Fellow of the Royal Academy of Engineering)
@@ -71,52 +42,6 @@ def strip_postnominals(name: str) -> str:
     what's registered in suffix_acronyms.
     """
     return _POSTNOMINALS.sub("", name).strip()
-
-
-def strip_diacriticals(s: str) -> str:
-    """Normalise exotic hyphens/apostrophes to ASCII, Turkish dotless-ı → i, strip diacriticals."""
-    s = canonicalize_name_punctuation(s)
-    s = s.replace("ı", "i").replace("İ", "I")
-    return unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode("ascii")
-
-
-# German umlauts + eszett, Scandinavian stroke-o and overring-a -- each has two real,
-# conventional ASCII spellings, not one. strip_diacriticals() only ever produces the bare form
-# (ü→u, ä→a) via NFD decomposition, and silently DROPS ø/ß entirely (confirmed directly: ø/Ø/ß
-# have no NFD canonical decomposition, so unicodedata.normalize("NFD", ...).encode("ascii",
-# "ignore") just discards them rather than substituting -- "Sørensen" -> "Srensen", a real,
-# separate bug this table also happens to fix as a side effect). The digraph form (ü→ue, ø→oe,
-# å→aa) is the other real convention (German/Scandinavian romanization), used interchangeably
-# with the bare form across ARC/OpenAlex data depending on which system captured the name --
-# confirmed on a real case (DP0343064_FrankGruetzner / OpenAlex A5035572752 "Frank Grützner"):
-# ARC's own record uses the digraph "Gruetzner", OpenAlex's display_name uses the umlaut, and
-# strip_diacriticals()'s bare-only output ("Grutzner") matched neither -- Splink's blocking never
-# even paired them (2026-08-18).
-_DIACRITIC_VARIANTS = {
-    "ü": ("u", "ue"), "ö": ("o", "oe"), "ä": ("a", "ae"),
-    "ß": ("s", "ss"),
-    "ø": ("o", "oe"), "å": ("a", "aa"),
-    # Polish ł (U+0142) has no NFD canonical decomposition either -- same drop-to-nothing failure
-    # as ø/ß (strip_diacriticals() alone turns "Włodkowic" into "wodkowic", missing the L
-    # entirely). No real digraph convention exists for it, unlike ü/ö/ä/ø/å -- just the bare "l".
-    "ł": ("l",),
-}
-
-
-def expand_diacritic_variants(s: str) -> list[str]:
-    """Every combination of bare-vs-digraph substitution for each umlaut/eszett/stroke/overring
-    character in s, each then passed through strip_diacriticals().lower() for any other,
-    ordinary diacritics. A name with no such characters returns a single-element list (itself,
-    normalised) -- always at least as much as strip_diacriticals() alone would give, never less.
-    Multiple special characters in one name produce the full cartesian product (e.g. a
-    hypothetical "Müller-Søren" -> 4 variants), though real surnames rarely carry more than one.
-    """
-    if not s:
-        return []
-    lowered = s.lower()
-    choices = [_DIACRITIC_VARIANTS.get(ch, (ch,)) for ch in lowered]
-    raw_variants = {"".join(combo) for combo in itertools.product(*choices)}
-    return sorted({strip_diacriticals(v).lower().strip() for v in raw_variants} - {""})
 
 
 def strip_parens(s: str) -> str:

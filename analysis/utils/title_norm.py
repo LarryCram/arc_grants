@@ -32,7 +32,7 @@ step rather than reimplementing it.
 
 import re
 
-from src.utils.names import strip_diacriticals
+from src.utils.name_diacritic_variants import strip_diacriticals
 
 _HTML_ENTITIES = {
     "&lt;": "<", "&gt;": ">", "&amp;": "&", "&quot;": '"', "&apos;": "'", "&nbsp;": " ",

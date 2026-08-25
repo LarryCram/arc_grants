@@ -19,19 +19,9 @@ later overwrite this script's output at the same path with its own OAX-enriched 
 genuinely ARC-only, checkable-before-OAX artifact ever actually existed on disk. Fixed by calling
 build_arc_only_population() (no OAX dependency at all) and persisting to a distinctly-named file,
 awards_cif_arc_only.parquet -- 03_link_arc_oax.py reads THIS file, never awards_cif.parquet.
-awards_cif.parquet itself is now produced by a later, separate stage
-(src/03b_enrich_awards_cif.py) that runs after 03 and enriches this file's output with
-oax_candidates.
-
-Not yet ported from the old implementation (flagged, not silently dropped):
-    - _export_manual_splits_template() -- regenerated a human-review candidate list
-      (data_persisted/manual_splits.csv) of clusters suspected of merging 2+ real people.
-      Confirmed 2026-08-21 (cross-session, see CLAUDE.md) that this file has never actually had
-      a human-confirmed row in its entire history, so nothing operationally depends on it running
-      here today -- but the mechanism itself is real and worth rebuilding against AwardsCIF
-      objects rather than a DataFrame, as a follow-up.
-    - _diagnostic_report() -- printed a same-session A/B case breakdown of suspicious clusters;
-      superseded in spirit by 01a_diagnose.py, which already runs against AwardsCIF's own output.
+awards_cif.parquet itself is now produced by 04_resolve_links.py (2026-08-25: absorbed from a
+former separate stage, src/03b_enrich_awards_cif.py, archived -- see 04's own docstring for why),
+which runs after 03 and enriches this file's output with oax_candidates.
 
 Output:
     awards_cif_arc_only.parquet   (PROCESSED_DATA) -- the ARC/ORCID-only identity population,
@@ -40,6 +30,7 @@ Output:
                                                         that only need the grant/cluster mapping
 """
 
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -52,9 +43,19 @@ from src.utils.awards_cif import (
     GRANT_CLUSTER_MAP_PARQUET,
 )
 
+# 00c_prepare_oax.py's filename starts with a digit, so it can't be imported with a normal
+# `import` statement -- load it by path instead (same technique tests/test_01a_diagnose.py
+# already uses for the same reason).
+_spec = importlib.util.spec_from_file_location(
+    "prepare_oax", Path(__file__).resolve().parent / "00c_prepare_oax.py"
+)
+prepare_oax = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(prepare_oax)
 
 def main():
-    clusters = build_arc_only_population()
+    prepare_oax.ensure_fresh()
+    diacritic_table = prepare_oax.ensure_diacritic_table_fresh()
+    clusters = build_arc_only_population(diacritic_table=diacritic_table)
     persist_awards_cif(clusters, ARC_ONLY_PARQUET)
     persist_grant_cluster_map(clusters, GRANT_CLUSTER_MAP_PARQUET)
 

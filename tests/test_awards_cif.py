@@ -38,6 +38,7 @@ from src.utils.awards_cif import (
     _load_institution_hep_crosswalk,
     cluster_detail_data,
     cluster_detail_text,
+    widen_names_with_orcid_bulk_db,
 )
 
 
@@ -111,8 +112,27 @@ class TestNameForms:
         assert "ac" not in family_names
 
     def test_diacritical_stripped_from_family(self):
+        # 2026-08-25: family_names now correctly holds BOTH the bare and digraph forms when a
+        # literal diacritic is present ("Müller" -> ü has a real German digraph convention, "ue")
+        # -- see diacritic_variants()'s docstring. Previously only the bare form was ever kept.
         _, family_names = _name_forms("Hans", "Müller")
-        assert family_names == ["muller"]
+        assert family_names == ["muller", "mueller"]
+
+    def test_diacritic_table_widens_family_name(self):
+        # ARC's raw data never contains a literal diacritic (always plain ASCII) -- the corpus
+        # table is what lets a bare-only ARC spelling like "Muhlhaus" also carry the confirmed
+        # digraph counterpart, closing the real DP0345157_HansMuhlhaus gap (2026-08-25).
+        table = {"muhlhaus": ["muehlhaus"], "muehlhaus": ["muhlhaus"]}
+        _, family_names = _name_forms("Hans", "Muhlhaus", table)
+        assert family_names == ["muhlhaus", "muehlhaus"]
+
+    def test_diacritic_table_widens_given_name(self):
+        table = {"bjorn": ["bjoern"], "bjoern": ["bjorn"]}
+        first_names, _ = _name_forms("Bjorn", "Smith", table)
+        assert "bjoern" in first_names
+
+    def test_diacritic_table_none_matches_no_table(self):
+        assert _name_forms("Hans", "Muhlhaus", None) == _name_forms("Hans", "Muhlhaus")
 
     def test_compound_surname_not_split(self):
         _, family_names = _name_forms("Anna", "van der Berg")
@@ -586,6 +606,84 @@ class TestComputeReliability:
         c.orcid_status = "MULTI_ORCID"
         out = compute_reliability([c])
         assert out[0].resolution_status == "UNRESOLVED"
+
+
+# ---------------------------------------------------------------------------
+# widen_names_with_orcid_bulk_db -- additive name-form widening from the local ORCID bulk
+# snapshot (2026-08-25). fetch_by_orcid() is monkeypatched, not a real DB call -- these tests
+# never touch /home/lc/s/orcid/orcid_persons.parquet.
+# ---------------------------------------------------------------------------
+class TestWidenNamesWithOrcidBulkDb:
+    def test_adds_new_name_forms_from_bulk_db(self, monkeypatch):
+        c = _build_awards_cif("A", [_item(
+            "G1_A", first_names=["j"], family_names=["straten"], orcid="0000-0001-0001-0001",
+        )])
+
+        monkeypatch.setattr(
+            "src.utils.orcid_bulk_lookup.fetch_by_orcid",
+            lambda orcids: pd.DataFrame([
+                {"orcid": "0000-0001-0001-0001", "name": "Willem van Straten", "aliases": []},
+            ]),
+        )
+        out = widen_names_with_orcid_bulk_db([c])
+        assert "Willem van Straten" in out[0].full_names
+        assert "van straten" in out[0].family_names
+        assert "willem" in out[0].first_names
+
+    def test_never_removes_existing_names(self, monkeypatch):
+        c = _build_awards_cif("A", [_item(
+            "G1_A", first_names=["john", "j"], family_names=["smith"], orcid="0000-0001-0001-0001",
+        )])
+        original_family = list(c.family_names)
+
+        monkeypatch.setattr(
+            "src.utils.orcid_bulk_lookup.fetch_by_orcid",
+            lambda orcids: pd.DataFrame([
+                {"orcid": "0000-0001-0001-0001", "name": "John Smith", "aliases": []},
+            ]),
+        )
+        out = widen_names_with_orcid_bulk_db([c])
+        for fam in original_family:
+            assert fam in out[0].family_names
+
+    def test_no_orcid_skips_lookup_entirely(self, monkeypatch):
+        c = _build_awards_cif("A", [_item("G1_A", first_names=["j"], family_names=["smith"])])
+        called = []
+        monkeypatch.setattr(
+            "src.utils.orcid_bulk_lookup.fetch_by_orcid",
+            lambda orcids: called.append(orcids) or pd.DataFrame(columns=["orcid", "name", "aliases"]),
+        )
+        widen_names_with_orcid_bulk_db([c])
+        assert called == []
+
+    def test_orcid_not_found_in_bulk_db_no_change(self, monkeypatch):
+        c = _build_awards_cif("A", [_item(
+            "G1_A", first_names=["j"], family_names=["smith"], orcid="0000-0001-0001-0001",
+        )])
+        original_full = list(c.full_names)
+
+        monkeypatch.setattr(
+            "src.utils.orcid_bulk_lookup.fetch_by_orcid",
+            lambda orcids: pd.DataFrame(columns=["orcid", "name", "aliases"]),
+        )
+        out = widen_names_with_orcid_bulk_db([c])
+        assert out[0].full_names == original_full
+
+    def test_aliases_also_widen(self, monkeypatch):
+        c = _build_awards_cif("A", [_item(
+            "G1_A", first_names=["w"], family_names=["cheng"], orcid="0000-0001-0001-0001",
+        )])
+
+        monkeypatch.setattr(
+            "src.utils.orcid_bulk_lookup.fetch_by_orcid",
+            lambda orcids: pd.DataFrame([
+                {"orcid": "0000-0001-0001-0001", "name": "Wenting Cheng",
+                 "aliases": ["Wenting Chen"]},
+            ]),
+        )
+        out = widen_names_with_orcid_bulk_db([c])
+        assert "Wenting Chen" in out[0].full_names
+        assert "chen" in out[0].family_names
 
 
 # ---------------------------------------------------------------------------

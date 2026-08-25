@@ -36,6 +36,34 @@ instead (see `warn_only=True`).
 from datetime import datetime
 from pathlib import Path
 
+_SRC = Path(__file__).resolve().parents[1]
+
+# Every assert_fresh() call in this codebase, until 2026-08-25, only listed DATA/CSV files as
+# `inputs` -- never the .py source files that actually implement the transformation. That's a
+# real, structural gap, not a hypothetical one: it means editing awards_cif.py or names.py could
+# never trip any staleness check anywhere in the pipeline, so a source-code fix could sit in the
+# repo indefinitely while every downstream parquet file kept silently reflecting the OLD
+# behavior -- and every freshness gate along the way would report "fresh," because nothing in
+# its narrow, data-only input list had changed. Confirmed as the likely mechanism behind
+# "appeared fixed, nothing actually changed" reports spanning multiple sessions (found directly
+# 2026-08-25, in response to being asked precisely this question). Every assert_fresh() call
+# site should now include the relevant entries from this registry in its own `inputs` list,
+# alongside its data-file inputs, not instead of them.
+NAME_LOGIC_SOURCES = [
+    _SRC / "utils" / "names.py",
+    _SRC / "utils" / "name_diacritic_variants.py",
+    _SRC / "utils" / "cluster_checks.py",
+]
+AWARDS_CIF_SOURCE = _SRC / "utils" / "awards_cif.py"
+FOR_RESOLVE_SOURCE = _SRC / "utils" / "for_resolve.py"
+# The corpus-grounded diacritic equivalence table (see name_diacritic_variants.py's
+# build_diacritic_variant_table()) -- a data_persisted/ precursor input, not a PROCESSED_DATA
+# output, built by 00c_prepare_oax.py and read by 01_prepare_arc.py/awards_cif.py. Any pipeline
+# stage consuming ARC-side name-derived fields should include this alongside NAME_LOGIC_SOURCES.
+DIACRITIC_VARIANT_TABLE_INPUT = (
+    _SRC.parent / "data_persisted" / "name_diacritic_variants.csv"
+)
+
 
 class PipelineStalenessError(Exception):
     """Raised when a pipeline stage's output predates one of its own declared inputs -- the

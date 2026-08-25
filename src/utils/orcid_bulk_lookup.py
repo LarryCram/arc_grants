@@ -63,6 +63,22 @@ def find_candidates(first_name: str, family_name: str, institution_names: list[s
     return candidates
 
 
+def fetch_by_orcid(orcids: list[str]):
+    """Bulk KEYED lookup -- every given ORCID's own (name, aliases) from the local snapshot, in
+    one query (~0.6s for this project's whole ~18K-ORCID population, confirmed by direct
+    measurement). Not a search: this is for WIDENING the name-form evidence ARC already has for
+    an ORCID it already claims (see awards_cif.py::widen_names_with_orcid_bulk_db()), not
+    finding a candidate for one ARC is missing -- see find_candidates() for that direction.
+    Returns a pandas DataFrame (orcid, name, aliases); an ORCID not present in the local
+    snapshot simply doesn't appear in the result (a frozen 2024 crawl -- absence isn't evidence
+    of anything, see this module's own docstring)."""
+    con = duckdb.connect()
+    return con.execute(
+        "SELECT orcid, name, aliases FROM read_parquet(?) WHERE orcid = ANY(?)",
+        [ORCID_PERSONS, orcids],
+    ).df()
+
+
 def main() -> None:
     if len(sys.argv) < 3:
         print('usage: python -m src.utils.orcid_bulk_lookup "First" "Last" [institution ...]')

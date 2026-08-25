@@ -1,14 +1,14 @@
 """
-Tests for src/utils/names.py
+Tests for src/utils/names.py -- name tokenisation/parsing helpers. Diacritic-specific tests
+(strip_diacriticals, diacritic_variants, the corpus-grounded equivalence table) moved to
+tests/test_name_diacritic_variants.py (2026-08-25), matching the source module split.
 """
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
-from src.utils.names import (
-    norm_alpha, strip_diacriticals, strip_parens, strip_postnominals, tokens,
-)
+from src.utils.names import norm_alpha, strip_parens, strip_postnominals, tokens
 
 
 class TestStripPostnominals:
@@ -40,24 +40,6 @@ class TestStripPostnominals:
 
     def test_empty(self):
         assert strip_postnominals("") == ""
-
-
-class TestStripDiacriticals:
-    def test_accent(self):
-        assert strip_diacriticals("Müller") == "Muller"
-
-    def test_exotic_hyphen(self):
-        # U+2011 non-breaking hyphen → ASCII hyphen
-        assert strip_diacriticals("Bunde‑Birouste") == "Bunde-Birouste"
-
-    def test_turkish_dotless_i(self):
-        assert strip_diacriticals("Anbarcı") == "Anbarci"
-
-    def test_turkish_dotted_I(self):
-        assert strip_diacriticals("İstanbul") == "Istanbul"
-
-    def test_plain_ascii(self):
-        assert strip_diacriticals("Smith") == "Smith"
 
 
 class TestStripParens:
