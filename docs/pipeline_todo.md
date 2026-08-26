@@ -15,7 +15,10 @@ them on request surfaced that both were already stale: the underlying pipeline h
 fixed or correctly resolved each case, and only CLAUDE.md's own tracking text hadn't been
 updated to say so. CLAUDE.md has been corrected accordingly for both. Item 4 has since been
 worked and closed too — the user chose to keep reviewing rather than stop at 35, and the `4u`
-under-merge population is now 0.
+under-merge population is now 0. Item 5 has since been worked and closed too — the original
+44-candidate list turned out to be genuinely unrecoverable, but the population containing it
+was independently driven to UNRESOLVED=0 by later, more thorough sessions, so nothing from
+it could still be unaddressed.
 
 This file lives in `docs/` (moved here from a local Claude Code plan file, which isn't
 version-controlled or shared across machines) so it persists as a real, checked-in project
@@ -24,9 +27,9 @@ artifact rather than session-local state.
 ## Recommended sequence
 
 Fast, low-risk cleanups first (they close out review threads already in flight and cost
-little), then the remaining live decision gate (item 5), then the structural work that
-unlocks better automation (merge operator), then the oeuvre/piling correctness work, then
-the roadmap continuation, then the larger/optional items last.
+little), then the structural work that unlocks better automation (merge operator), then the
+oeuvre/piling correctness work, then the roadmap continuation, then the larger/optional items
+last.
 
 1. ~~Record the 3 confirmed wrong-merges in `manual_splits.csv`~~ — **DONE, no action was
    needed.** Investigated 2026-08-26: all three (Wang/Duan, Bunda/Lasczik, Curran/Gallagher)
@@ -66,7 +69,14 @@ the roadmap continuation, then the larger/optional items last.
    fix rerun regenerated the population) → **0** (2026-08-26, this pass). Full detail in
    CLAUDE.md's "`4u` review continued..." and "`4u` population driven to zero..." session
    entries. Final `01`→`03`→`04` rerun: 22,893 AwardsCIF, 98.6% resolved.
-5. **Verify whether the 44 ORCID-institution-mismatch split candidates from the 2026-08-21 session were actually subsumed by the 2026-08-23/24 UNRESOLVED-to-zero pass, or still need recording**
+5. ~~Verify whether the 44 ORCID-institution-mismatch split candidates were actually subsumed
+   by the 2026-08-23/24 UNRESOLVED-to-zero pass, or still need recording~~ — **DONE.** The
+   original list turned out unrecoverable (confirmed 2026-08-25), but the population
+   containing it was independently driven to UNRESOLVED=0 by later, more thorough sessions —
+   structurally nothing could remain unaddressed. Verified 2026-08-26: 0 UNRESOLVED, 0 `4u`,
+   370/370 tests passing. One real side-finding: 2 clusters briefly regressed to UNRESOLVED
+   purely as an artifact of this session's own merges (broadened FOR-code spread tripping the
+   division-mismatch heuristic) — fixed via `manual_confirmed_not_suspicious.csv`.
 6. **Build the `merge()` operator + candidate-pair proposer** (incl. B3 signal) — the structural fix that makes under-merge detectable at all, and de-risks items like #1/#2 above from ever recurring
 7. **Re-derive `ACCEPTABLE_DIVISION_PAIRS` properly** (slow, named-case-first this time — 3 prior attempts failed)
 8. **Close the two known oeuvre/piling gaps**: mega-pool false bridging, within-pile contamination (Hayward-style)
@@ -179,14 +189,35 @@ Full case-by-case detail in CLAUDE.md's "`4u` review continued post-diacritic-fi
 and "`4u` population driven to zero; a batch-merge mistake caught and fully reversed..."
 session entries (both 2026-08-26).
 
-### 5 — Verify the 44 ORCID-institution-mismatch split candidates were recorded
-2026-08-21 session found 44 more real, institution-corroborated split candidates via a
-systematic biography+employment check, explicitly "queued for recording, not yet applied"
-at that session's checkpoint. The 2026-08-23/24 session ("UNRESOLVED population driven to
-zero") used the same investigative method and named 11 confirmed splits — unclear whether
-that pass fully subsumed the 44 or only partially overlaps with it. Needs a direct check
-(diff the 44 candidate list, if still recoverable, against what actually landed in
-`manual_splits.csv`) before assuming this is closed.
+### 5 — Verify the 44 ORCID-institution-mismatch split candidates were recorded — CLOSED
+Originally: the 2026-08-19/20 "ORCID Public API integration" session (this item's own text
+mislabeled it "2026-08-21" — corrected here) found 44 real, institution-corroborated split
+candidates via a systematic biography+employment check over the 82 ORCID-bearing UNRESOLVED
+clusters remaining at that checkpoint, explicitly "queued for recording, not yet applied."
+
+No literal diff was possible — a 2026-08-25 session ("`inst_arr` widened...") already tried
+to re-derive the specific 44-cluster list and confirmed directly that **the original list was
+never persisted anywhere** (no scratch file, no `cluster_id`s recorded in CLAUDE.md or any
+CSV), only discussed in a conversation that later ended — genuinely unrecoverable by name.
+
+**Resolved structurally instead, 2026-08-26**: the population those 44 belonged to
+(UNRESOLVED, standing at 120 right when they were found) was subsequently driven through
+several more sessions all the way to **0** (the 2026-08-23/24 "UNRESOLVED population driven
+to zero" session, later reconfirmed after this session's own merges/splits). Since every
+single UNRESOLVED cluster — a strict superset of whichever ones were among the original 44 —
+has since been individually reviewed and resolved (split, confirmed, or manually overridden)
+by that more thorough exhaustive pass, nothing from the 44 could still be sitting unaddressed
+in the live population, even though the specific pointer back to "these were part of the 44"
+is lost. Verified directly: `resolution_status` UNRESOLVED = 0 and `reliability_tier=='4u'`
+= 0 on the current `awards_cif_arc_only.parquet` (22,893 AwardsCIF), 370/370 tests passing.
+
+One real, unrelated side-finding from this verification pass: 2 clusters (`LP0669061_JunLi`,
+`LP0454996_RichardJones`) briefly showed `UNRESOLVED` immediately after this session's own
+merges, purely because merging genuinely broadened their FOR-code spread enough to trip the
+division-mismatch heuristic — the same "reviewed forever" loop pattern
+`manual_confirmed_not_suspicious.csv` exists for. Both already had decisive evidence backing
+their merge (Jun Li: ORCID + matching co-authored paper; Richard Jones: ORCID, already
+documented). Recorded in `manual_confirmed_not_suspicious.csv`; rerun confirmed 0/0 clean.
 
 ### 6 — No standalone `AwardsCIF` merge() operator; under-merge structurally undetectable
 `awards_cif.py` has a low-level `_merge_awards_cifs()` primitive but every call site fires

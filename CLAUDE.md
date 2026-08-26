@@ -1491,6 +1491,33 @@ one): 22,893 AwardsCIF, `reliability_tier=='4u'` **43 → 0**. `resolution_statu
 `name_filter`, 408 `manual`. 176 ambiguous deferred, 31 manual unlinked, 113 unlinked (no
 candidate).
 
+## Full TODO list moved to `docs/pipeline_todo.md`; item 5 (the lost 44 candidates) closed (2026-08-26)
+
+The project's running TODO list (previously a local Claude Code plan file, not
+version-controlled or shared across machines) is now `docs/pipeline_todo.md` in this repo —
+update it there going forward rather than regenerating it from scratch each session.
+
+**Item 5 investigated and closed**: the 44 ORCID-institution-mismatch split candidates found
+in the 2026-08-19/20 "ORCID Public API integration" session (a later CLAUDE.md entry had
+misdated this "2026-08-08" — corrected) were never persisted anywhere beyond that session's
+own conversation — a direct 2026-08-25 attempt to re-derive the specific list already
+confirmed it's genuinely unrecoverable by name. Resolved structurally instead: the
+UNRESOLVED population containing those 44 (120 at the time) was subsequently driven all the
+way to 0 by later, more thorough sessions (2026-08-23/24's "UNRESOLVED population driven to
+zero", and this session's `4u` work) — a strict superset of whatever the 44 were, so nothing
+from that list could still be sitting unaddressed even without a literal diff.
+
+**One real side-finding surfaced while verifying this**: 2 clusters (`LP0669061_JunLi`,
+`LP0454996_RichardJones`) briefly showed `UNRESOLVED` immediately after this session's own
+`4u` merges — purely because merging genuinely widened their FOR-code spread enough to trip
+`is_suspicious_for2020()`'s division-mismatch heuristic, the same "reviewed forever" loop
+`manual_confirmed_not_suspicious.csv` was built to close. Both merges already had decisive
+evidence (Jun Li: ORCID + a matching real co-authored paper; Richard Jones: already-documented
+ORCID). Added to `manual_confirmed_not_suspicious.csv`; full `01`→`03`→`04` rerun confirmed
+0 UNRESOLVED, 0 `4u`, 370/370 tests passing, 22,893 AwardsCIF, 22,573 resolved (98.6%) — same
+resolved total as the pre-fix run, confirming the fix was a pure flag correction with no
+linkage-level side effects.
+
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
 
