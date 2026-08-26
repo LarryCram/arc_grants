@@ -54,8 +54,8 @@ _spec.loader.exec_module(prepare_oax)
 
 def main():
     prepare_oax.ensure_fresh()
-    diacritic_table = prepare_oax.ensure_diacritic_table_fresh()
-    clusters = build_arc_only_population(diacritic_table=diacritic_table)
+    prepare_oax.scan_for_new_diacritics()
+    clusters = build_arc_only_population()
     persist_awards_cif(clusters, ARC_ONLY_PARQUET)
     persist_grant_cluster_map(clusters, GRANT_CLUSTER_MAP_PARQUET)
 

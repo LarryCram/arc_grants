@@ -186,7 +186,7 @@ def check_A(persons, gmap, inv_f, prep, tf_lookup, result: "HardCheckResult", ve
     # A3: is_suspicious_for2020 across ALL clusters (must agree with A2) -- same
     # manual_confirmed_not_suspicious.csv override compute_reliability() applies, or a
     # human-reviewed cluster would show here as a phantom A2/A3 disagreement forever.
-    confirmed_not_suspicious = _load_confirmed_not_suspicious()
+    confirmed_not_suspicious = _load_confirmed_not_suspicious(persons)
     suspect = persons[persons.apply(
         lambda r: is_suspicious_for2020(r["full_name_key"], r["for2020_codes"], tf_lookup, r["n_grants"])
         and r["cluster_id"] not in confirmed_not_suspicious,

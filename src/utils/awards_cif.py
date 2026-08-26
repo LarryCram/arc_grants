@@ -66,6 +66,62 @@ _MANUAL_MERGES_CSV = _DATA_PERSISTED / "manual_merges.csv"
 _ENRICHMENT_BLOCKLIST_CSV = _DATA_PERSISTED / "enrichment_blocklist.csv"
 _MANUAL_RESOLUTIONS_CSV = _DATA_PERSISTED / "manual_resolutions.csv"
 _MANUAL_CONFIRMED_NOT_SUSPICIOUS_CSV = _DATA_PERSISTED / "manual_confirmed_not_suspicious.csv"
+_MANUAL_CONFIRMED_DISTINCT_CSV = _DATA_PERSISTED / "manual_confirmed_distinct.csv"
+
+class StaleClusterIdError(Exception):
+    """Raised when a cluster_id/arc_id captured in a data_persisted/manual_*.csv override
+    file can no longer be resolved against the current AwardsCIF population.
+
+    cluster_id is derived (min() over a cluster's own unique_ids -- see refine_clusters()'s
+    merge steps) and can change value on any membership-altering rerun: a new grant added
+    under an earlier-sorting scheme letter, a merge triggered by newly-discovered ORCID
+    evidence, a split, etc. -- none of which need mean anything about the underlying person's
+    real identity. Every manual_*.csv loader keyed on cluster_id used to handle this with its
+    own ad hoc, silent behaviour (skip / fall back to a worse method / delete a real person
+    outright -- see CLAUDE.md's 2026-08-26 stale-reference risk audit for the full case-by-case
+    list). resolve_cluster_id() replaces all of those with one shared, loud failure instead."""
+
+
+def resolve_cluster_id(old_id: str, clusters: "list[AwardsCIF] | pd.DataFrame") -> str:
+    """Resolve a possibly-stale cluster_id/arc_id to whichever AwardsCIF it currently lives in.
+
+    `clusters` may be either a list[AwardsCIF] (the in-memory representation used throughout
+    awards_cif.py/04_resolve_links.py) or a DataFrame with cluster_id/grant_ids columns (the
+    persisted-parquet shape read directly by 01a_diagnose.py) -- both are genuinely used
+    side by side across this project for the same population, so this function accepts
+    either rather than forcing every caller to reconstruct one from the other.
+
+    1. old_id is already a current cluster_id -> returned unchanged (the common case, and the
+       only case before this function existed).
+    2. old_id is stale, but its literal string still appears in exactly one current cluster's
+       grant_ids -- the person moved (a rename/merge/split changed which of their own
+       unique_ids sorts lowest), not disappeared -- that cluster's current cluster_id is
+       returned.
+    3. old_id can't be found anywhere, or is ambiguous (2+ current clusters both contain it,
+       which should not be possible since a unique_id belongs to exactly one cluster, but is
+       checked rather than assumed) -> raises StaleClusterIdError. Never silently skipped,
+       never guessed at.
+    """
+    if isinstance(clusters, pd.DataFrame):
+        pairs = list(zip(clusters["cluster_id"], clusters["grant_ids"]))
+    else:
+        pairs = [(c.cluster_id, c.grant_ids) for c in clusters]
+    if old_id in {cid for cid, _ in pairs}:
+        return old_id
+    matches = [cid for cid, grant_ids in pairs if old_id in grant_ids]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise StaleClusterIdError(
+            f"{old_id!r} is not a current cluster_id and appears in {len(matches)} different "
+            f"current clusters ({matches!r}) -- ambiguous, cannot resolve automatically."
+        )
+    raise StaleClusterIdError(
+        f"{old_id!r} is not a current cluster_id and does not appear in any current cluster's "
+        "grant_ids. This manual override reference is stale and needs human review -- do not "
+        "guess at a replacement; find out what actually happened to this person's records."
+    )
+
 
 CLUSTER_THRESHOLD = 0.9  # same value as 01_prepare_arc.py -- high precision, prefer splitting over merging
 RARE_NAME_TF = 2e-6  # OAX full_name_key TF below this -> rare name (tier 2 vs 3). Distinct from
@@ -271,27 +327,35 @@ class AwardsCIF:
 
 # ── construction: load_award_cif_items ──────────────────────────────────────────
 
-def _name_forms(
-    first_name: str, family_name: str, diacritic_table: dict[str, list[str]] | None = None,
-) -> tuple[list[str], list[str]]:
+def _name_forms(first_name: str, family_name: str) -> tuple[list[str], list[str]]:
     """Mirrors 01_prepare_arc.py's arc_name_arrays(): given-name tokens (+ their initials)
     and normalized family-name form(s), from ARC's raw first_name/family_name fields.
 
-    `diacritic_table` (2026-08-25, see build_diacritic_variant_table()) widens both given- and
-    family-name forms with corpus-confirmed variants -- the reason this matters for ARC
-    specifically: ARC's raw data never contains a literal diacritic character at all (always
-    plain ASCII, sometimes bare "Muhlhaus", sometimes already digraph-transliterated
-    "Gruetzner" by whoever typed it in), so family_names could previously only ever hold the one
-    form ARC itself recorded -- the corpus table supplies the confirmed OTHER ASCII spelling,
-    closing a real gap where a genuine match was structurally unreachable by Splink blocking
-    (DP0345157_HansMuhlhaus, see CLAUDE.md 2026-08-25)."""
+    family_names/given-name tokens are widened to their bare/digraph pair whenever the raw ARC
+    string itself carries a literal diacritic character (diacritic_variants(), safe and local --
+    see that function's own docstring) -- ARC data is NOT "always ASCII" (confirmed 189 real
+    investigator records carry a genuine diacritic character), so this does real work on the ARC
+    side too, not just on OpenAlex's. A former version of this also consulted a corpus-wide
+    equivalence table keyed on the bare-folded string regardless of whether the ARC name itself
+    had a diacritic -- removed 2026-08-26, a real bug (see name_diacritic_variants.py's module
+    docstring): it let one unrelated OpenAlex person's own diacritic name inject a spurious
+    spelling into every ARC/OAX record sharing that name's common bare-folded root."""
     full = f"{first_name or ''} {family_name or ''}".strip()
     hn = HumanName(strip_postnominals(canonicalize_name_punctuation(full)))
     if not hn.last and hn.first:
         hn.last = hn.first
 
-    f_toks = name_part_tokens(hn.first) + name_part_tokens(hn.middle)
-    family_names = diacritic_variants(hn.last, diacritic_table) if hn.last else []
+    # Widen BEFORE tokenizing, not after -- name_part_tokens() does its own diacritic stripping
+    # internally, so by the time it returns, the original literal character is already gone and
+    # there is nothing left for diacritic_variants() to widen (a real bug caught by testing:
+    # widening the already-tokenized "bjorn" instead of the raw "Björn" silently did nothing).
+    def _widened_tokens(raw: str) -> list[str]:
+        if not raw:
+            return []
+        return [tok for variant in diacritic_variants(raw) for tok in name_part_tokens(variant)]
+
+    f_toks = _widened_tokens(hn.first) + _widened_tokens(hn.middle)
+    family_names = diacritic_variants(hn.last) if hn.last else []
     fam_norm = family_names[0] if family_names else ""
 
     # dict.fromkeys(), not set() -- set() iteration order is randomized per-process
@@ -303,10 +367,7 @@ def _name_forms(
     # zero other changes). dict.fromkeys() preserves first-occurrence order, so the
     # first-listed given-name token deterministically wins any length tie -- also the more
     # correct semantic (the first-listed given name is usually the person's primary one).
-    given_toks = list(f_toks)
-    if diacritic_table:
-        for ft in f_toks:
-            given_toks.extend(diacritic_table.get(ft, []))
+    given_toks = list(dict.fromkeys(f_toks))
     first_names = list(dict.fromkeys(given_toks + [t[0] for t in given_toks if t]))
 
     if not f_toks and fam_norm:
@@ -553,7 +614,6 @@ def _load_institution_hep_crosswalk() -> dict[int, str]:
 
 def load_award_cif_items(
     con: duckdb.DuckDBPyConnection | None = None,
-    diacritic_table: dict[str, list[str]] | None = None,
 ) -> tuple[list[AwardCIFItem], dict[str, dict], dict[str, dict]]:
     """Load Award-CI/F items: investigators_raw.parquet joined to grants_flat.parquet and
     (for the FOR-code upgrade) grant_summaries.csv, filtered to KEEP_ROLES ∩ KEEP_SCHEMES,
@@ -568,12 +628,6 @@ def load_award_cif_items(
     itself carries no provenance (it's a raw atomic unit, not a resolved identity) --
     cluster_items() is responsible for recording a provenance event on any AwardsCIF whose items
     were corrected, once that cluster actually exists.
-
-    diacritic_table: the OAX-corpus-derived bare<->digraph equivalence table (see
-    00c_prepare_oax.py::build_diacritic_table()), widening _name_forms()'s given-/family-name
-    variants. Built from OAX data, so it's the caller's job to build/load it and pass it in --
-    this function stays ARC-only (no OAX read of its own) if the caller passes None/{} (the
-    default), same as omitting it entirely, just without the widened variants.
     """
     corrections = _load_manual_name_corrections()
     orcid_corrections = _load_manual_orcid_corrections()
@@ -619,7 +673,6 @@ def load_award_cif_items(
     grant_for2020_codes = load_grant_for2020_codes()
     hep_crosswalk = _load_hep_crosswalk()
     institution_oax_crosswalk = _load_institution_oax_crosswalk()
-    diacritic_table = diacritic_table or {}
 
     items: list[AwardCIFItem] = []
     n_dropped_non_hep_admin = 0
@@ -656,7 +709,7 @@ def load_award_cif_items(
         for_name = upgrade_for_name(r["for2008_code"], r["primary_for_name"])
         for_code = upgrade_for_code(r["for2008_code"]) or r["for2008_code"]
 
-        first_names, family_names = _name_forms(first_name, r["family_name"], diacritic_table)
+        first_names, family_names = _name_forms(first_name, r["family_name"])
         family_name_main = max(family_names, key=len) if family_names else None
         first_initial = _first_initial(first_names)
         first_name_canonical = _first_name_canonical(first_names)
@@ -1311,7 +1364,7 @@ def split_multi_name_clusters(
     return out
 
 
-def _load_manual_splits_by_grant() -> dict[str, dict[str, str]]:
+def _load_manual_splits_by_grant(clusters: list[AwardsCIF]) -> dict[str, dict[str, str]]:
     """data_persisted/manual_splits_by_grant.csv -- cluster_id -> {unique_id: split_label}, an
     explicit finer-than-institution split assignment. 2026-08-21: added after a confirmed real
     case (DE250100317_LIANGWANG) where institution-based splitting is structurally a no-op --
@@ -1320,7 +1373,12 @@ def _load_manual_splits_by_grant() -> dict[str, dict[str, str]]:
     institution (Monash), so grouping by institution_oax_id would put them straight back
     together. Rows not covering every item in a cluster are fine -- any unlisted unique_id falls
     back to its own singleton group, same semantics as the institution-based path's own
-    no-institution fallback."""
+    no-institution fallback.
+
+    Each row's cluster_id is resolved via resolve_cluster_id() -- raises StaleClusterIdError
+    rather than silently falling back to the institution-based method this file exists to
+    supersede (a stale id here previously meant apply_manual_splits() would silently regress
+    to a known-insufficient split, not merely skip one)."""
     if not _MANUAL_SPLITS_BY_GRANT_CSV.exists():
         return {}
     out: dict[str, dict[str, str]] = defaultdict(dict)
@@ -1328,7 +1386,7 @@ def _load_manual_splits_by_grant() -> dict[str, dict[str, str]]:
         for row in csv.DictReader(f):
             cid, uid, label = row["cluster_id"].strip(), row["unique_id"].strip(), row["split_label"].strip()
             if cid and uid and label:
-                out[cid][uid] = label
+                out[resolve_cluster_id(cid, clusters)][uid] = label
     return dict(out)
 
 
@@ -1337,17 +1395,21 @@ def apply_manual_splits(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     data_persisted/manual_splits.csv. Dividing key: an explicit per-unique_id assignment from
     data_persisted/manual_splits_by_grant.csv when the cluster has one (any item not covered by
     it falls back to its own singleton group), else institution_oax_id (original behaviour) --
-    mirrors _apply_manual_splits()."""
+    mirrors _apply_manual_splits().
+
+    Each row's cluster_id is resolved via resolve_cluster_id() -- raises StaleClusterIdError
+    rather than silently letting a confirmed wrongful-merge split stop being applied when the
+    target cluster's id has drifted (see that function's docstring)."""
     if not _MANUAL_SPLITS_CSV.exists():
         return clusters
     split_ids: set[str] = set()
     with open(_MANUAL_SPLITS_CSV, newline="") as f:
         for row in csv.DictReader(f):
             if row.get("confirmed_different_people", "").strip().lower() == "true":
-                split_ids.add(row["cluster_id"])
+                split_ids.add(resolve_cluster_id(row["cluster_id"], clusters))
     if not split_ids:
         return clusters
-    by_grant = _load_manual_splits_by_grant()
+    by_grant = _load_manual_splits_by_grant(clusters)
 
     out = []
     for c in clusters:
@@ -1376,7 +1438,12 @@ def apply_manual_splits(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
 def apply_enriched_orcids(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     """Promote high/au_match-confidence ORCIDs from orcid_enrichment.parquet -- mirrors
     _apply_enriched_orcids(). Only promotes when exactly 1 distinct ORCID is found across all
-    enriched name forms in a cluster, and the cluster currently has no ORCID."""
+    enriched name forms in a cluster, and the cluster currently has no ORCID.
+
+    enrichment_blocklist.csv rows are keyed on cluster_id too, resolved via
+    resolve_cluster_id() -- raises StaleClusterIdError rather than silently letting a
+    previously-confirmed wrong ORCID match get re-promoted once the blocked cluster's own id
+    has drifted (see that function's docstring)."""
     enrichment_path = PROCESSED_DATA / "orcid_enrichment.parquet"
     if not enrichment_path.exists():
         return clusters
@@ -1393,7 +1460,7 @@ def apply_enriched_orcids(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
             for row in csv.DictReader(f):
                 cid, orcid = row["cluster_id"].strip(), row["orcid"].strip()
                 if cid and orcid:
-                    blocklist.add((cid, orcid))
+                    blocklist.add((resolve_cluster_id(cid, clusters), orcid))
 
     enrich_by_name: dict[tuple[str, str], set[str]] = defaultdict(set)
     conf_by_name: dict[tuple[str, str], str] = {}
@@ -1487,7 +1554,11 @@ def promote_low_by_for(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
 
 def apply_manual_orcids(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     """Inject verified ORCIDs for clusters ARC data has none for --
-    data_persisted/manual_orcids.csv. Mirrors _apply_manual_orcids()."""
+    data_persisted/manual_orcids.csv. Mirrors _apply_manual_orcids().
+
+    Each row's cluster_id is resolved via resolve_cluster_id() -- raises StaleClusterIdError
+    rather than silently dropping a hard-won manual ORCID confirmation when the target
+    cluster's id has drifted (see that function's docstring)."""
     if not _MANUAL_ORCIDS_CSV.exists():
         return clusters
     overrides: dict[str, str] = {}
@@ -1495,14 +1566,12 @@ def apply_manual_orcids(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
         for row in csv.DictReader(f):
             cid, orcid = row["cluster_id"].strip(), row["orcid"].strip()
             if cid and orcid:
-                overrides[cid] = orcid
+                overrides[resolve_cluster_id(cid, clusters)] = orcid
     if not overrides:
         return clusters
     by_id = {c.cluster_id: c for c in clusters}
     for cid, orcid in overrides.items():
-        c = by_id.get(cid)
-        if c is None:
-            continue
+        c = by_id[cid]
         c.orcids = [orcid]
         c.orcid_status = "HAS_ORCID"
         c.record_event("manual_orcid", orcid=orcid)
@@ -1565,7 +1634,17 @@ def merge_persons_by_orcid(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
 def apply_manual_merges(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     """Merge cluster pairs listed in data_persisted/manual_merges.csv -- mirrors
     _apply_manual_merges(). Applied unconditionally; cluster_keep survives, cluster_drop is
-    absorbed into it."""
+    absorbed into it.
+
+    Both cluster_keep and cluster_drop are resolved via resolve_cluster_id(). This replaces
+    the previous silent behaviour, which only ever checked that cluster_drop currently
+    existed: if cluster_keep alone had gone stale, cluster_drop -- a real, currently-existing
+    person -- was silently dropped from the entire population outright (not merged, not left
+    standalone, just deleted, with nothing printed anywhere; see CLAUDE.md's 2026-08-26
+    stale-reference risk audit, the most severe of the risks found there). If keep and drop
+    resolve to the same current cluster, the merge has already happened via some other route
+    (e.g. an automatic ORCID merge reached the same conclusion first) -- skipped as a
+    harmless no-op, not an error, since nothing here is actually stale."""
     if not _MANUAL_MERGES_CSV.exists():
         return clusters
     by_id = {c.cluster_id: c for c in clusters}
@@ -1573,7 +1652,11 @@ def apply_manual_merges(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     with open(_MANUAL_MERGES_CSV, newline="") as f:
         for row in csv.DictReader(f):
             keep, drop = row["cluster_keep"].strip(), row["cluster_drop"].strip()
-            if keep and drop and drop in by_id:
+            if not (keep and drop):
+                continue
+            keep = resolve_cluster_id(keep, clusters)
+            drop = resolve_cluster_id(drop, clusters)
+            if keep != drop:
                 remapping[drop] = keep
     if not remapping:
         return clusters
@@ -1808,11 +1891,15 @@ def populate_oax_candidates(
     return clusters
 
 
-def _load_manual_unlinks() -> dict[str, set[str]]:
+def _load_manual_unlinks(clusters: list[AwardsCIF]) -> dict[str, set[str]]:
     """arc_id -> set of oax_ids a human has confirmed are NOT this person, from
     data_persisted/manual_resolutions.csv's "unlink" rows. Pure noise removal -- can only
     remove a confirmed-wrong candidate, never risks discarding a genuine one, unlike a
-    "resolve" row (see the plan file for why "resolve" is deliberately NOT applied here)."""
+    "resolve" row (see the plan file for why "resolve" is deliberately NOT applied here).
+
+    Each row's arc_id is resolved via resolve_cluster_id() before use -- raises
+    StaleClusterIdError rather than silently no-op'ing when a row's arc_id has drifted or
+    can no longer be found (see that function's docstring)."""
     if not _MANUAL_RESOLUTIONS_CSV.exists():
         return {}
     df = pd.read_csv(_MANUAL_RESOLUTIONS_CSV).dropna(subset=["arc_id"])
@@ -1820,7 +1907,8 @@ def _load_manual_unlinks() -> dict[str, set[str]]:
     for _, row in df[df["action"] == "unlink"].iterrows():
         oax_id = row.get("oax_id")
         if pd.notna(oax_id) and oax_id:
-            out[row["arc_id"]].add(oax_id)
+            cid = resolve_cluster_id(row["arc_id"], clusters)
+            out[cid].add(oax_id)
     return dict(out)
 
 
@@ -1862,7 +1950,7 @@ def dedup_oax_candidates(
     highest-probability) picks between candidates believed to be different real people --
     deliberately NOT ported here, deferred to the not-yet-built work-level scoring step.
     """
-    unlinks = _load_manual_unlinks()
+    unlinks = _load_manual_unlinks(clusters)
     for c in clusters:
         blocked = unlinks.get(c.cluster_id)
         if blocked and c.oax_candidates:
@@ -2211,6 +2299,51 @@ def _scheme_incompat(sy_a: list[tuple[str, int | None, str]], sy_b: list[tuple[s
     return False
 
 
+def _load_confirmed_distinct(clusters: list[AwardsCIF]) -> set[tuple[str, str]]:
+    """data_persisted/manual_confirmed_distinct.csv -- cluster_id pairs a human has reviewed and
+    decided should stop being flagged as a gap_candidate of each other, despite
+    compute_gap_candidates() being unable to rule them out automatically. Two distinct kinds of
+    row, both stored here rather than in two separate files (2026-08-26 direction: the practical
+    effect on gap_candidates is identical either way, and a third mechanism for a rarer case
+    wasn't worth the extra schema) -- the `notes` column says which applies to a given row:
+      1. Confirmed genuinely two different people (co-investigator overlap, institution/
+         employment history, co-authorship checks, external ORCID lookups).
+      2. Reviewed and found permanently INDETERMINATE, not confirmed distinct from anyone in
+         particular -- e.g. DP0210133_JWilson: ARC's raw grant record shows "Dr J Wilson" only
+         in the announcement snapshot, dropped entirely from the current snapshot, with no
+         fuller given name ever recorded anywhere -- there is no remaining ARC-side evidence
+         that could ever resolve which (if any) of its 6 gap_candidates is the same person, so
+         further review is pointless, even though "confirmed distinct" would overstate what's
+         actually known.
+
+    Exists for the same reason manual_confirmed_not_suspicious.csv does (see that function's own
+    docstring): compute_gap_candidates() is a pure, stateless function of current cluster data,
+    recomputed identically on every 01_prepare_arc.py run with no memory of prior human review --
+    without this file, a case a human has already checked (David Evans, David Walker, Mark Baker,
+    J Wilson -- all repeatedly re-flagged across multiple past sessions) would keep resurfacing
+    in reliability_tier=='4u' forever, exactly the "reviewed forever" loop already fixed once for
+    is_suspicious_for2020(). Deliberately pair-level, not cluster-level -- a cluster can have
+    several gap_candidates and only some of them may be reviewed (e.g. Mark Baker's LP0776387 is
+    confirmed distinct from DP110100984, but deliberately left open against DP0557854 -- a live,
+    unconfirmed lead the user does not want settled either way).
+
+    Each row's two cluster_ids are resolved via resolve_cluster_id() before use -- built this way
+    from the start (2026-08-26), applying the same lesson learned earlier this session for every
+    other cluster_id-keyed manual_*.csv file, rather than waiting to discover the same staleness
+    bug in a new file later."""
+    if not _MANUAL_CONFIRMED_DISTINCT_CSV.exists():
+        return set()
+    pairs: set[tuple[str, str]] = set()
+    with open(_MANUAL_CONFIRMED_DISTINCT_CSV, newline="") as f:
+        for row in csv.DictReader(f):
+            a, b = row["cluster_id_1"].strip(), row["cluster_id_2"].strip()
+            if a and b:
+                a = resolve_cluster_id(a, clusters)
+                b = resolve_cluster_id(b, clusters)
+                pairs.add(tuple(sorted((a, b))))
+    return pairs
+
+
 def compute_gap_candidates(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     """Populate gap_candidates -- other cluster_ids sharing the same (longest) family name that
     cannot be ruled out as the same person. Mirrors 01_prepare_arc.py's _compute_gap_candidates():
@@ -2259,10 +2392,15 @@ def compute_gap_candidates(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
             for c2 in grp[i + 1:]:
                 candidate_pairs.add(tuple(sorted((c1.cluster_id, c2.cluster_id))))
 
+    confirmed_distinct = _load_confirmed_distinct(clusters)
     gap: dict[str, list[str]] = {c.cluster_id: [] for c in clusters}
-    n_compat = n_incompat = 0
+    n_compat = n_incompat = n_manual_distinct = 0
     for cid1, cid2 in sorted(candidate_pairs):
         c1, c2 = by_id[cid1], by_id[cid2]
+        if (cid1, cid2) in confirmed_distinct:
+            n_manual_distinct += 1
+            n_incompat += 1
+            continue
         name_incompat = (
             not first_names_compatible(c1.first_names, c2.first_names) or
             not first_names_compatible(c2.first_names, c1.first_names)
@@ -2283,11 +2421,14 @@ def compute_gap_candidates(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     for c in clusters:
         c.gap_candidates = sorted(gap[c.cluster_id])
 
-    print(f"  Gap 1: {n_compat} compatible pairs, {n_incompat} incompatible pairs")
+    print(
+        f"  Gap 1: {n_compat} compatible pairs, {n_incompat} incompatible pairs "
+        f"({n_manual_distinct} via manual_confirmed_distinct.csv)"
+    )
     return clusters
 
 
-def _load_confirmed_not_suspicious() -> set[str]:
+def _load_confirmed_not_suspicious(clusters: list[AwardsCIF]) -> set[str]:
     """data_persisted/manual_confirmed_not_suspicious.csv -- cluster_ids a human has reviewed
     (typically via external evidence: co-authorship, employment history, news/press coverage)
     and confirmed are genuinely one person, despite is_suspicious_for2020() flagging them.
@@ -2306,12 +2447,22 @@ def _load_confirmed_not_suspicious() -> set[str]:
     Deliberately NOT a substitute for fixing division_mismatch_for2020()'s own whitelist gaps
     (see cluster_checks.py's module docstring) -- this is the same two-tier pattern as every
     other data_persisted/manual_*.csv: a human-confirmed override recorded permanently,
-    reviewed once, not re-litigated on every run. Keyed on cluster_id like manual_splits.csv/
-    manual_orcids.csv -- stable as long as the cluster's own grant_ids don't change again."""
+    reviewed once, not re-litigated on every run.
+
+    2026-08-26: this docstring used to end "stable as long as the cluster's own grant_ids
+    don't change again" -- that assumption turned out unsafe (cluster_id can drift for
+    reasons having nothing to do with the reviewed suspicious-division facts, e.g. a new
+    grant added under an earlier-sorting scheme letter), and a drifted id here silently
+    reopened the exact "reviewed forever" loop this file exists to close. Each row's
+    cluster_id is now resolved via resolve_cluster_id() -- raises StaleClusterIdError
+    instead."""
     if not _MANUAL_CONFIRMED_NOT_SUSPICIOUS_CSV.exists():
         return set()
     with open(_MANUAL_CONFIRMED_NOT_SUSPICIOUS_CSV, newline="") as f:
-        return {row["cluster_id"].strip() for row in csv.DictReader(f) if row["cluster_id"].strip()}
+        return {
+            resolve_cluster_id(row["cluster_id"].strip(), clusters)
+            for row in csv.DictReader(f) if row["cluster_id"].strip()
+        }
 
 
 def compute_reliability(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
@@ -2347,7 +2498,7 @@ def compute_reliability(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     """
     tf_df = pd.read_parquet(PROCESSED_DATA / "oax_tf_full_name.parquet")
     tf_lookup = dict(zip(tf_df["full_name_key"], tf_df["tf_full_name_key"]))
-    confirmed_not_suspicious = _load_confirmed_not_suspicious()
+    confirmed_not_suspicious = _load_confirmed_not_suspicious(clusters)
 
     for c in clusters:
         suspicious = is_suspicious_for2020(c.full_name_key, c.for2020_codes, tf_lookup, c.n_grants)
@@ -2398,7 +2549,6 @@ ARC_ONLY_PARQUET = PROCESSED_DATA / "awards_cif_arc_only.parquet"
 
 def build_arc_only_population(
     con: duckdb.DuckDBPyConnection | None = None,
-    diacritic_table: dict[str, list[str]] | None = None,
 ) -> list[AwardsCIF]:
     """The genuinely ARC/ORCID-only half of identity resolution -- no OpenAlex data read of its
     own. This is what 01_prepare_arc.py calls and persists to awards_cif_arc_only.parquet:
@@ -2415,12 +2565,10 @@ def build_arc_only_population(
     its own docstring) -- neither is OpenAlex/OAX data, so "no OpenAlex data read of its own"
     still holds. compute_gap_candidates()/compute_reliability() operate purely on fields already
     populated by the steps above them (family_names, for2020_codes, orcids) -- confirmed by
-    direct code read, not assumed, before this split was made.
-
-    diacritic_table: passed straight through to load_award_cif_items() -- see its own docstring.
-    Built from OAX data by 00c_prepare_oax.py::ensure_diacritic_table_fresh(), so the caller
-    (01_prepare_arc.py) builds/loads it and passes it in here; this function never reaches into
-    OAX data itself, keeping the "no OpenAlex data read of its own" claim above actually true.
+    direct code read, not assumed, before this split was made. load_award_cif_items()'s own name
+    widening (diacritic_variants()) is per-name and local too (2026-08-26) -- no longer reads any
+    OAX-derived corpus table, so "no OpenAlex data read of its own" is unconditionally true now,
+    not just true when the caller happens to pass nothing in.
     """
     own_con = con is None
     con = con or duckdb.connect()
@@ -2429,7 +2577,7 @@ def build_arc_only_population(
             con.execute("SET enable_progress_bar = false")
             con.execute("SET memory_limit = '24GB'")
             con.execute(f"SET temp_directory = '{DUCKDB_TMP_DIR}'")
-        items, corrections, orcid_corrections = load_award_cif_items(con, diacritic_table)
+        items, corrections, orcid_corrections = load_award_cif_items(con)
         clusters = cluster_items(items, corrections, orcid_corrections)
         clusters = refine_clusters(clusters)
         clusters = set_aside_indigenous_research(clusters)

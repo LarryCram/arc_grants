@@ -71,6 +71,20 @@ def _empty_inv_gmap():
     return inv_f, gmap, prep, tf_lookup
 
 
+@pytest.fixture(autouse=True)
+def _no_real_confirmed_not_suspicious_csv(tmp_path, monkeypatch):
+    # check_A() -> _load_confirmed_not_suspicious() now resolves every row's cluster_id via
+    # resolve_cluster_id(), which raises StaleClusterIdError for any row that doesn't belong
+    # to the *current* persons DataFrame. Every test in this file uses tiny synthetic
+    # single/two-cluster fixtures ("A"/"B"), not real production data, so point at a
+    # nonexistent file by default -- same fix as tests/test_awards_cif.py's
+    # TestComputeReliability, needed here for the same reason.
+    monkeypatch.setattr(
+        "src.utils.awards_cif._MANUAL_CONFIRMED_NOT_SUSPICIOUS_CSV",
+        tmp_path / "manual_confirmed_not_suspicious.csv",
+    )
+
+
 class TestCheckA:
     def test_multi_orcid_lands_in_result(self):
         persons = _persons_df([

@@ -80,6 +80,7 @@ from src.utils.awards_cif import (
     load_awards_cif,
     enrich_with_oax_candidates,
     persist_awards_cif,
+    resolve_cluster_id,
     ARC_ONLY_PARQUET,
     AWARDS_CIF_PARQUET,
 )
@@ -421,7 +422,12 @@ def main():
     if manual_path.exists():
         manual_df = pd.read_csv(manual_path).dropna(subset=["arc_id"])
         for _, row in manual_df.iterrows():
-            aid    = row["arc_id"]
+            # resolve_cluster_id() raises StaleClusterIdError rather than letting a drifted
+            # arc_id silently write a phantom resolved/unlinked row for a person who no
+            # longer exists under that id -- see CLAUDE.md's 2026-08-26 stale-reference risk
+            # audit (this loop was the one already confirmed to be doing exactly that: 43 of
+            # 463 manual_resolutions.csv rows didn't match any current cluster_id).
+            aid    = resolve_cluster_id(row["arc_id"], clusters)
             action = row["action"]
             note   = row.get("note", "")
             if action == "resolve":

@@ -39,6 +39,8 @@ from src.utils.awards_cif import (
     cluster_detail_data,
     cluster_detail_text,
     widen_names_with_orcid_bulk_db,
+    resolve_cluster_id,
+    StaleClusterIdError,
 )
 
 
@@ -118,21 +120,21 @@ class TestNameForms:
         _, family_names = _name_forms("Hans", "Müller")
         assert family_names == ["muller", "mueller"]
 
-    def test_diacritic_table_widens_family_name(self):
-        # ARC's raw data never contains a literal diacritic (always plain ASCII) -- the corpus
-        # table is what lets a bare-only ARC spelling like "Muhlhaus" also carry the confirmed
-        # digraph counterpart, closing the real DP0345157_HansMuhlhaus gap (2026-08-25).
-        table = {"muhlhaus": ["muehlhaus"], "muehlhaus": ["muhlhaus"]}
-        _, family_names = _name_forms("Hans", "Muhlhaus", table)
-        assert family_names == ["muhlhaus", "muehlhaus"]
-
-    def test_diacritic_table_widens_given_name(self):
-        table = {"bjorn": ["bjoern"], "bjoern": ["bjorn"]}
-        first_names, _ = _name_forms("Bjorn", "Smith", table)
+    def test_diacritic_widens_given_name_when_literal(self):
+        # 2026-08-26: given-name widening now goes through diacritic_variants() itself (was a
+        # raw, ungated corpus-table lookup) -- only fires when the raw ARC token itself has a
+        # literal diacritic character.
+        first_names, _ = _name_forms("Björn", "Smith")
+        assert "bjorn" in first_names
         assert "bjoern" in first_names
 
-    def test_diacritic_table_none_matches_no_table(self):
-        assert _name_forms("Hans", "Muhlhaus", None) == _name_forms("Hans", "Muhlhaus")
+    def test_no_cross_name_leakage_for_common_surname(self):
+        # 2026-08-26 regression guard: a plain ASCII family name with no diacritic character of
+        # its own must never pick up an unrelated digraph spelling -- see
+        # name_diacritic_variants.py's module docstring for the real Baker/Wang/Zhu/etc
+        # cross-contamination bug this replaces.
+        _, family_names = _name_forms("Christian", "Baker")
+        assert family_names == ["baker"]
 
     def test_compound_surname_not_split(self):
         _, family_names = _name_forms("Anna", "van der Berg")
@@ -425,6 +427,18 @@ class TestMergeAwardsCifsDataPreservation:
 # name/ORCID incompatibility axes, independent of Resolver()'s live FOR2020->OAX_FIELD mapping.
 
 class TestComputeGapCandidates:
+    @pytest.fixture(autouse=True)
+    def _no_real_confirmed_distinct_csv(self, tmp_path, monkeypatch):
+        # compute_gap_candidates() -> _load_confirmed_distinct() now resolves every row's
+        # cluster_ids via resolve_cluster_id(), which raises StaleClusterIdError for any row
+        # that doesn't belong to the *current* `clusters` argument. Every test below uses tiny
+        # synthetic "A"/"B"/"C" fixtures, not real production data -- point at a nonexistent
+        # file by default, same fix as TestComputeReliability's own equivalent fixture.
+        monkeypatch.setattr(
+            "src.utils.awards_cif._MANUAL_CONFIRMED_DISTINCT_CSV",
+            tmp_path / "manual_confirmed_distinct.csv",
+        )
+
     def test_compatible_pair_both_listed(self):
         a = _build_awards_cif("A", [_item("G1_A", first_names=["john", "j"], family_names=["smith"])])
         b = _build_awards_cif("B", [_item("G1_B", first_names=["john", "j"], family_names=["smith"])])
@@ -509,6 +523,38 @@ class TestComputeGapCandidates:
         assert by_id["B"].gap_candidates == ["A"]
         assert by_id["C"].gap_candidates == []
 
+    def test_manual_confirmed_distinct_excludes_pair(self, tmp_path, monkeypatch):
+        # 2026-08-26: a pair that would otherwise be compatible (same initial, no FOR conflict)
+        # is excluded once a human has reviewed and confirmed them as different people.
+        csv_path = tmp_path / "manual_confirmed_distinct.csv"
+        csv_path.write_text("cluster_id_1,cluster_id_2,notes\nA,B,test override\n")
+        monkeypatch.setattr(
+            "src.utils.awards_cif._MANUAL_CONFIRMED_DISTINCT_CSV", csv_path
+        )
+        a = _build_awards_cif("A", [_item("G1_A", first_names=["john", "j"], family_names=["smith"])])
+        b = _build_awards_cif("B", [_item("G1_B", first_names=["john", "j"], family_names=["smith"])])
+        out = compute_gap_candidates([a, b])
+        by_id = {c.cluster_id: c for c in out}
+        assert by_id["A"].gap_candidates == []
+        assert by_id["B"].gap_candidates == []
+
+    def test_manual_confirmed_distinct_is_pair_specific(self, tmp_path, monkeypatch):
+        # Confirming A/B distinct must not affect an unrelated, still-open A/C pair.
+        csv_path = tmp_path / "manual_confirmed_distinct.csv"
+        csv_path.write_text("cluster_id_1,cluster_id_2,notes\nA,B,test override\n")
+        monkeypatch.setattr(
+            "src.utils.awards_cif._MANUAL_CONFIRMED_DISTINCT_CSV", csv_path
+        )
+        a = _build_awards_cif("A", [_item("G1_A", first_names=["john", "j"], family_names=["smith"])])
+        b = _build_awards_cif("B", [_item("G1_B", first_names=["john", "j"], family_names=["smith"])])
+        c = _build_awards_cif("C", [_item("G1_C", first_names=["john", "j"], family_names=["smith"])])
+        out = compute_gap_candidates([a, b, c])
+        by_id = {x.cluster_id: x for x in out}
+        # A-B excluded by the override; A-C and B-C remain compatible (all three share "smith").
+        assert by_id["A"].gap_candidates == ["C"]
+        assert by_id["B"].gap_candidates == ["C"]
+        assert by_id["C"].gap_candidates == ["A", "B"]
+
 
 # ---------------------------------------------------------------------------
 # compute_reliability
@@ -521,6 +567,22 @@ class TestComputeGapCandidates:
 # the "common name" default regardless of that file's actual contents.
 
 class TestComputeReliability:
+    @pytest.fixture(autouse=True)
+    def _no_real_confirmed_not_suspicious_csv(self, tmp_path, monkeypatch):
+        # compute_reliability() -> _load_confirmed_not_suspicious() now resolves every row's
+        # cluster_id via resolve_cluster_id(), which raises StaleClusterIdError for any row
+        # that doesn't belong to the *current* `clusters` argument. Without this, every test
+        # below (all using tiny synthetic single-cluster fixtures, not real production data)
+        # would fail as soon as the real data_persisted/manual_confirmed_not_suspicious.csv
+        # has any rows at all -- point at a nonexistent file by default so
+        # _load_confirmed_not_suspicious() takes its own early "file doesn't exist" return.
+        # The two tests that specifically want real CSV behaviour set their own path after
+        # this fixture runs, which correctly overrides it.
+        monkeypatch.setattr(
+            "src.utils.awards_cif._MANUAL_CONFIRMED_NOT_SUSPICIOUS_CSV",
+            tmp_path / "manual_confirmed_not_suspicious.csv",
+        )
+
     def test_has_orcid_arc_source_tier_1a(self):
         c = _build_awards_cif("A", [_item("G1_A", orcid="0000-0001-0001-0001")])
         out = compute_reliability([c])
@@ -964,3 +1026,50 @@ class TestAwardCIFItemIsFellowship:
     def test_round_trips_via_item_factory(self):
         it = _item("G1_Jane", is_fellowship=True)
         assert it.is_fellowship is True
+
+
+class TestResolveClusterId:
+    """resolve_cluster_id() -- 2026-08-26, replaces the ad hoc silent skip/fallback/delete
+    behaviour every manual_*.csv loader used to have on its own when a cluster_id had drifted
+    (see CLAUDE.md's stale-reference risk audit)."""
+
+    def _two_clusters(self):
+        a = _build_awards_cif("G1_Smith", [_item("G1_Smith"), _item("G2_Smith")])
+        b = _build_awards_cif("G3_Jones", [_item("G3_Jones")])
+        return [a, b]
+
+    def test_exact_match_returns_unchanged(self):
+        clusters = self._two_clusters()
+        assert resolve_cluster_id("G1_Smith", clusters) == "G1_Smith"
+
+    def test_stale_id_resolves_via_grant_ids_membership(self):
+        # G2_Smith is a real unique_id inside the G1_Smith cluster, but isn't the cluster's
+        # own canonical (min) id -- exactly the shape of a manual_*.csv row written when a
+        # merge/rename had temporarily made G2_Smith the canonical id.
+        clusters = self._two_clusters()
+        assert resolve_cluster_id("G2_Smith", clusters) == "G1_Smith"
+
+    def test_unresolvable_raises(self):
+        clusters = self._two_clusters()
+        with pytest.raises(StaleClusterIdError):
+            resolve_cluster_id("G99_Nobody", clusters)
+
+    def test_ambiguous_match_raises(self):
+        # Not a realistic production state (a unique_id belongs to exactly one cluster) --
+        # checked rather than assumed, per the function's own docstring.
+        a = _build_awards_cif("G1_Smith", [_item("G1_Smith"), _item("SHARED_x")])
+        b = _build_awards_cif("G3_Jones", [_item("G3_Jones"), _item("SHARED_x")])
+        with pytest.raises(StaleClusterIdError):
+            resolve_cluster_id("SHARED_x", [a, b])
+
+    def test_dataframe_input_also_works(self):
+        # 01a_diagnose.py reads awards_cif_arc_only.parquet as a plain DataFrame rather than
+        # reconstructing AwardsCIF objects -- resolve_cluster_id() must accept either shape.
+        df = pd.DataFrame([
+            {"cluster_id": "G1_Smith", "grant_ids": ["G1_Smith", "G2_Smith"]},
+            {"cluster_id": "G3_Jones", "grant_ids": ["G3_Jones"]},
+        ])
+        assert resolve_cluster_id("G1_Smith", df) == "G1_Smith"
+        assert resolve_cluster_id("G2_Smith", df) == "G1_Smith"
+        with pytest.raises(StaleClusterIdError):
+            resolve_cluster_id("G99_Nobody", df)

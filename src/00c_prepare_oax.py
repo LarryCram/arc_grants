@@ -18,8 +18,8 @@ Phase 3 – TF tables for Splink term-frequency adjustment.
     → oax_tf_full_name.parquet
 """
 
-import re
 import sys
+import unicodedata
 from pathlib import Path
 
 import duckdb
@@ -30,9 +30,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import OAX_AUTHORS, PROCESSED_DATA
 from src.utils.names import max_by_len, name_part_tokens, parse_given, strip_postnominals
 from src.utils.name_diacritic_variants import (
-    DIACRITIC_CHARS, DIACRITIC_VARIANT_TABLE_FILENAME, build_diacritic_variant_table,
-    canonicalize_name_punctuation, expand_diacritic_variants, load_diacritic_variant_table,
-    persist_diacritic_variant_table, strip_diacriticals,
+    DIACRITIC_CHARS, canonicalize_name_punctuation, expand_diacritic_variants,
+    strip_diacriticals,
 )
 
 PROC = PROCESSED_DATA
@@ -46,65 +45,107 @@ def _oax_authors_newest_mtime() -> float:
     return max(p.stat().st_mtime for p in Path(OAX_AUTHORS).glob("*.parquet"))
 
 
-def ensure_diacritic_table_fresh(force: bool = False) -> dict[str, list[str]]:
-    """Load data_persisted/name_diacritic_variants.csv if it's fresh relative to OAX_AUTHORS'
-    own snapshot files; otherwise rebuild from the full table and persist. Mirrors ensure_fresh()'s
-    own missing-or-stale-triggers-rebuild pattern, gated on the true raw-snapshot source rather
-    than any derived intermediate -- this table only needs rebuilding on a snapshot migration, not
-    on every code/data_persisted edit elsewhere in the pipeline."""
-    out = _DATA_PERSISTED / DIACRITIC_VARIANT_TABLE_FILENAME
-    if not force and out.exists() and out.stat().st_mtime >= _oax_authors_newest_mtime():
-        print(f"  {DIACRITIC_VARIANT_TABLE_FILENAME} fresh -- loading cached table.")
-        return load_diacritic_variant_table(out)
-    table = build_diacritic_table()
-    persist_diacritic_variant_table(table, out)
-    print(f"  Rebuilt {DIACRITIC_VARIANT_TABLE_FILENAME}: {len(table):,} entries.")
-    return table
+_DIACRITIC_SCAN_MARKER = _DATA_PERSISTED / "diacritic_scan_marker.txt"
 
 
-def build_diacritic_table() -> dict[str, list[str]]:
-    """The OAX-corpus-derived diacritic equivalence table (see build_diacritic_variant_table()'s
-    docstring), scanned from the FULL raw OAX_AUTHORS dimension table (119M rows) -- not
-    author_hep.parquet (the HEP-context-filtered 2.78M-row subset), since a genuine bare/digraph
-    pairing can only be discoverable via a fragment record that never made it into the HEP-filtered
-    population (2026-08-25 correction -- an earlier version of this function scoped to
-    author_hep.parquet, which is wrong: the whole point of this table is to widen blocking
-    candidates that ARE missing from the HEP-filtered set). Lives here, not in awards_cif.py,
-    because it's built FROM OAX data -- the loader builds it, the orchestrator (01_prepare_arc.py)
-    calls ensure_diacritic_table_fresh() explicitly and passes the result down as a plain
-    parameter, so awards_cif.py's ARC-only functions never reach into OAX data themselves
-    (2026-08-25, moved out of awards_cif.py after it was found buried inside
-    load_award_cif_items(), an implicit side-effecting call inconsistent with how
-    openalex_authors_prep.parquet itself is handled -- built/ensured-fresh up front, not
-    mid-computation). Callers should use ensure_diacritic_table_fresh() rather than this directly,
-    to get the persist/staleness behavior -- this is the unconditional-rebuild half only.
+def scan_for_new_diacritics(force: bool = False) -> set[str]:
+    """Scan OAX_AUTHORS' full raw dimension table (119M rows, not the HEP-filtered subset --
+    a new script could show up anywhere, not just in the HEP-context population) for any LATIN-
+    script letter that would be SILENTLY DROPPED by diacritic_variants()'s generic fallback --
+    i.e. one with no NFD canonical decomposition (unicodedata.decomposition(ch) == "") and not
+    already in DIACRITIC_CHARS. Three false-positive classes were found and excluded on real
+    runs, not assumed: (1) the overwhelming majority of accented letters (é, ñ, ā, ç, ...) already
+    decompose cleanly to a bare ASCII letter via diacritic_variants()'s own NFD-normalise step
+    and need no special-casing at all -- an earlier, broader version of this function flagged
+    15,575 of these as "new" on one real run; (2) a logographic/syllabic character (Hangul, CJK
+    ideographs, ...) also has no NFD decomposition, for an entirely unrelated reason (it isn't a
+    base letter + accent mark at all) -- found flooding a real run too (thousands of Hangul
+    syllables and rare CJK variants), excluded via unicodedata.name(ch, "").startswith("LATIN");
+    (3) IPA/phonetic-transcription symbols (U+0250-02AF, U+1D00-1DBF) are named "LATIN ..." by
+    Unicode (built on Latin letter shapes) but represent phonetic sounds, never used in an actual
+    person's name -- 83 of an initial 188 real candidates, excluded by codepoint range. This
+    module only ever folds Latin-alphabet name systems (European languages, Turkish, Vietnamese,
+    etc); a genuinely new script needing that kind of folding would need its own, separate
+    mechanism, not an extension of this one. A monitor for OpenAlex growing into a Latin-script
+    diacritic this module doesn't yet know how to fold, not a name-matching mechanism.
 
-    A SQL-side regexp_matches() pre-filter (RE2 engine -- confirmed via direct testing that
-    DuckDB's SIMILAR TO silently fails to match on a bracket character class built from
-    multi-byte Unicode characters, returning 0 rows against a table known to contain millions of
-    matches; regexp_matches() with the identical character class works correctly) cuts the ~119M
-    rows down to ~2.1M diacritic-bearing rows before this is fetched into Python -- avoids an
-    otherwise ~15-minute full-table Python scan. Measured at full scale: ~34s SQL fetch (2.1M rows
-    / 6.87M candidate name strings) + ~17s to build the table (319,273 entries) = ~51s total.
-    """
-    char_class = re.escape("".join(sorted(DIACRITIC_CHARS)))
+    Explicitly NOT what this function checks (2026-08-26, raised directly and checked, not
+    assumed -- an earlier draft of this docstring wrongly asserted non-Latin-original names
+    always arrive already transliterated to ASCII; checked directly against OAX_AUTHORS and
+    found that's false): OpenAlex's display_name field carries millions of names in their
+    original, non-Latin script -- 3.78M containing a literal Cyrillic character, 1.2M Arabic,
+    202K Greek, 2,160 Hebrew. None of those are Latin-script diacritics, so this scan correctly
+    has nothing to say about them (there's no "bare ASCII fallback" convention for a Cyrillic
+    letter the way ü->u is one for German) -- but whether this pipeline's name-parsing/matching
+    machinery (built entirely around Latin-alphabet processing: name_part_tokens()'s `[a-z]+`
+    regex, diacritic_variants()'s NFD-ascii-encode step, which would simply DELETE a Cyrillic
+    character rather than fold it to anything) does anything sane at all for these records, or
+    silently mangles them, is a real, separate, unverified question this scan does not answer
+    and was never designed to.
+
+    Gated on OAX_AUTHORS' own snapshot mtime via a small persisted marker file -- cheap no-op
+    unless the snapshot has actually changed (an OpenAlex migration, a few times a year), same
+    freshness pattern as ensure_fresh(). Returns the set of newly-found characters (empty if
+    none, or if skipped as still fresh) and prints a warning for a human to review -- deliberately
+    does NOT auto-extend any table itself: which bare/digraph convention (if any) a newly-found
+    script's diacritic actually uses is a judgment call each time (this is exactly how Turkish
+    ı/İ, Scandinavian å/ø, and German ü/ö/ä/ß were each found and added, one script at a time).
+
+    The actual character extraction/dedup runs inside DuckDB (regexp_extract_all + unnest +
+    DISTINCT), not by fetching every matching display_name into Python and iterating character by
+    character -- the result set this pulls back is bounded by the size of the Unicode alphabet
+    (at most a few thousand rows), not by corpus size, regardless of how many millions of authors
+    happen to have a non-ASCII name.
+
+    2026-08-26: replaces the former build_diacritic_table()/ensure_diacritic_table_fresh(), which
+    additionally built a cross-name bare<->digraph equivalence table from whatever it found --
+    removed as a real, confirmed bug (see name_diacritic_variants.py's module docstring). This
+    keeps only the genuinely useful half: discovering what diacritic characters exist in the
+    corpus, not linking names across people because they happen to share one."""
+    if not force and _DIACRITIC_SCAN_MARKER.exists() and (
+        _DIACRITIC_SCAN_MARKER.stat().st_mtime >= _oax_authors_newest_mtime()
+    ):
+        return set()
     con = duckdb.connect()
     rows = con.execute(
         f"""
-        SELECT display_name, display_name_alternatives
+        SELECT DISTINCT unnest(regexp_extract_all(display_name, '[^\\x00-\\x7F]', 0)) AS ch
         FROM read_parquet('{OAX_AUTHORS}/*.parquet')
-        WHERE regexp_matches(display_name, '[{char_class}]')
-           OR len(list_filter(display_name_alternatives,
-                               x -> regexp_matches(x, '[{char_class}]'))) > 0
+        WHERE display_name IS NOT NULL
+          AND regexp_matches(display_name, '[^\\x00-\\x7F]')
         """
     ).fetchall()
     con.close()
-    corpus_names: list[str] = []
-    for display_name, alts in rows:
-        if display_name:
-            corpus_names.append(display_name)
-        corpus_names.extend(alts or [])
-    return build_diacritic_variant_table(corpus_names)
+    found = {
+        ch for (ch,) in rows
+        if ch.isalpha()
+        and ch not in DIACRITIC_CHARS
+        and not unicodedata.decomposition(ch)
+        # Restrict to Latin script -- this module only ever folds Latin-alphabet name systems
+        # (European languages, Turkish, Vietnamese, etc). A logographic/syllabic character
+        # (Hangul, CJK ideographs, ...) also has no NFD decomposition, for an entirely unrelated
+        # reason (it isn't a base letter + accent mark at all), and is not a name-folding gap --
+        # confirmed a real, live false-positive class on this project's own OAX_AUTHORS table
+        # (thousands of Hangul syllables and rare CJK ideograph variants, zero of which are
+        # anything this module should ever try to fold).
+        and unicodedata.name(ch, "").startswith("LATIN")
+        # IPA Extensions (U+0250-02AF) and Phonetic Extensions (U+1D00-1DBF) are named "LATIN
+        # ..." by Unicode (built on Latin letter shapes) but are phonetic-transcription symbols,
+        # never used in an actual person's name -- confirmed a second real false-positive class
+        # on this project's own data (83 of an initial 188 candidates).
+        and not (0x0250 <= ord(ch) <= 0x02AF or 0x1D00 <= ord(ch) <= 0x1DBF)
+    }
+    _DIACRITIC_SCAN_MARKER.write_text(f"scanned, {len(found)} new chars found\n")
+    if found:
+        print(
+            f"  WARNING: {len(found)} letter(s) found in OAX_AUTHORS with no NFD decomposition "
+            f"and not covered by DIACRITIC_CHARS: {sorted(found)!r} -- these would be silently "
+            "dropped by diacritic_variants()'s generic fallback; review and extend "
+            "name_diacritic_variants.py's _NO_DECOMP_FALLBACK/_DIACRITIC_VARIANTS if needed."
+        )
+    else:
+        print("  scan_for_new_diacritics: no new diacritic characters found.")
+    return found
 
 
 def oax_name_arrays(display_name: str, alts: list[str]) -> dict:

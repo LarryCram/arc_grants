@@ -1,7 +1,12 @@
 """
-Tests for src/utils/name_diacritic_variants.py -- diacritic/special-character handling and the
-corpus-grounded bare<->digraph equivalence table. Split out of test_names.py (2026-08-25),
-matching the source module split.
+Tests for src/utils/name_diacritic_variants.py -- diacritic/special-character handling for ARC
+and OpenAlex name strings. Split out of test_names.py (2026-08-25), matching the source module
+split.
+
+2026-08-26: the corpus-wide bare<->digraph equivalence table (build_diacritic_variant_table() /
+persist_/load_diacritic_variant_table()) was removed as a real, confirmed bug -- see the source
+module's own docstring. Its tests are removed along with it; diacritic_variants() no longer
+takes a `table` argument.
 """
 import sys
 from pathlib import Path
@@ -9,8 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 from src.utils.name_diacritic_variants import (
-    build_diacritic_variant_table, diacritic_variants, expand_diacritic_variants,
-    load_diacritic_variant_table, persist_diacritic_variant_table, strip_diacriticals,
+    diacritic_variants, expand_diacritic_variants, strip_diacriticals,
 )
 
 
@@ -59,7 +63,8 @@ class TestStripDiacriticals:
 class TestDiacriticVariants:
     """diacritic_variants() -- the single consolidated entry point (2026-08-25) replacing the
     old split between strip_diacriticals()/expand_diacritic_variants(). Returns an ORDERED list,
-    shortest-first."""
+    shortest-first. Deliberately local (2026-08-26): every variant returned is derived purely
+    from the input string's own characters -- see TestNoCrossNameLeakage below."""
     def test_bare_and_digraph_from_literal_umlaut(self):
         # Confirmed real case: DP0345157_HansMuhlhaus -- ARC has bare 'muhlhaus' (no diacritic to
         # expand from), every one of his real OpenAlex fragments has family_names_display
@@ -79,7 +84,7 @@ class TestDiacriticVariants:
     def test_no_spurious_folds_on_unrelated_names(self):
         # A blind substring-fold approach ("ue"->"u" everywhere) was tried and rejected because
         # it mangles ordinary non-German names -- confirmed here it does NOT happen without a
-        # diacritic-bearing sibling actually present in the input.
+        # literal diacritic character actually present in the input.
         assert diacritic_variants("Fuentes") == ["fuentes"]
         assert diacritic_variants("Guerrero") == ["guerrero"]
         assert diacritic_variants("Rousseau") == ["rousseau"]
@@ -102,23 +107,31 @@ class TestDiacriticVariants:
     def test_plain_ascii_single_element(self):
         assert diacritic_variants("Smith") == ["smith"]
 
-    def test_table_widens_result(self):
-        table = {"muhlhaus": ["muehlhaus", "grutzner"]}
-        assert diacritic_variants("Muhlhaus", table) == ["grutzner", "muhlhaus", "muehlhaus"]
 
-    def test_table_none_is_noop(self):
-        assert diacritic_variants("Muhlhaus", None) == diacritic_variants("Muhlhaus")
+class TestNoCrossNameLeakage:
+    """2026-08-26: a former version of diacritic_variants() also consulted a corpus-wide
+    bare<->digraph equivalence table, keyed on the bare-folded string regardless of whether the
+    INPUT itself had a diacritic. That let one unrelated person's real diacritic name (e.g.
+    "Christian Bäker", externally confirmed real via a 2014 co-authored journal article) inject a
+    spurious "baeker" spelling into every OTHER "Baker" in the whole ARC/OAX population --
+    confirmed concretely for Baker/Wang/Walker/Zhu/Wu/Xu/Xue. Removed outright, not merely
+    gated -- these tests assert the specific real collision strings never appear for a plain
+    ASCII name with no diacritic character of its own, on any current or future mechanism."""
+    def test_plain_common_surnames_never_widened(self):
+        assert diacritic_variants("Baker") == ["baker"]
+        assert diacritic_variants("Wang") == ["wang"]
+        assert diacritic_variants("Walker") == ["walker"]
+        assert diacritic_variants("Zhu") == ["zhu"]
+        assert diacritic_variants("Wu") == ["wu"]
+        assert diacritic_variants("Xu") == ["xu"]
+        assert diacritic_variants("Xue") == ["xue"]
 
-    def test_table_no_match_is_noop(self):
-        table = {"someothername": ["irrelevant"]}
-        assert diacritic_variants("Muhlhaus", table) == ["muhlhaus"]
-
-    def test_ascii_only_digraph_widened_by_table(self):
-        # The gap this table exists to close: OpenAlex's own curated spelling can be ASCII-only
-        # digraph (no literal ü anywhere) -- without the table, "Muehlhaus" alone would never
-        # generate "muhlhaus", since there's no diacritic character to expand from.
-        table = {"muehlhaus": ["muhlhaus"], "muhlhaus": ["muehlhaus"]}
-        assert diacritic_variants("Muehlhaus", table) == ["muhlhaus", "muehlhaus"]
+    def test_no_table_parameter_accepted(self):
+        # diacritic_variants() is single-argument now -- passing a second positional argument
+        # must be a TypeError, not silently ignored (would mask a caller that still thinks a
+        # table exists).
+        with pytest.raises(TypeError):
+            diacritic_variants("Baker", {"baker": ["baeker"]})
 
 
 class TestExpandDiacriticVariants:
@@ -127,70 +140,3 @@ class TestExpandDiacriticVariants:
     own internal lowering and never lowercases externally itself)."""
     def test_matches_diacritic_variants(self):
         assert expand_diacritic_variants("Mühlhaus") == diacritic_variants("Mühlhaus")
-
-    def test_table_passthrough(self):
-        table = {"muhlhaus": ["grutzner"]}
-        assert expand_diacritic_variants("Muhlhaus", table) == diacritic_variants("Muhlhaus", table)
-
-
-class TestBuildDiacriticVariantTable:
-    """build_diacritic_variant_table() -- scans a corpus of raw name strings for tokens with a
-    literal diacritic character and builds a bare<->digraph equivalence table for CONFIRMED
-    roots only."""
-    def test_confirms_real_pairing(self):
-        corpus = ["Hans Mühlhaus", "H.-B. Mühlhaus"]
-        table = build_diacritic_variant_table(corpus)
-        assert table["muhlhaus"] == ["muehlhaus"]
-        assert table["muehlhaus"] == ["muhlhaus"]
-
-    def test_no_entry_for_names_without_diacritic_sibling(self):
-        # Confirmed real safety property: an ordinary name never gets a spurious entry just for
-        # containing "ue"/"ae"/etc as an incidental substring.
-        corpus = ["Random Fuentes", "John Smith", "Maria Guerrero"]
-        table = build_diacritic_variant_table(corpus)
-        assert "fuentes" not in table
-        assert "guerrero" not in table
-        assert table == {}
-
-    def test_multiple_roots(self):
-        corpus = ["Hans Mühlhaus", "Frank Grützner", "Random Fuentes"]
-        table = build_diacritic_variant_table(corpus)
-        assert set(table.keys()) == {"muhlhaus", "muehlhaus", "grutzner", "gruetzner"}
-
-    def test_given_name_diacritics_also_captured(self):
-        # Not just family names -- any token, per the 2026-08-25 "apply to all names" direction.
-        corpus = ["Björn Ohlsson"]
-        table = build_diacritic_variant_table(corpus)
-        assert "bjorn" in table
-        assert "bjoern" in table["bjorn"]
-
-    def test_empty_corpus(self):
-        assert build_diacritic_variant_table([]) == {}
-
-    def test_none_and_empty_strings_in_corpus_skipped(self):
-        assert build_diacritic_variant_table([None, "", "Hans Mühlhaus"]) == {
-            "muhlhaus": ["muehlhaus"], "muehlhaus": ["muhlhaus"],
-        }
-
-
-class TestPersistLoadDiacriticVariantTable:
-    def test_round_trip(self, tmp_path):
-        table = {
-            "muhlhaus": ["muehlhaus"], "muehlhaus": ["muhlhaus"],
-            "grutzner": ["gruetzner"], "gruetzner": ["grutzner"],
-        }
-        path = tmp_path / "table.csv"
-        persist_diacritic_variant_table(table, path)
-        loaded = load_diacritic_variant_table(path)
-        assert loaded == table
-
-    def test_missing_file_returns_empty(self, tmp_path):
-        assert load_diacritic_variant_table(tmp_path / "does_not_exist.csv") == {}
-
-    def test_csv_format_is_one_row_per_pair(self, tmp_path):
-        table = {"muhlhaus": ["muehlhaus", "grutzner"]}
-        path = tmp_path / "table.csv"
-        persist_diacritic_variant_table(table, path)
-        lines = path.read_text().splitlines()
-        assert lines[0] == "variant,counterpart"
-        assert len(lines) == 3  # header + 2 rows, one per counterpart

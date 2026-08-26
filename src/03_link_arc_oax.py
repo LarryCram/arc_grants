@@ -107,7 +107,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import PROCESSED_DATA
 from src.utils.names import max_by_len, parse_given
 from src.utils.pipeline_freshness import (
-    assert_fresh, AWARDS_CIF_SOURCE, NAME_LOGIC_SOURCES, DIACRITIC_VARIANT_TABLE_INPUT,
+    assert_fresh, AWARDS_CIF_SOURCE, NAME_LOGIC_SOURCES,
 )
 
 PREDICT_THRESHOLD = 0.5
@@ -130,9 +130,9 @@ _AWARDS_CIF_INPUTS = [
     _DATA_PERSISTED / "manual_splits.csv",
     _DATA_PERSISTED / "manual_splits_by_grant.csv",
     _DATA_PERSISTED / "manual_confirmed_not_suspicious.csv",
+    _DATA_PERSISTED / "manual_confirmed_distinct.csv",
     _DATA_PERSISTED / "enrichment_blocklist.csv",
     _DATA_PERSISTED / "for_concordance.csv",
-    DIACRITIC_VARIANT_TABLE_INPUT,
     AWARDS_CIF_SOURCE, *NAME_LOGIC_SOURCES,
 ]
 

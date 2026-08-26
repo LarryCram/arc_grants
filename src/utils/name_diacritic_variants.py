@@ -1,16 +1,46 @@
 """
-Diacritic/special-character handling and corpus-grounded bare<->digraph equivalence matching.
+Diacritic/special-character handling for ARC and OpenAlex name strings.
 
 Split out of names.py (2026-08-25) once this subsystem grew beyond simple string normalisation --
 a plain "names.py" no longer described what lives here: punctuation canonicalisation, the
-no-NFD-decomposition fallback, the bare/digraph cartesian-product generator, and the
-corpus-grounded equivalence table (build/persist/load) used to widen ARC's always-ASCII data
-with real spelling variants confirmed elsewhere in the OpenAlex corpus.
+no-NFD-decomposition fallback, and the bare/digraph cartesian-product generator.
 
-See diacritic_variants()'s own docstring for the core mechanism, and CLAUDE.md's 2026-08-25
-sections for the incident history that motivated this module's design: a real production bug
-(strip_diacriticals() silently dropping ß/ø/ł/etc, never fixed at its own source) and a
-structurally unreachable Splink blocking pair (DP0345157_HansMuhlhaus) found via it.
+2026-08-26 removal: this module used to also build/persist/load a corpus-wide bare<->digraph
+equivalence table (scanning all 119M OpenAlex authors for any name with a literal diacritic,
+then linking every OTHER name sharing that name's bare-folded root). Found to be a real,
+confirmed bug: since the lookup key was the bare-folded string, a single unrelated person
+anywhere in OpenAlex whose real diacritic name happened to bare-fold to a common surname (e.g.
+"Christian Bäker" -> "baker") silently injected a spurious "baeker" spelling into EVERY ARC/OAX
+person named "Baker" project-wide -- confirmed concretely for Baker/Wang/Walker/Zhu/Wu/Xu/Xue,
+traced to 8 real OpenAlex source names (one independently confirmed real via an external
+publication; two others -- Wei Xü, Zhü Weifang -- turned out to already self-resolve via their
+own OpenAlex display_name_alternatives, needing no table at all). Investigating why the table
+was ever needed found it added nothing beyond what diacritic_variants() already computes
+per-name: the table's equivalence classes are themselves built by running the same per-character
+substitution on each corpus token, so its only actual effect beyond that was merging different
+people's independently-computed roots together -- the bug, not a feature. The one motivating
+case ever cited for it (DP0345157_HansMuhlhaus / OpenAlex's "Hans Mühlhaus") was re-verified to
+already work via the per-character substitution alone: OpenAlex's own literal "ü" already
+generates both "muhlhaus" and "muehlhaus" for that one record, which already overlaps ARC's bare
+"muhlhaus" directly -- no cross-corpus table was ever actually load-bearing for it.
+
+What's kept: the per-character substitution (diacritic_variants(), safe and local -- it only
+ever expands a name's OWN literal characters into that same name's own plausible spellings, so
+it cannot link two different people). ARC data is not "always ASCII" as an earlier version of
+this docstring claimed -- confirmed 189 real ARC investigator records carry a genuine diacritic
+character -- but that's exactly the case this substitution already handles correctly on its own,
+for whichever side (ARC or OpenAlex) happens to carry the real character.
+
+What replaced the table: 00c_prepare_oax.py's scan_for_new_diacritics() -- a much narrower,
+freshness-gated monitor that watches for OpenAlex growing into scripts/diacritic characters this
+module doesn't yet know how to fold (Turkish, Scandinavian, Finnish, etc. were all discovered
+this way originally), without building any cross-name equivalence table from what it finds.
+
+See diacritic_variants()'s own docstring for the core mechanism, and CLAUDE.md's 2026-08-25/26
+sections for the full incident history: a real production bug (strip_diacriticals() silently
+dropping ß/ø/ł/etc, never fixed at its own source) and a structurally unreachable Splink blocking
+pair (DP0345157_HansMuhlhaus) that motivated building diacritic_variants() itself -- both real,
+both still fixed by what remains in this module.
 """
 
 import itertools
@@ -100,7 +130,7 @@ DIACRITIC_CHARS = frozenset(
 )
 
 
-def diacritic_variants(s: str, table: dict[str, list[str]] | None = None) -> list[str]:
+def diacritic_variants(s: str) -> list[str]:
     """The single entry point for all diacritic/special-character handling in this codebase --
     consolidated 2026-08-25 (was split across strip_diacriticals()/expand_diacritic_variants(),
     which let a real bug -- strip_diacriticals() itself silently dropping ß/ø/ł/etc, never fixed
@@ -111,19 +141,26 @@ def diacritic_variants(s: str, table: dict[str, list[str]] | None = None) -> lis
     means input casing never matters, whether Title Case, ALL CAPS, or already lowercase, which
     real ARC and OAX name data both use inconsistently), folds Turkish ı/İ and every no-NFD-
     decomposition letter (_NO_DECOMP_FALLBACK) to a bare fallback instead of silently dropping
-    it, generates the bare/digraph cartesian product for characters with a real conventional
-    digraph spelling (_DIACRITIC_VARIANTS), and -- if a corpus-grounded `table` is supplied
-    (see build_diacritic_variant_table()) -- widens each resulting variant with its confirmed
-    real-world counterpart(s).
+    it, and generates the bare/digraph cartesian product for characters with a real conventional
+    digraph spelling (_DIACRITIC_VARIANTS).
+
+    Deliberately local and self-contained: every variant returned is derived purely from `s`'s
+    own characters, never from any other name -- a plain ASCII string with no diacritic character
+    at all (the overwhelming majority of names, on both the ARC and OpenAlex sides) always
+    returns exactly `[s]` unchanged. This is a hard invariant, not an optimisation -- a former
+    version of this function also consulted a cross-name corpus-wide equivalence table, which let
+    one unrelated person's real diacritic name silently inject a spurious spelling into every
+    OTHER person sharing that name's bare-folded root project-wide (found and removed 2026-08-26,
+    see this module's own docstring for the full incident -- confirmed to have added nothing that
+    per-name expansion didn't already give, once traced through the one case that was ever cited
+    to justify it).
 
     Returns an ORDERED list, shortest-first: [0] is always the most compact form, later entries
     progressively more expanded. Callers needing a single scalar should take [0] -- NOT the old
     "longest wins" convention (max_by_len), which was itself the root cause of a real production
     bug (a genuinely matching pair silently unreachable by Splink blocking because the two sides'
     "longest" picks disagreed; see CLAUDE.md 2026-08-25). Callers needing every plausible
-    spelling (e.g. Splink blocking/comparison) should use the full list. A string with no special
-    characters and no table hit returns a single-element list (itself, normalised) -- always at
-    least as much as the old strip_diacriticals() alone would give, never less.
+    spelling (e.g. Splink blocking/comparison) should use the full list.
     """
     if not s:
         return []
@@ -138,9 +175,6 @@ def diacritic_variants(s: str, table: dict[str, list[str]] | None = None) -> lis
         unicodedata.normalize("NFD", v).encode("ascii", "ignore").decode("ascii").strip()
         for v in raw_variants
     } - {""}
-    if table:
-        for v in list(variants):
-            variants.update(table.get(v, []))
     return sorted(variants, key=lambda v: (len(v), v))
 
 
@@ -153,84 +187,6 @@ def strip_diacriticals(s: str) -> str:
     return variants[0] if variants else ""
 
 
-def expand_diacritic_variants(s: str, table: dict[str, list[str]] | None = None) -> list[str]:
+def expand_diacritic_variants(s: str) -> list[str]:
     """Thin wrapper over diacritic_variants() for existing callers of the full-list form."""
-    return diacritic_variants(s, table)
-
-
-# Persisted filename for the corpus-grounded diacritic equivalence table (see
-# build_diacritic_variant_table() below). Lives in data_persisted/, not PROCESSED_DATA -- this
-# is a precursor input other pipeline stages read from, the same category as
-# for_concordance.csv/admin_orgs.csv, not a derived pipeline output like oax_tf_*.parquet
-# (2026-08-25 direction). One row per (variant, counterpart) pair, not one row per variant with
-# a list column -- matches this project's existing data_persisted/*.csv convention (git-diffable,
-# human-reviewable), the same shape as manual_merges.csv etc.
-DIACRITIC_VARIANT_TABLE_FILENAME = "name_diacritic_variants.csv"
-
-_NAME_TOKEN_SPLIT = re.compile(r"[\s\-]+")
-
-
-def build_diacritic_variant_table(name_strings) -> dict[str, list[str]]:
-    """Scan a corpus of raw (pre-normalisation) name strings -- e.g. every OAX display_name AND
-    every display_name_alternatives entry, family and given names alike, not pre-split by role --
-    for tokens containing a literal umlaut/eszett/stroke/overring character, and build a
-    bare<->digraph equivalence table for those CONFIRMED roots only.
-
-    Returns variant -> sorted list of every OTHER confirmed variant for that root (a full
-    equivalence class, not just one counterpart -- a token with 2+ diacritic characters, or
-    multiple independently-observed real spellings of the same root, can have more than 2
-    members). A token with no diacritic-bearing form anywhere in the corpus (e.g. "Fuentes")
-    never enters the table at all, so its "ue" substring is never folded -- this is the safe,
-    data-grounded alternative to a blind substring-fold, which was tried and rejected (confirmed
-    to mangle ordinary non-German names -- "Fuentes" -> "funtes", "Guerrero" -> "gurrero").
-
-    Tokenises on whitespace/hyphens only (not full HumanName parsing -- this only needs to
-    isolate the diacritic-bearing token itself, not classify it as first/middle/last, since the
-    resulting table is applied identically to any name role -- given or family -- via
-    diacritic_variants()'s own `table` parameter).
-    """
-    groups: dict[str, set[str]] = {}
-    for name in name_strings:
-        if not name:
-            continue
-        for raw_token in _NAME_TOKEN_SPLIT.split(name):
-            token = raw_token.strip(".,'\"")
-            if not token or not any(ch in _DIACRITIC_VARIANTS for ch in token.lower()):
-                continue
-            variants = diacritic_variants(token)
-            if len(variants) < 2:
-                continue
-            root = variants[0]
-            groups.setdefault(root, set()).update(variants)
-
-    table: dict[str, list[str]] = {}
-    for members in groups.values():
-        for v in members:
-            others = sorted(members - {v})
-            table[v] = sorted(set(table.get(v, [])) | set(others))
-    return table
-
-
-def persist_diacritic_variant_table(table: dict[str, list[str]], path) -> None:
-    import csv as _csv
-    rows = sorted(
-        (variant, counterpart)
-        for variant, counterparts in table.items()
-        for counterpart in counterparts
-    )
-    with open(path, "w", newline="") as f:
-        writer = _csv.writer(f)
-        writer.writerow(["variant", "counterpart"])
-        writer.writerows(rows)
-
-
-def load_diacritic_variant_table(path) -> dict[str, list[str]]:
-    import csv as _csv
-    from pathlib import Path as _Path
-    table: dict[str, list[str]] = {}
-    if not _Path(path).exists():
-        return table
-    with open(path, newline="") as f:
-        for row in _csv.DictReader(f):
-            table.setdefault(row["variant"], []).append(row["counterpart"])
-    return table
+    return diacritic_variants(s)

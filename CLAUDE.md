@@ -1251,6 +1251,246 @@ pass rather than continuing to grind case-by-case, given every remaining lookup 
 lacked a clean ORCID or biography hit came back empty. Not pursued further this session, pending
 the user's decision on whether to continue into the weaker categories or proceed to OAX linking.
 
+## Corpus-wide diacritic equivalence table removed as a real, confirmed bug (2026-08-26)
+
+`src/utils/name_diacritic_variants.py` used to build a table (`data_persisted/
+name_diacritic_variants.csv`, 319,273 keys) by scanning all 119M OpenAlex authors for any name
+with a literal diacritic, then linking every OTHER name sharing that name's bare-folded root.
+Investigating a `4u` cluster review surfaced garbled `family_names` entries (`['waang', 'waeng',
+'wang']` for plain "Wang", `['baeker', 'baker']` for plain "Baker") -- traced to real OpenAlex
+records (`Marie Wång`, `Christian Bäker`, externally confirmed real via a 2014 co-authored
+journal article) whose own bare-folded root coincidentally collided with an extremely common,
+totally unrelated surname. The table had no way to scope an equivalence to the one specific
+person it was actually true for -- it could only ever say "these two strings are globally
+equivalent," so one real diacritic-bearing name anywhere in a 119M-author corpus was enough to
+contaminate every unrelated person sharing that bare surname project-wide. Confirmed concretely
+for Baker/Wang/Walker/Zhu/Wu/Xu/Xue (8 real source names traced, one independently confirmed
+real by the user, two -- Wei Xü, Zhü Weifang -- found to already self-resolve via their own
+OpenAlex `display_name_alternatives`, needing no table at all).
+
+Investigating *why* the table was ever needed found it added nothing beyond what
+`diacritic_variants()` already computes per-name (its own equivalence classes are built by
+running the identical per-character substitution on each corpus token) -- its only real effect
+beyond that was merging different people's independently-computed roots together, the bug, not a
+feature. The one motivating case ever cited for it (`DP0345157_HansMuhlhaus` / OpenAlex's "Hans
+Mühlhaus") was re-verified to already work via the per-character substitution alone: OpenAlex's
+own literal "ü" already generates both "muhlhaus" and "muehlhaus" for that one record, which
+already overlaps ARC's bare "muhlhaus" directly.
+
+**Fix**: removed the table entirely (`build_/persist_/load_diacritic_variant_table()`,
+`DIACRITIC_VARIANT_TABLE_FILENAME`, and its `pipeline_freshness.py`/`03_link_arc_oax.py`
+freshness-dependency wiring) -- kept only the per-character substitution (`diacritic_variants()`,
+safe and local: every variant it returns is derived purely from the input string's own
+characters, so it structurally cannot link two different people). Two real bugs found and fixed
+in `awards_cif.py`'s `_name_forms()` along the way: (1) the family-name path was correctly routed
+through `diacritic_variants()` but the function itself did table-widening unconditionally,
+regardless of whether the ARC string had a diacritic at all; (2) the given-name path bypassed
+`diacritic_variants()` entirely with a raw, ungated table lookup, AND (found by a failing test)
+widening was being applied to the already-tokenized/stripped form -- `name_part_tokens()` does
+its own diacritic-stripping internally, so by the time it returns, the original literal character
+is already gone; widening now happens on the raw `hn.first`/`hn.middle` string before
+tokenizing, not after. ARC data is NOT "always ASCII" as the old design assumed -- confirmed 189
+real ARC investigator records (mostly German/Scandinavian co-investigators, e.g. "Jürgen Götz",
+"Bjørn Nansen") carry a genuine diacritic character, and these are exactly the records the fixed
+code now correctly widens using their own literal characters, without touching anyone else's.
+
+**Replacement discovery tool**: `00c_prepare_oax.py::scan_for_new_diacritics()` -- freshness-gated
+on OAX_AUTHORS' own snapshot mtime (a small persisted marker file, same pattern as
+`ensure_diacritic_table_fresh()`'s old one), reports any Latin-script letter with no NFD
+decomposition not yet in `DIACRITIC_CHARS`, for human review -- builds no cross-name equivalence
+table from what it finds. Needed two rounds of tightening once run against real data, not
+assumed correct on the first pass: an initial "any non-ASCII letter" version flagged 15,575 false
+positives (ordinary accented Latin letters like é/ñ/ā that already decompose cleanly and need no
+special-casing); restricting to "no NFD decomposition" cut this to 188, but that still included
+thousands of Hangul syllables and CJK ideograph variants (no decomposition for an entirely
+unrelated reason -- not a diacritic gap at all) and IPA/phonetic-transcription symbols (Unicode
+names them "LATIN ..." since they're built on Latin letter shapes, but they're never used in an
+actual person's name) -- excluding non-Latin-script names via `unicodedata.name(ch,
+"").startswith("LATIN")` and the IPA/Phonetic Extensions codepoint ranges (U+0250-02AF,
+U+1D00-1DBF) brought it down to 105, a genuinely reviewable list (mostly African-language
+orthography letters -- Ɓ, Ɗ, Ƙ, Ɲ, click consonants ǁ/ǂ -- plus a few rare European ones: Croatian
+Đ, Maltese Ħ, Sami Ŋ/Ŧ).
+
+**A real, confirmed, deliberately-unaddressed gap found while verifying the fix**:
+`diacritic_variants()`'s final NFD-normalise-then-ascii-encode step silently drops any character
+with no ASCII-reachable decomposition at all -- confirmed directly: `diacritic_variants("Иванов")`
+(pure Cyrillic), `("Παπαδόπουλος")` (Greek), `("محمد")` (Arabic), and `("王伟")` (CJK) all return
+`[]`, not a mangled transliteration. This is a real behaviour, not a hypothetical one: OpenAlex's
+own `display_name` field carries millions of names in native non-Latin script (3.78M containing a
+literal Cyrillic character, 1.2M Arabic, 202K Greek, 2,160 Hebrew, checked directly against
+OAX_AUTHORS) -- so `oax_name_arrays()` genuinely produces an empty `family_names_display`/
+`family_names_alt` for any OAX author whose display_name is purely non-Latin-script. ARC's own
+data is unaffected -- checked directly, all 33 distinct non-ASCII characters across every ARC
+`first_name`/`family_name` field are ordinary Latin-accented letters already handled correctly
+(á/ã/ä/å/ç/è/é/ê/ë/í/î/ï/ñ/ó/ö/ø/ù/ú/ü/ć/ę/ś/š/ž/ß plus two harmless stray marks), zero Cyrillic/
+Greek/Arabic/Hebrew/CJK anywhere in ARC's own investigator names. **Deliberately left
+unaddressed, per direct user reasoning**: since every ARC-recorded name is Latin-script by
+construction, a correct ARC↔OAX match can never structurally *depend on* reaching an OAX
+identity that exists only as a non-Latin-script fragment with no Latin-script form anywhere else
+in that same author's own OpenAlex record -- if such a case exists, it reads as ordinary
+OAX-side entity fragmentation (a real, different, already-known category of noise this project
+tracks elsewhere), not a name-matching reachability gap this module needs to close.
+
+Tests: rewrote `tests/test_name_diacritic_variants.py` (removed the table's own test classes,
+added `TestNoCrossNameLeakage` asserting the specific real collision strings never reappear) and
+fixed `tests/test_awards_cif.py::TestNameForms`. `data_persisted/name_diacritic_variants.csv`
+(14MB) archived to `ZARCHIVE/data/name_diacritic_variants_retired_20260826.csv`. 460/460 passing.
+
+## `4u` review continued post-diacritic-fix rerun; a real institution-attribution mistake caught mid-session (2026-08-26)
+
+Population moved to 43 `4u` clusters after the diacritic fix + `resolve_cluster_id` work above
+(a full `00`→`01`→`03`→`04` rerun, user-run by hand). Four confirmed via `manual_merges.csv`:
+
+- **`DP0208065_AGuyanRobertson`/`DP0208065_ARobertson`** and **`FT120100612_YingziJennyWang`/
+  `FT120100612_JennyYingziWang`** — both literal announcement/current name-snapshot pairs on one
+  grant (confirmed directly against `investigators_raw.parquet`: each grant has exactly 2
+  investigator rows, both the same person's two name-forms).
+- **`LP0775520_LeesaCostelloneeBonniface`/`LP0990807_LeesaBonniface`** — "Leesa Costello (nee
+  Bonniface)" is itself listed as a co-investigator on `LP0990807`, the very grant the second
+  cluster is built from; same institution (Edith Cowan University), same field, ORCID
+  `0000-0003-1139-3228` on the confirmed side.
+- **`DP1095691_AnthonyHarris`/`LP150100680_AnthonyHarris`** — shared co-investigator "Duncan
+  Mortimer" across both grants; independently corroborated afterward by the user's own live
+  ORCID lookup (Anthony Howard Harris, `0000-0003-1641-3320`, Monash University), which also
+  matches a pre-existing 2026-08-24 merge entry already in the file for this same cluster. A
+  third "Anthony Harris" in the same pool (`DP170103094`, Sydney/UNSW psychology, different
+  ORCID, different co-investigators) correctly stayed separate -- a genuinely different person.
+
+**A real methodological mistake caught mid-review, by direct user correction**: initial
+reasoning for the Anthony Harris and Mark Baker cases leaned on `inst_arr` (institution)
+overlap -- but every grant involved has 2-8 co-investigators, and per this project's own
+2026-08-25 finding (see the "`inst_arr` widened" session above), ARC's raw data has no field
+tying a *specific* investigator to a *specific* institution on a multi-investigator grant --
+`admin_org` only reliably identifies one specific person's institution when that grant has
+exactly one investigator. Corrected by switching to shared co-investigator identity (a
+same-or-rare name appearing on both grants) as the actual evidence, which is what the Anthony
+Harris merge above is really based on -- institution overlap was explicitly NOT used as
+evidence for it once this was caught.
+
+**`LP0776387_MarkBaker` -- investigated, NOT merged, real negative evidence found**: checked
+against both existing "Mark Baker" clusters (`DP0557854`, Macquarie, ORCID
+`0000-0001-5858-4035`, confirmed proteomics researcher; `DP110100984`, Monash+Newcastle, ORCID
+`0000-0003-3933-9784`, reproductive biology) across *every* grant each holds -- zero
+co-investigator overlap with either. Institution (`LP0776387` shows UNSW) was explicitly
+discounted as evidence given 8 co-investigators on that grant. User-supplied external check
+(direct research, not this pipeline's own data) found Prof Mark Baker (the Macquarie ORCID
+holder) has no co-authored peer-reviewed papers with any of `LP0776387`'s listed
+co-investigators (Guilhaus, Raftery, Cavicchioli, Kyrpides, Richardson, Sava, Thomas) despite
+working in an adjacent proteomics field -- real negative evidence, not just an absence of
+positive evidence, that these are different people.
+
+**Kept as an open, explicitly unconfirmed lead, not acted on**: the user separately suspects
+`LP0776387`'s Mark Baker may still be the same `0000-0001-5858-4035` (Macquarie) after all --
+specifically because that ORCID holder was Director of a national facility, and could plausibly
+have held a connected UNSW appointment at the time of this 2007-era grant that wouldn't show up
+as co-authorship with the *other* named investigators (a facility directorship doesn't
+necessarily produce joint papers with every user of the facility). Not pursued further this
+session -- would need independent evidence of the specific UNSW connection (an affiliation
+record, an annual report, a CV) before this could become a real merge candidate; co-authorship
+absence with this specific set of 7 people doesn't rule it out on its own.
+
+## `4u` population driven to zero; a batch-merge mistake caught and fully reversed (2026-08-26)
+
+Direct continuation of the review above, working through the remaining pool of `gap_candidates`
+pairs. **A real process failure happened partway through and is recorded here deliberately, not
+smoothed over**: acting on the user's own general characterization of a batch of pairs ("the
+single grant cases are the same person," listing 9 pairs together), 9 rows were added to
+`manual_merges.csv` **without individually checking co-investigators, institution, or grant year
+for each one** — a direct violation of this project's own established standard (every other merge
+in this file's history is backed by per-case evidence). The user caught it immediately: *"reverse
+that last action. I thought that there were name variants on the samw grant but you did not show
+me the full story. reverse all of them/ Jing Li os tow people."* All 9 rows were reversed via
+direct file restoration (confirmed byte-identical to the pre-batch state), and every one of the 8
+remaining pairs was then re-investigated individually — pulling actual `investigators_raw.parquet`
+rows (co-investigators, institution, funding year) per grant before any decision, exactly the
+standard the rest of this file's `4u` work already followed. **Lesson, stated plainly**: a user's
+own summary characterization of a batch is not a substitute for checking the underlying data one
+case at a time — this applies even when the user is the one supplying the pattern, not just when
+the assistant infers one.
+
+**Individually re-verified outcomes for the reversed 9** (`manual_merges.csv` /
+`manual_confirmed_distinct.csv`):
+- **Same person**: `DP0342607_YingZHU`/`DP120102002_YingZhu` — both grants share the exact same
+  two co-investigators, Michael Webber and John Benson, 9 years apart (Melbourne 2003 → UniSA
+  2012) — decisive internal evidence. `DP250102495_JenniferSmithMerry`/`LP0560740_JenniferSmith`
+  — user-supplied ORCID `0000-0002-6705-2652` (Jen Smith-Merry, ARC Laureate Fellow, Professor of
+  Health and Social Policy, University of Sydney) confirms a PhD in Social Policy from the
+  University of Queensland, matching `LP0560740`'s 2005 UQ disability/community-services context
+  (co-investigators Karen Healy/Margot Rawsthorne/Geoffrey Woolcock, all UQ social work
+  researchers) — career trajectory UQ → Edinburgh/Menzies postdoc → Sydney from 2011 fits
+  cleanly.
+- **Different people** (6, all recorded in `manual_confirmed_distinct.csv`, user-confirmed after
+  individual evidence review): `DP0344447_AlisonMoore`/`DP190101457_AlisonDownhamMoore` (zero
+  co-investigator overlap, different institution, 16-year gap); `DP1095998_HuaChen`/
+  `DE140101143_ZhongHuaChen` (zero overlap, different institution); `LP0209231_WeiXu`/
+  `DP150104719_WeiXu` (zero overlap, different institution, 13-year gap, common name);
+  `LP0230563_JWilliams`/`DP0345136_JamesWilliams` (zero overlap, different institution);
+  `LP120100700_JuanNieto`/`DP0666065_JuanGonzalezNieto` (decisive negative evidence: Sydney's Juan
+  Nieto co-investigates with Eduardo Nebot/Graham Brooker, well-known Sydney ACFR field-robotics
+  researchers, while QUT's Juan Gonzalez Nieto co-investigates with Colin Boyd/Kenneth Paterson,
+  well-known cryptographers — two different, real, identifiable research communities);
+  `LP140101008_AnnChiYanWong`/`DP200100179_YanWong` (auditory-neuroscience/cochlear-implant UNSW
+  context vs. systems-neuroscience Monash context, zero overlap).
+
+**Two further genuinely new `4u` cases resolved the same session, both via user-supplied ORCID
+evidence found by directly searching**, closing the pool to zero:
+
+- **Jun Li — 5-way merge, decisive ORCID confirmation.** `LP0669061`/`LP0990845`/`LP110200326`/
+  `LP110200376`/`LP130100568` (all University of South Australia, 2006–2013, all `NO_ORCID`) form
+  a connected co-investigator chain — Roger Smart + Russell Schumann link `0669061`↔`0990845`↔
+  `130100568`; Andrea Gerson links `110200326`↔`110200376`↔`130100568` — spanning a coherent
+  materials/environmental-chemistry FOR profile. User found ORCID `0000-0001-7652-9988` via a real
+  2020 co-authored paper ("Role of microbial diversity for sustainable pyrite oxidation control in
+  acid and metalliferous drainage prevention," *Journal of Hazardous Materials*) whose contributors
+  are exactly Short/Schumann/Smart/Gerson/Li, University of South Australia — directly confirming
+  the internally-inferred chain. The OpenAlex record for this ORCID separately shows UniSA
+  affiliation spanning 2006 and 2015–2022 (matching the grant span exactly); a few Chinese-
+  institution affiliation entries (Tianjin Normal, Hefei, Huaibei) are almost certainly OpenAlex's
+  own name-collision noise for a common name, the same pattern this project has flagged
+  repeatedly, not evidence of a different person. **Two other gap candidates in the same original
+  pool, `DE140101741_JunLi`** (Curtin, 2014 DECRA, ORCID `0000-0002-0148-0419`) **and
+  `DP210101100_JunLi`** (UTS, 2021, ORCID `0000-0003-2457-1994`)**, were confirmed as a different,
+  younger Jun Li** — user-supplied ORCID record for `0000-0003-2457-1994` shows a PhD at UWA
+  2009–2014 then ARC Research Associate at the University of Adelaide 2014–2016 (a different
+  institution from UniSA — Adelaide and UniSA only merged into one institution in 2026, decades
+  after these grants), too young to have been a named CI back in 2006. Recorded as 5 separate
+  `manual_confirmed_distinct.csv` rows against the UniSA cluster.
+- **David Evans — 3-way merge, decisive institution + field match, privacy-limited ORCID.**
+  `LP0560329`/`LP0668904`/`LP0774886` (all University of Tasmania, 2005–2007) share **the same
+  PI, "Douglas Stewart"/"Doug Stewart," across all three grants**, consecutive years, coherent
+  Crop and pasture production / Microbiology FOR profile. User found ORCID `0000-0001-8765-9227`
+  ("D. Evan Evans" / David Evan Evans — the ORCID record itself is privacy-restricted, no visible
+  affiliation/works via the API), but a direct OpenAlex works search surfaced his actual
+  publication list: malt/barley diastatic-power enzymes, wort production, beer foam quality
+  (*Journal of the American Society of Brewing Chemists* / *Journal of the Institute of Brewing*,
+  1999–2005) — brewing/malting cereal chemistry, a genuine fit for "Crop and pasture production"
+  (malting barley is a crop-science-adjacent food-science specialty) — and observed institutions
+  directly listed University of Tasmania, confirming the merge decisively.
+- **Mark Baker — the open lead from the prior session's entry above, now confirmed.** User
+  directly confirmed `LP0776387_MarkBaker` (UNSW, 2007) is the same person as `DP0557854_MarkBaker`
+  (Macquarie, ORCID `0000-0001-5858-4035`, proteomics, national-facility director) via the
+  UNSW-connection reasoning already flagged as an open, unconfirmed suspicion in the prior
+  session's entry — now settled as a real merge rather than left open.
+- **Li Li — confirmed distinct**, user: "almost certainly different — one a male one a female."
+  `LP100200808_LiLi` (Murdoch, 2010, plant pathology/biosecurity) vs `DP250103378_LiLi` (UQ, 2025,
+  ORCID `0000-0001-6545-858X`, plant-biotech) — zero co-investigator overlap, different
+  institution, 15-year gap; the user's direct knowledge of the two individuals' gender settled a
+  case this pipeline's own data had no way to distinguish.
+- **`LP0347295_PeterJamesSmith`/`DP0453258_JamesSmith`** — a previously-unreviewed gap candidate
+  distinct from the already-closed `DE120101580_PeterSmith` case in the same session's earlier
+  entry — user-confirmed different people, no further detail supplied.
+
+**Full `01`→`03`→`04` rerun** (materializing every `manual_merges.csv`/
+`manual_confirmed_distinct.csv`/`manual_orcids.csv` change from both this session and the prior
+one): 22,893 AwardsCIF, `reliability_tier=='4u'` **43 → 0**. `resolution_status`: 22,891 RESOLVED /
+2 UNRESOLVED (post-`01`, pre-manual-override reapplication in `04`). `04_resolve_links.py`:
+22,573/22,893 resolved (98.6%) — 9,052 via `orcid` (up sharply from the 8,048 in the
+2026-08-20 baseline, reflecting both this session's new ORCID additions and the accumulated
+`manual_merges.csv`/`manual_confirmed_distinct.csv` growth across the whole `4u` review arc), 469
+`inst_gate`, 1,619 `inst_overlap`, 1,020 `field`, 41 `probability`, 339 `works_count`, 22
+`name_filter`, 408 `manual`. 176 ambiguous deferred, 31 manual unlinked, 113 unlinked (no
+candidate).
+
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
 
@@ -1304,9 +1544,19 @@ Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
   surface that manual search alone didn't) — folded in here 2026-08-25 rather than tracked as
   its own separate line item, since building it in isolation would duplicate logic the general
   operator needs anyway.
-- **Three confirmed candidate wrong-merges found via a full-population same-grant/same-ORCID
-  screen, needing human review via `manual_splits.csv`** (2026-08-20). Method that actually
-  worked, after two false starts: naive raw-string comparison of `first_name + family_name`
+- ~~Three confirmed candidate wrong-merges found via a full-population same-grant/same-ORCID
+  screen, needing human review via `manual_splits.csv`~~ — **closed, this bullet was stale.**
+  All three were actually fixed the very next day (2026-08-21) via `manual_orcid_corrections.csv`
+  entries nulling the shared/wrong ORCID pre-clustering, not via `manual_splits.csv` as this
+  bullet said — the bullet itself was just never updated afterward. Verified 2026-08-26 directly
+  against current `awards_cif_arc_only.parquet`: `DP1095466_WenhuiDuan` (10 grants, single
+  ORCID) and `DP170104546_ChienMingWang` (3 grants, ORCID correctly nulled) are separate,
+  resolved clusters; `DP240100968_AlexandraLasczik` (1 grant) and `DP240100968_TraceyBunda`
+  (2 grants, her own later-enriched ORCID) are separate, resolved clusters; Georgia Curran and
+  Enid Gallagher were never actually merged at all — Gallagher's `PI` role code is already out
+  of `KEEP_ROLES` scope, so her row never enters clustering (the `manual_orcid_corrections.csv`
+  entry for her is inert by design, kept for documentation only). (2026-08-20). Method that
+  actually worked, after two false starts: naive raw-string comparison of `first_name + family_name`
   across same-grant/same-ORCID investigator rows found 980 "different name" groups population-
   wide, almost all noise (`"R Corkish"` vs `"Richard Corkish"`, `"Anthony Thomas"` vs `"Anthony
   Thomas AC"` — postnominal/abbreviation formatting, not identity). Re-running with actual
@@ -1586,8 +1836,20 @@ The name-filter step in `04_resolve_links.py` rescues arc_ids with only sub-HC c
 - **Seeded m_probabilities** for orcid comparison (can't train from ORCID-blocked EM)
 
 ## Known Issues in 02 Output
-- **Raymond Gilbert / Robert Gilbert** (n=34, no ORCID): different first names + 3 different
-  fields — suspected mis-merge of 2–3 people
+- ~~Raymond Gilbert / Robert Gilbert (n=34, no ORCID): different first names + 3 different
+  fields — suspected mis-merge of 2–3 people~~ — **closed 2026-08-26, this bullet was stale.**
+  Already split into two clean `RESOLVED` clusters with no manual CSV entry at all — the
+  original 34-record pile is now `DP0210039_RaymondGilbert` (15 grants, all Civil Engineering,
+  mostly UNSW, tier 1b) and `DP0210446_RobertGilbert` (19 grants, Materials/Macromolecular
+  Chemistry → Food Sciences, University of Sydney 2002–2006 → University of Queensland
+  2005–2025, tier 3) — the automatic pipeline clustering (name/FOR/institution signals)
+  separated them correctly on its own at some point, this note was simply never updated.
+  User-supplied external evidence independently confirms both sides: Raymond's real ORCID
+  (`0000-0001-8540-6517`) is byte-identical to what the pipeline already had attached; Robert
+  G. Gilbert's real biography (Sydney 1970–2006, Key Centre for Polymer Colloids, moved to UQ
+  in 2006 for starch/glycogen human-health research) matches his cluster's institution timeline
+  and field trajectory exactly. Robert's own real ORCID (`0000-0001-6988-114X`, not previously
+  in any of our data) added to `manual_orcids.csv`.
 - **Paul Young** (n=28, no ORCID): added to `data_persisted/manual_splits.csv` (confirmed_different_people=True);
   splits by institution into UQ virologist / USyd pharmacologist / Monash engineer / UNSW (crop) groups.
   Re-run 01_prepare_arc.py to materialise sub-clusters, then add per-sub-cluster manual resolutions.
