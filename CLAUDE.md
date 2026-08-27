@@ -1518,6 +1518,102 @@ ORCID). Added to `manual_confirmed_not_suspicious.csv`; full `01`→`03`→`04` 
 resolved total as the pre-fix run, confirming the fix was a pure flag correction with no
 linkage-level side effects.
 
+## Piling wired into `06_build_oeuvre.py`, then rebuilt as a resumable shell-orchestrated job queue after three crashes at full population scale (2026-08-26/27)
+
+Triggered by discovering piling (`src/utils/work_piling.py`'s `persist_piling_results()`) was
+never actually a live pipeline stage — `run_pipeline.sh` only covers `00→01→03→04`, and
+`06_build_oeuvre.py`'s own `main()` never called it either, despite `Dossier()` already reading
+its output. Its persisted output was 6 days stale relative to the current `awards_cif.parquet`
+by the time this was noticed.
+
+**First attempt**: wired `compute_and_persist_idf_tables()` + `persist_piling_results()` into
+`06_build_oeuvre.py` as a real Step 5, installed the missing `scikit-learn`/`scipy` dependencies
+(present in `requirements.txt` since 2026-08-17 but never actually installed in this `.venv`),
+and ran it full-population. **Crashed three times in a row**, always in the same neighborhood of
+the sorted `cluster_id` order (batch ~24-25 of 46) — the third crash took the whole VSCode/Claude
+Code IDE down with it. Confirmed `DUCKDB_TMP_DIR` config/disk space were not the cause (both
+healthy) before looking further.
+
+**Root cause, found by checking actual Stage-3 survivor-work counts per cluster**: a handful of
+common-name mega-pools — `LP0777033_WeiZhang` (67,475 works!), `DE130100488_YanYan` (80,579),
+`DP0342641_JunWang` (69,354), `DP120102205_XiaodongLi` (25,635) among others — happened to land
+in the same 500-cluster batch. `compute_distance_matrix()`'s dense O(n²) cosine-distance matrix
+for even the smallest of these (25,635² ≈ 657M floats) is several GB at float64; several such
+matrices being built across one batch's sequential loop pushed the machine into heavy swapping
+(confirmed live: swap climbed past 60% right as the run approached this batch, both on this
+attempt and, in hindsight, on both prior sessions' unrelated crashes at the identical batch
+number too). Checked and ruled out as the same-shape cause: extreme hyperauthorship
+(LHC/genomics-consortium-scale papers with 1000s of authors) — real cases exist in the Stage-3
+survivor population (max 2,941 authors on one work, 14 works over 1000) but something upstream
+of this project already caps the truly catastrophic 5000+-author cases, and the specific crashing
+cluster (XiaodongLi) has nothing above 385 authors on any single work — the driver here is sheer
+survivor *work count* per candidate pool, not per-work author count.
+
+**A second, real design mistake caught by direct user correction before being built**: an initial
+plan to fix this via a Python-internal `ProcessPoolExecutor` was rejected — "duckdb works better
+in separate processes for this kind of job" / "for other cases like this we use a shell script
+with a list of input files and a command that queues jobs" (the user's own convention from a
+sibling OpenAlex-ETL project, `run_works_desktop.sh` — a todo-list file + `xargs -P` +
+`.env`-configured job count). Rebuilt from scratch on that pattern instead.
+
+**Final design**: `persist_piling_results()` removed outright, replaced with three pieces, none
+sharing a DuckDB connection across process boundaries:
+- `write_piling_batches()` — cheap, idempotent: computes the full non-excluded ACIF list
+  (`ORDER BY cluster_id` for determinism) and writes one `batch_NNNNN.txt` file per 500-cluster
+  batch (one `cluster_id` per line) to `PILING_BATCHES_DIR`.
+- `run_one_piling_batch(batch_file, out_path)` — the actual worker, meant to run as ONE fresh OS
+  process per batch: opens its own DuckDB connection (`SET threads TO 2`, deliberately low —
+  many of these run concurrently), fetches only its batch's data, runs the existing piling +
+  channeling logic unchanged, writes atomically (`.tmp` path + `os.replace`) so a killed worker
+  never leaves a file that looks done but isn't.
+- `run_piling.sh` (new, repo root) — matches the reference script's shape exactly: globs
+  `batch_*.txt` into a todo-list file, reads `PILING_PARALLEL_JOBS` from `.env` (default 12,
+  sized for this machine's 24 cores/64GB), exports `OMP_NUM_THREADS=1`/`OPENBLAS_NUM_THREADS=1`/
+  `MKL_NUM_THREADS=1` (a fresh OS process reads these at interpreter startup — setting them from
+  inside Python would be too late for some BLAS backends) before `xargs -P "$JOBS"`. **Resumable
+  for free**: each batch's output file is checked before dispatch and skipped if it already
+  exists — a killed/interrupted run costs nothing to resume, unlike the old design where a kill
+  meant restarting from batch 1 (the old single-growing-file write pattern — `UNION ALL BY NAME`
+  over the whole file so far, since DuckDB can't append rows to an existing parquet file in
+  place — was itself O(n²) total I/O across batches, getting slower as the run progressed, on
+  top of being unresumable).
+- Output is now `PILING_RESULTS_DIR` (a directory of per-batch files), read via
+  `PILING_RESULTS_GLOB` — `dossier_build.py`'s two read sites updated to match. `06_build_oeuvre.py`
+  no longer calls piling directly; its own Step 5 now only builds the prerequisite IDF tables,
+  with a comment pointing at `run_piling.sh` for the actual piling step.
+
+**Two further real fixes alongside the redesign, both requested directly**:
+- `compute_distance_matrix()` now returns float32, not sklearn's float64 default — halves memory
+  for every pool's dense distance matrix, no behavior change (nothing downstream needs float64
+  precision against an eps threshold like 0.90).
+- `MAX_POOL_SIZE = 8,000` — a hard safety cap skipping distance-matrix computation entirely for
+  any cluster above this many Stage-3 survivor works (223/22,769 clusters, ~1%, all overwhelmingly
+  the same already-known "mega-pool false bridging" common-name contamination this project has
+  flagged elsewhere, not genuine single-person careers this cap wrongly hides). Marked `pile_id=-1`
+  with all match fields `None` — "not evaluated," the same three-valued convention already used
+  for <2-work ACIFs, not "evaluated and found nothing." At n=8,000 the matrix is 256MB at float32,
+  safe even under 12-way concurrency; without the cap, `WeiZhang`'s 67,475 works alone would be an
+  ~18GB matrix regardless of float precision or batching cleverness.
+
+**A candidate-pool-pruning idea explored but not built this session**: checked whether "has this
+candidate `author_idx` ever had an Australian HEP affiliation" could sharply shrink these
+mega-pools *before* piling ever sees them (user's own suggestion — "they can't all have HEP
+links"). Mixed, real result: `WeiZhang`/`YanYan` are 63-66% prunable this way (most candidates
+never worked in Australia at all), but the actual crash-causing `XiaodongLi` pool is 90% already
+AU-affiliated at some point — this heuristic wouldn't have shrunk the specific cluster that broke
+the run. Logged as a genuine, separate follow-up (`docs/pipeline_todo.md`), not folded into
+today's fix. Also noted, per the user's own recollection, a *third*, different failure mode this
+doesn't address at all: a real uncommon-name person whose correct OpenAlex identity was simply
+never captured as a candidate in the first place (a missed-match, not a collision) — proposed
+downstream diagnostic (not built): scan piling results for known high-profile people with
+implausibly low total work-count, and chase their real `author_idx` from there.
+
+**Verified**: full population run via `run_piling.sh`, 12 parallel jobs, all 46 batches completed
+cleanly on the first try — 10,414,996 rows across 22,665 clusters, 5,727,626 confirmed (55%),
+223 clusters correctly capped. Memory stayed healthy throughout (peaked well within budget,
+back to ~5GB used when done — no swap growth, unlike all three pre-fix attempts). 462/462 tests
+passing (`tests/` + `analysis/tests/`).
+
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
 

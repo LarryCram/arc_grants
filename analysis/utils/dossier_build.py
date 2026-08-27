@@ -25,7 +25,7 @@ from config.scope import KEEP_SCHEMES
 from analysis.utils.dossier import AwardContext, Dossier, PileDiagnostic, Work, YearRecord
 from analysis.utils.dedup import create_deduped_works, count_exclusions
 from src.utils.oeuvre_build import AUTH_GLOB, STAGE3_SURVIVORS
-from src.utils.work_piling import PILING_RESULTS, _safe_list
+from src.utils.work_piling import PILING_RESULTS_GLOB, _safe_list
 from src.utils.cluster_checks import for2020_all_fields, for2020_all_subfields
 from importlib import import_module
 
@@ -146,7 +146,7 @@ def _fetch_piling_diagnostics(cluster_id: str, con: duckdb.DuckDBPyConnection) -
                any_value(orcid_match) AS orcid_match, any_value(hep_match) AS hep_match,
                any_value(field_match) AS field_match, any_value(subfield_match) AS subfield_match,
                any_value(confirmed) AS confirmed
-        FROM read_parquet('{PILING_RESULTS}')
+        FROM read_parquet('{PILING_RESULTS_GLOB}')
         WHERE cluster_id = ? AND pile_id != -1
         GROUP BY pile_id
         ORDER BY n_works DESC
@@ -155,7 +155,7 @@ def _fetch_piling_diagnostics(cluster_id: str, con: duckdb.DuckDBPyConnection) -
         return []
 
     work_pile = con.execute(f"""
-        SELECT pile_id, work_idx FROM read_parquet('{PILING_RESULTS}')
+        SELECT pile_id, work_idx FROM read_parquet('{PILING_RESULTS_GLOB}')
         WHERE cluster_id = ? AND pile_id != -1
     """, [cluster_id]).fetchdf()
 

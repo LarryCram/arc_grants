@@ -35,6 +35,20 @@ Steps:
   2. fetch_and_filter_stage1() -- PROCESSED_DATA/oeuvre_stage1_{survivors,exclusions}.parquet
   3. apply_field_filter_stage3() -- PROCESSED_DATA/oeuvre_stage3_{survivors,exclusions}.parquet
   4. compute_subfield_hep_signals() -- PROCESSED_DATA/oeuvre_subfield_hep_signals.parquet
+  5. compute_and_persist_idf_tables() -- PROCESSED_DATA/work_tf_*.parquet (fast, in-process;
+     the prerequisite piling's feature vectors are weighted by).
+
+Piling itself (assigning each Stage-3 survivor work to a pile, then channeling piles to ACIFs)
+is NOT run by this script -- see run_piling.sh at the repo root. 2026-08-26/27: first wired in
+as a step inside this script's own process (persist_piling_results(), one shared DuckDB
+connection looping over every batch sequentially), then pulled back out the very next day after
+three consecutive crashes at full population scale (10.4M Stage-3 survivor rows, up from the
+2.55M this was originally built against) -- a handful of common-name mega-pools (WeiZhang,
+YanYan, JunWang, all 60,000-80,000+ works) made a single long-lived process both memory-risky
+(one crash took the whole IDE down with it) and non-resumable (every kill meant restarting from
+batch 1, since piling output was one growing file rewritten in full on every batch). Rebuilt as
+a genuinely separate, resumable, parallel job queue instead -- see work_piling.py's own
+"Persisted pipeline stage" section for the full account, and CLAUDE.md.
 
 Usage:
   .venv/bin/python src/06_build_oeuvre.py
@@ -63,6 +77,7 @@ from src.utils.oeuvre_build import (
     STAGE3_EXCLUSIONS,
     STAGE_SUBFIELD_HEP_SIGNALS,
 )
+from src.utils.work_piling import compute_and_persist_idf_tables
 
 
 def _elapsed(t0: float) -> str:
@@ -109,6 +124,11 @@ def main():
         clusters, con=con, path=STAGE_SUBFIELD_HEP_SIGNALS, stage3_path=STAGE3_SURVIVORS,
     )
     print(f"  [{_elapsed(t0)}]")
+
+    print("=== Step 5 -- compute_and_persist_idf_tables ===")
+    compute_and_persist_idf_tables(con=con, survivors_path=STAGE3_SURVIVORS)
+    print(f"  [{_elapsed(t0)}]")
+    print("  Piling itself is a separate step -- see run_piling.sh")
 
     con.close()
     print(f"=== Done, total [{_elapsed(t0)}] ===")

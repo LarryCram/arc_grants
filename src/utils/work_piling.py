@@ -28,6 +28,7 @@ Phase 1 pruning; recombining the two is deferred until after Phase 2 is validate
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 
 import duckdb
@@ -52,6 +53,18 @@ YEAR_BUCKET_WIDTH = 5  # e.g. 2020 -> "2020-2024" -- coarse enough that two work
                        # cohesion), fine enough that a genuinely disjoint-era work (e.g. the
                        # Adam Hulme case -- 1960s works mixed into a 2015+ career) shares no
                        # bucket with the rest and gets pushed toward noise/a separate pile.
+
+MAX_POOL_SIZE = 8000  # 2026-08-27: a hard safety cap on compute_distance_matrix()'s dense O(n^2)
+                       # output -- a handful of common-name mega-pools (WeiZhang, YanYan, JunWang
+                       # all 60,000-80,000+ Stage-3 survivor works) crashed three consecutive full
+                       # population runs, one of them taking the whole IDE down with it. At
+                       # n=8,000 the matrix is 256MB at float32 -- safe even under many concurrent
+                       # batch workers; 223/22,769 clusters (~1%) exceed this and are skipped
+                       # (pile_id=-1, all match fields None -- "not evaluated", same convention as
+                       # the existing <2-work case, not "evaluated and found nothing"). These are
+                       # overwhelmingly the known, already-flagged "mega-pool false bridging"
+                       # candidates (see CLAUDE.md) -- real over-merge contamination upstream, not
+                       # genuine single-person careers this cap is wrongly hiding.
 
 
 def _year_bucket(year) -> str | None:
@@ -372,9 +385,14 @@ def compute_distance_matrix(matrix: csr_matrix) -> np.ndarray:
     cosine_distances), while weighted/Ruzicka Jaccard has no efficient vectorized form and would
     need a per-pair Python callback -- infeasible at the largest cross-section pool's scale
     (WeiWang, 12,800 works, ~82M pairs), confirmed impractical by measurement, not assumption.
+
+    float32, not sklearn's float64 default (2026-08-27) -- halves memory for the dense O(n^2)
+    output, the dominant memory cost for a large pool (n=8,000 -> 256MB at float32 vs 512MB at
+    float64); no behavior change, since nothing downstream needs float64 precision against an
+    eps threshold like 0.90.
     """
     from sklearn.metrics.pairwise import cosine_distances
-    return cosine_distances(matrix)
+    return cosine_distances(matrix.astype(np.float32)).astype(np.float32)
 
 
 def cluster_piles_dbscan(distance_matrix: np.ndarray, eps: float = 0.5, min_samples: int = 2) -> np.ndarray:
@@ -533,54 +551,57 @@ def channel_piles(
 # --- Persisted pipeline stage: piling + channeling is a batch stage, not a report-time lookup ---
 # (2026-08-18) -- Dossier() and any other reporting tool read this checkpoint the same way they
 # read arc_persons.parquet/oeuvres.parquet, they never trigger piling computation themselves.
+#
+# 2026-08-27: rewritten from a single in-process function (persist_piling_results(), one shared
+# DuckDB connection looping over every batch sequentially) to a shell-orchestrated job queue --
+# one OS process per batch, each opening its own DuckDB connection, at the user's direct
+# correction ("duckdb works better in separate processes for this kind of job" / "for other cases
+# like this we use a shell script with a list of input files and a command that queues jobs").
+# Triggered by two real problems with the old design at the population's current scale (Stage 3
+# survivors grew to 10.4M rows, up from the 2.55M this was originally built against): (1) every
+# batch write re-read and rewrote the ENTIRE growing output file (`UNION ALL BY NAME` over the
+# whole thing so far, since a single DuckDB COPY TO parquet can't append rows to an existing
+# file) -- O(n^2) total I/O across all batches, so later batches got progressively slower; (2) a
+# single long-lived Python process had no way to resume a killed run except from batch 1, even
+# though every ACIF's piling result is fully independent of every other's.
+#
+# New shape: PILING_RESULTS_DIR holds one small parquet file per batch (written atomically, via
+# a .tmp path + os.replace, so a killed worker never leaves a file that looks done but isn't) --
+# downstream readers use PILING_RESULTS_GLOB. write_piling_batches() persists the batch
+# membership (one .txt file per batch, one cluster_id per line) to PILING_BATCHES_DIR once;
+# run_one_piling_batch() is the actual worker, invoked via `work_piling.py --batch ... --out ...`
+# once per batch by an external job queue (see run_piling.sh) -- resumable for free, since a
+# batch whose output file already exists is simply never (re)dispatched.
 
-PILING_RESULTS = PROCESSED_DATA / "oeuvre_piling_results.parquet"
+PILING_RESULTS_DIR = PROCESSED_DATA / "oeuvre_piling_results"
+PILING_RESULTS_GLOB = str(PILING_RESULTS_DIR / "*.parquet")
+PILING_BATCHES_DIR = PROCESSED_DATA / "piling_batches"
 
 
-def persist_piling_results(
+def write_piling_batches(
     con: duckdb.DuckDBPyConnection | None = None,
-    out_path: Path = PILING_RESULTS,
-    eps: float = 0.90,
+    out_dir: Path = PILING_BATCHES_DIR,
     batch_size: int = 500,
     only_fellowships: bool = False,
     max_candidates: int | None = None,
-) -> None:
-    """Run piling (feature vectors -> cosine distance -> DBSCAN) + channeling
-    (ORCID-first -> HEP-overlap -> FOR-grounded field) across every non-excluded ACIF
-    with 2+ Stage-3 survivor works, and persist one row per (cluster_id, work_idx): pile_id
-    (-1 = noise, never clustered), orcid_match, hep_match, field_match, subfield_match,
-    confirmed (confirmed is orcid_match OR hep_match OR field_match -- subfield_match is
-    persisted alongside for a possible future waterfall but doesn't gate confirmed itself,
-    see channel_piles()'s docstring). ACIFs with
-    fewer than 2 works get a single row with pile_id=-1 and confirmed=NULL (not evaluated, not
-    "evaluated and failed" -- same three-valued discipline as coinvestigator_match elsewhere in
-    this project).
+) -> int:
+    """Compute the full, deterministically-ordered list of non-excluded ACIF cluster_ids and
+    write it out as one .txt file per batch (batch_00000.txt, batch_00001.txt, ... -- one
+    cluster_id per line) under out_dir. Cheap and idempotent -- safe to re-run any time; it only
+    decides *membership*, not whether a batch's piling output already exists (that's
+    run_piling.sh's job, checked per batch right before dispatch). ORDER BY cluster_id makes
+    batch membership stable across re-runs of this function, which matters because
+    run_piling.sh's resume check is keyed on batch *index*, not on which specific cluster_ids a
+    batch happens to contain.
 
-    only_fellowships: when True, restricts to ACIFs holding >=1 grant with
-    investigators_raw.is_fellowship = TRUE (2026-08-18, user-directed scope -- this is the
-    project's own fellowship flag, broader than config/scope.py's ECR_ROLES, which is only the
-    DECRA/APD/APDI early-career subset). A prior run against the full population already exists
-    at PILING_RESULTS -- this flag is for a faster, fellowship-only re-run, not the only mode.
-
-    max_candidates: when set, restricts to ACIFs with len(oax_candidates) <= this value
-    (2026-08-19) -- combines with only_fellowships (both AND'd) for a fast, bounded validation
-    run (e.g. fellowships with a small candidate pool) before committing to a full-population
-    rerun, same rationale as scoping to a cross-section before trusting a change population-wide.
-
-    Processed in batches (default 500 ACIFs) rather than one single fetch_cross_section_raw()
-    call over the whole population -- the largest mega-pools (WeiWang-scale, tens of thousands
-    of works) make a single unbounded feature/distance-matrix pass memory-risky at full
-    population scale (2.55M total Stage-3 survivor rows); batching bounds peak memory to one
-    batch's worth regardless of population size, same rationale as oeuvre_build.py's original
-    OOM fix.
+    only_fellowships / max_candidates: same scoping knobs the old persist_piling_results() took,
+    for a faster bounded run instead of the full population.
     """
     own_con = con is None
     con = con or duckdb.connect()
     try:
         if own_con:
             con.execute("SET enable_progress_bar = false")
-            con.execute("SET memory_limit = '24GB'")
-            con.execute(f"SET temp_directory = '{DUCKDB_TMP_DIR}'")
 
         fellowship_join = ""
         if only_fellowships:
@@ -599,85 +620,130 @@ def persist_piling_results(
             WHERE excluded = FALSE
             {fellowship_join}
             {candidates_filter}
+            ORDER BY cluster_id
         """).fetchdf()["cluster_id"].tolist()
-        scope_bits = []
-        if only_fellowships:
-            scope_bits.append("fellowship")
-        if max_candidates is not None:
-            scope_bits.append(f"<={max_candidates} candidates")
-        scope_label = " & ".join(scope_bits) or "non-excluded"
-        print(f"  persist_piling_results: {len(all_ids)} {scope_label} ACIFs", flush=True)
 
-        idf = load_idf_weights(con)
-        hep_crosswalk = _load_institution_hep_crosswalk()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for old in out_dir.glob("batch_*.txt"):
+            old.unlink()
 
-        first_batch = True
+        n_batches = 0
         for start in range(0, len(all_ids), batch_size):
             batch_ids = all_ids[start:start + batch_size]
-            raw = fetch_cross_section_raw(batch_ids, con)
-            candidate_orcid = fetch_candidate_orcids(batch_ids, con)
-            acif_meta = fetch_acif_meta(batch_ids, con)
-            surv_by_cluster = raw["survivors"].groupby("cluster_id").size()
+            batch_path = out_dir / f"batch_{n_batches:05d}.txt"
+            batch_path.write_text("\n".join(batch_ids) + "\n")
+            n_batches += 1
 
-            rows = []
-            for cid in batch_ids:
-                n = surv_by_cluster.get(cid, 0)
-                if n < 2:
-                    surv = raw["survivors"]
-                    for w in surv[surv["cluster_id"] == cid]["work_idx"]:
-                        rows.append({"cluster_id": cid, "work_idx": int(w), "pile_id": -1,
-                                     "orcid_match": None, "hep_match": None, "field_match": None,
-                                     "subfield_match": None, "confirmed": None})
-                    continue
-
-                work_idxs, matrix, columns = build_feature_matrix(cid, raw, idf)
-                dist = compute_distance_matrix(matrix)
-                labels = cluster_piles_dbscan(dist, eps=eps, min_samples=2)
-
-                meta = acif_meta.loc[cid]
-                arc_orcids = set(_safe_list(meta["orcids"]))
-                acif_hep = set(_safe_list(meta["hep_codes"]))
-                codes = [dict(c) for c in _safe_list(meta["for2020_codes"])]
-                acif_fields = for2020_all_fields(codes)
-                acif_subfields = for2020_all_subfields(codes)
-
-                ch = channel_piles(cid, work_idxs, labels, raw, arc_orcids, acif_hep,
-                                    acif_fields, acif_subfields, candidate_orcid, hep_crosswalk)
-                pile_of_work = dict(zip(work_idxs, labels))
-                for w, pile in pile_of_work.items():
-                    if pile == -1:
-                        rows.append({"cluster_id": cid, "work_idx": int(w), "pile_id": -1,
-                                     "orcid_match": False, "hep_match": False, "field_match": False,
-                                     "subfield_match": False, "confirmed": False})
-                    else:
-                        r = ch[pile]
-                        rows.append({"cluster_id": cid, "work_idx": int(w), "pile_id": int(pile),
-                                     "orcid_match": r["orcid_match"], "hep_match": r["hep_match"],
-                                     "field_match": r["field_match"], "subfield_match": r["subfield_match"],
-                                     "confirmed": r["confirmed"]})
-
-            batch_df = pd.DataFrame(rows)
-            con.register("_batch_df", batch_df)
-            if first_batch:
-                con.execute(f"COPY _batch_df TO '{out_path}' (FORMAT PARQUET)")
-                first_batch = False
-            else:
-                con.execute(f"""
-                    COPY (
-                        SELECT * FROM read_parquet('{out_path}')
-                        UNION ALL BY NAME
-                        SELECT * FROM _batch_df
-                    ) TO '{out_path}' (FORMAT PARQUET)
-                """)
-            con.unregister("_batch_df")
-            print(f"    {min(start + batch_size, len(all_ids))}/{len(all_ids)} ACIFs processed", flush=True)
-
-        n_rows = con.execute(f"SELECT COUNT(*) FROM read_parquet('{out_path}')").fetchone()[0]
-        print(f"  persist_piling_results: {n_rows:,} rows -> {out_path}", flush=True)
+        print(f"  write_piling_batches: {len(all_ids):,} ACIFs -> {n_batches} batch files in {out_dir}")
+        return n_batches
     finally:
         if own_con:
             con.close()
 
 
+def run_one_piling_batch(batch_file: Path, out_path: Path, eps: float = 0.90) -> int:
+    """Worker entry point for ONE batch -- opens its own DuckDB connection (never shares one
+    across processes), fetches only this batch's cluster_ids, runs piling + channeling, and
+    writes the result atomically to out_path. Intended to be invoked as a fresh OS process per
+    batch (see run_piling.sh), not called repeatedly from one long-lived process.
+    """
+    batch_ids = [line.strip() for line in batch_file.read_text().splitlines() if line.strip()]
+
+    con = duckdb.connect()
+    try:
+        con.execute("SET enable_progress_bar = false")
+        con.execute(f"SET temp_directory = '{DUCKDB_TMP_DIR}'")
+        # Capped low deliberately -- run_piling.sh runs many of these as separate OS processes
+        # concurrently (one per batch); each one defaulting to DuckDB's own auto-detected
+        # (all-cores) thread count would oversubscribe the machine badly. BLAS/OpenMP threading
+        # for the sklearn calls below is capped the same way, via env vars set in run_piling.sh
+        # itself (a fresh OS process reads OMP_NUM_THREADS/OPENBLAS_NUM_THREADS at interpreter
+        # startup -- setting them from inside Python here would be too late for some backends).
+        con.execute("SET threads TO 2")
+
+        idf = load_idf_weights(con)
+        hep_crosswalk = _load_institution_hep_crosswalk()
+        raw = fetch_cross_section_raw(batch_ids, con)
+        candidate_orcid = fetch_candidate_orcids(batch_ids, con)
+        acif_meta = fetch_acif_meta(batch_ids, con)
+        surv_by_cluster = raw["survivors"].groupby("cluster_id").size()
+
+        rows = []
+        for cid in batch_ids:
+            n = surv_by_cluster.get(cid, 0)
+            if n < 2 or n > MAX_POOL_SIZE:
+                if n > MAX_POOL_SIZE:
+                    print(f"    {cid}: {n:,} works > MAX_POOL_SIZE, skipping (not evaluated)", flush=True)
+                surv = raw["survivors"]
+                for w in surv[surv["cluster_id"] == cid]["work_idx"]:
+                    rows.append({"cluster_id": cid, "work_idx": int(w), "pile_id": -1,
+                                 "orcid_match": None, "hep_match": None, "field_match": None,
+                                 "subfield_match": None, "confirmed": None})
+                continue
+
+            work_idxs, matrix, columns = build_feature_matrix(cid, raw, idf)
+            dist = compute_distance_matrix(matrix)
+            labels = cluster_piles_dbscan(dist, eps=eps, min_samples=2)
+
+            meta = acif_meta.loc[cid]
+            arc_orcids = set(_safe_list(meta["orcids"]))
+            acif_hep = set(_safe_list(meta["hep_codes"]))
+            codes = [dict(c) for c in _safe_list(meta["for2020_codes"])]
+            acif_fields = for2020_all_fields(codes)
+            acif_subfields = for2020_all_subfields(codes)
+
+            ch = channel_piles(cid, work_idxs, labels, raw, arc_orcids, acif_hep,
+                                acif_fields, acif_subfields, candidate_orcid, hep_crosswalk)
+            pile_of_work = dict(zip(work_idxs, labels))
+            for w, pile in pile_of_work.items():
+                if pile == -1:
+                    rows.append({"cluster_id": cid, "work_idx": int(w), "pile_id": -1,
+                                 "orcid_match": False, "hep_match": False, "field_match": False,
+                                 "subfield_match": False, "confirmed": False})
+                else:
+                    r = ch[pile]
+                    rows.append({"cluster_id": cid, "work_idx": int(w), "pile_id": int(pile),
+                                 "orcid_match": r["orcid_match"], "hep_match": r["hep_match"],
+                                 "field_match": r["field_match"], "subfield_match": r["subfield_match"],
+                                 "confirmed": r["confirmed"]})
+
+        batch_df = pd.DataFrame(rows)
+        tmp_path = out_path.with_suffix(".parquet.tmp")
+        con.register("_batch_df", batch_df)
+        con.execute(f"COPY _batch_df TO '{tmp_path}' (FORMAT PARQUET)")
+        con.unregister("_batch_df")
+        os.replace(tmp_path, out_path)  # atomic rename -- a killed worker never leaves a file
+                                         # at out_path that looks done but isn't
+        print(f"  {batch_file.name}: {len(batch_ids)} ACIFs, {len(rows):,} rows -> {out_path.name}", flush=True)
+        return len(rows)
+    finally:
+        con.close()
+
+
 if __name__ == "__main__":
-    compute_and_persist_idf_tables()
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--write-batches", action="store_true",
+                     help="(Re)write PILING_BATCHES_DIR's batch_*.txt files, then exit.")
+    ap.add_argument("--batch-size", type=int, default=500)
+    ap.add_argument("--only-fellowships", action="store_true")
+    ap.add_argument("--max-candidates", type=int, default=None)
+    ap.add_argument("--batch", type=Path, default=None,
+                     help="Run ONE batch (path to its batch_NNNNN.txt file) and exit -- the "
+                          "per-batch worker entry point run_piling.sh invokes.")
+    ap.add_argument("--out", type=Path, default=None, help="Output path for --batch.")
+    ap.add_argument("--eps", type=float, default=0.90)
+    args = ap.parse_args()
+
+    if args.batch is not None:
+        if args.out is None:
+            ap.error("--batch requires --out")
+        run_one_piling_batch(args.batch, args.out, eps=args.eps)
+    elif args.write_batches:
+        write_piling_batches(
+            batch_size=args.batch_size, only_fellowships=args.only_fellowships,
+            max_candidates=args.max_candidates,
+        )
+    else:
+        compute_and_persist_idf_tables()

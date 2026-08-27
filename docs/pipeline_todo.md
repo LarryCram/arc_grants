@@ -89,6 +89,7 @@ last.
 15. (optional/low-value) **Frequency-plurality fallback for `family_name_main`** — set-overlap fix already shipped, this is a residual refinement only
 16. **Extract `author_position`** — purely opportunistic, do only when the OpenAlex snapshot is next re-converted for an unrelated reason
 17. **Work through the `accuracy_checks.md` checklist** (largest, most multi-part, least urgent — a standing backlog, not a single task)
+18. **HEP-affiliation-history candidate-pool pruning for common-name mega-pools** — real, partial win, not built (see its own entry below)
 
 ---
 
@@ -311,6 +312,43 @@ after 1950, age under 60); an "oax_id problem vs work problem" decision rule; a
 year-continuity check; and an ECR/MCR/senior academic-age-at-award check keyed to a
 not-yet-fully-compiled fellowship-scheme-to-career-stage list, with real undefined
 exceptions (career breaks).
+
+### 18 — HEP-affiliation-history candidate-pool pruning for common-name mega-pools
+Found 2026-08-27 investigating why piling kept crashing on a handful of common-name
+mega-pool ACIFs (`LP0777033_WeiZhang` 67,475 Stage-3 survivor works, `DE130100488_YanYan`
+80,579, `DP0342641_JunWang` 69,354, `DP120102205_XiaodongLi` 25,635) — see CLAUDE.md's
+"Piling wired into `06_build_oeuvre.py`..." session for the full incident (a `MAX_POOL_SIZE`
+safety cap was built to stop these crashing piling, but that's a symptom fix, not a cause fix).
+
+Checked whether "has this candidate `author_idx` ever had an Australian HEP affiliation"
+could prune these pools *before* piling (or even before Stage 1/3) ever sees them — real,
+measured, but mixed: `WeiZhang` (2,365 candidates, only 867/37% ever AU-affiliated) and
+`YanYan` (1,278 candidates, 440/34% ever AU-affiliated) are 63-66% prunable this way — most
+of their candidates never worked in Australia at all, pure noise from a globally common
+name. But `XiaodongLi` (350 candidates, 314/90% ever AU-affiliated) barely shrinks under this
+heuristic — its candidates are overwhelmingly already Australian, so this is a genuinely
+different failure shape (many real, distinct, Australian-affiliated people who happen to
+share a common name), not foreign-noise contamination.
+
+Needs: (1) decide where in the pipeline this pruning belongs — most naturally
+`dedup_oax_candidates()`/`populate_oax_candidates()` in `awards_cif.py` (upstream of Stage
+1/3/piling entirely, so it shrinks the problem before any downstream stage pays the cost),
+(2) a real query for "ever had ANY Australian institutional affiliation" per candidate
+`author_idx` at bulk/population scale (the ad hoc per-cluster version used to investigate this
+took ~50-60s per cluster scanning the full 119M-row OpenAlex authors table — needs a
+proper one-time bulk join, not N ad hoc queries), (3) accept that this only helps the
+foreign-noise-contamination shape of mega-pool (confirmed real for WeiZhang/YanYan-style
+cases) and won't materially shrink the same-country-common-name shape (XiaodongLi-style) —
+the `MAX_POOL_SIZE` cap (or a proper merge-operator/candidate-pool-pruning fix, see item 6)
+still does the real work for those.
+
+**A third, different failure mode noted but not pursued** (user's own recollection): a real,
+uncommon-name person whose correct OpenAlex identity was never captured as an ARC↔OAX
+candidate at all (a missed match, not a collision) — this pruning idea does nothing for that
+case. Proposed downstream diagnostic, not built: scan piling results for known high-profile
+ARC-funded people with implausibly low total work-count, then chase down their real
+`author_idx` from there as a manual follow-up, the same evidence-first pattern as the `4u`
+review work.
 
 ---
 
