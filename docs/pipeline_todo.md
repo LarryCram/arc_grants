@@ -378,15 +378,33 @@ Schlesinger), on works with titles decisively unrelated to oil/gas (fire ecology
 threatened mammals, desert lizards). Checked and ruled out: not a person-identity mixup (the
 `author_idx` on both is each person's own confirmed OpenAlex identity, not a shared/wrong one).
 
-**Root cause, confirmed via the live OpenAlex API** (user-supplied): the raw
+**Root cause, confirmed via the live OpenAlex API and the original paper's own author-footnote
+block** (both user-supplied): the raw
 `authorships[].raw_affiliation_string` for Sarah Legge on one of these works is literally
-`"KCorresponding author. Email: sarahmarialegge@gmail.com"` — a mis-parsed "Corresponding
-author" footnote/email line, not a real affiliation, matched by OpenAlex's own
-affiliation-disambiguation pipeline to `institution_idx 4210108542` ("Schlumberger (Ireland)").
-The same work's `corresponding_institution_ids` also included **Services Australia**
-(Australia's social-security/government-services agency) alongside the two real institutions
-(ANU, Charles Darwin University) — user independently confirmed this second one is also a
-genuine error, not a real affiliation. Two garbage matches on one paper, not a Schlumberger-
+`"KCorresponding author. Email: sarahmarialegge@gmail.com"`. The paper's real footnote block
+explains exactly why:
+```
+Sarah Legge
+BResearch Institute of Environment and Livelihoods, Charles Darwin University, Casuarina, NT 0810, Australia.
+CFenner School of Environment and Society, The Australian National University, Canberra, ACT 2601, Australia.
+KCorresponding author. Email: sarahmarialegge@gmail.com
+```
+This is a standard lettered-footnote-marker convention (CSIRO-Publishing-style journal): each
+author's name carries superscript letters pointing to numbered/lettered footnotes — `B`/`C` are
+real institution footnotes (Charles Darwin University, ANU), but `K` is a *different kind* of
+footnote (the corresponding-author/email note) that happens to use the same lettering scheme.
+OpenAlex's extraction pipeline evidently doesn't distinguish "this lettered footnote is an
+institution" from "this lettered footnote is a corresponding-author note" — it feeds the `K`
+footnote through the same institution-matching logic as `B` and `C`, which then force-matched
+it to a real but wrong institution. Not random parsing noise — a specific, structural
+misreading of a common journal footnote convention, which means it will recur on any paper
+using this same style, not just Sarah Legge's.
+
+The raw match was to `institution_idx 4210108542` ("Schlumberger (Ireland)"). The same work's
+`corresponding_institution_ids` also included **Services Australia** (Australia's
+social-security/government-services agency) alongside the two real institutions (ANU, Charles
+Darwin University) — user independently confirmed this second one is also a genuine error, not
+a real affiliation. Two garbage matches on one paper, not a Schlumberger-
 specific quirk.
 
 **Confirmed systemic, not a one-off**: checked the field distribution of all ~41,291 works
