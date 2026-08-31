@@ -1614,6 +1614,67 @@ cleanly on the first try — 10,414,996 rows across 22,665 clusters, 5,727,626 c
 back to ~5GB used when done — no swap growth, unlike all three pre-fix attempts). 462/462 tests
 passing (`tests/` + `analysis/tests/`).
 
+## `annual_metrics.parquet` fixed as the sole source of truth for per-year oeuvre stats; a real hardcoded-window bug found and fixed (2026-08-31)
+
+Triggered by building a redesigned dossier page (four panels: overview, ARC awards, OpenAlex
+author record, oeuvre) for a demo case, `DP0210086_SarahLegge` (5 ARC awards 2002-2025
+including an APD fellowship, a good multi-award test case). Asked to "plot every publication
+year" surfaced a real gap: her genuine 1996/1997/1999 works and a 2026 one were missing from
+the chart. First instinct was to patch the chart script to compute annual pub/citation counts
+directly from `Dossier.works` instead — **user caught this before it was built**: that would
+create a second, independent computation of the same aggregate fact, exactly the kind of
+drift this project has repeatedly found and fixed elsewhere (03b/04 disagreement,
+`01a_diagnose.py`'s scope-derivation drift). Redirected to find and fix the actual root cause
+in `analysis/03_annual_metrics.py` instead, and ensure `annual_metrics.parquet` stays the one
+true source of aggregate per-year stats (n_pubs, citations, cumulative h-index, and whatever
+future metrics — "H-index at that year" etc — get added later).
+
+**The bug**: `03_annual_metrics.py` already declared `MIN_PUB_YEAR=1950`/`MAX_PUB_YEAR=2026`
+and used them correctly for `create_deduped_works()`/`first_pub_year` — but four separate SQL
+blocks in the same script (the `generate_series` year-spine, the `annual_pubs` aggregation,
+the highly-cited backfill, and `collab_metrics`' own work-id scoping) all hardcoded a stale,
+narrower `2000`/`2025` literal window instead, with no traceable origin for why. Any real work
+outside that window was silently dropped from `annual_metrics.parquet` even though
+`deduped_works` itself already correctly included it — the docstring's own header line even
+described the table as covering a fixed "(2000–2025)" range as if deliberate. Fixed: all four
+sites now reference `MIN_PUB_YEAR`/`MAX_PUB_YEAR` directly (two blocks needed their `con.execute("""`
+changed to an f-string to make the substitution possible). Full rerun: annual_metrics.parquet
+546,076 → **873,887 rows**, 22,625 → **22,671 persons** — confirmed a real, substantial
+population-wide effect (+60% rows), not a one-person edge case.
+
+**A freshness gate was also missing entirely** — nothing stopped a caller from reading a stale
+`annual_metrics.parquet` after `oeuvres.parquet` changed underneath it (a Stage 1/3 rerun, a
+future oeuvre correction) without `03_annual_metrics.py` having been rerun since. Since that
+script always fully regenerates its output when run, the actual gap is on the *read* side, not
+the write side — added `dossier_build.py::_ensure_annual_metrics_fresh()` (checked once per
+process, not per `build_dossier()` call, to keep repeated calls in a batch loop cheap), gating
+`ANNUAL_METRICS` against `OEUVRES` + both scripts' own source files
+(`analysis/03_annual_metrics.py`, `analysis/utils/dedup.py`), using the same
+`assert_fresh`/`PipelineStalenessError` mechanism already established in `src/utils/
+pipeline_freshness.py`. Verified it actually fires: called immediately after editing
+`03_annual_metrics.py` but before rerunning it, correctly raised `PipelineStalenessError`
+naming the stale file.
+
+**Also fixed this session, smaller**: the dossier chart's "citations" series was earlier
+computed as a fixed 10x multiple of the publications axis (a literal misreading of a rough
+verbal expectation) — clipped real data badly, since some years run ~38x, not 10x; switched
+to independent auto-scaling per axis. A `twinx()`-sharing-the-x-axis bug (`ax2.set_xticks([])`
+meant to clear ax2's own ticks silently wiped the labels just set on `ax1`, since `twinx()`
+axes share one x-axis object) cost real debugging time before being traced — worth remembering
+for any future dual-axis matplotlib work in this codebase.
+
+User-directed layout changes applied on top: dropped the ARC-recorded ORCID from the Overview
+panel (redundant with the OpenAlex author panel's own ORCID), added `admin_org` as a column on
+the ARC awards table, and fellowship-year award markers now render as a circled asterisk
+(`ax1.scatter(..., facecolors="none")` behind the star) versus a plain asterisk for non-fellowship
+award years.
+
+**Not yet done, logged as `docs/pipeline_todo.md` item 19**: a systematic sweep of the rest of
+`analysis/` for similar stale hardcoded literals — this one was found by accident (building a
+chart, not auditing), and `analysis/` hasn't had the same scrutiny `src/`'s identity-resolution
+pipeline has had this year, so there's no reason to assume it's the only one. 462/462 tests
+passing throughout.
+
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18. Pipeline improvement TODOs below.
 

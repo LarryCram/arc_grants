@@ -58,6 +58,7 @@ class Work:
     outlet_type: str | None = None
     outlet_h_index: int | None = None
     institution_names: list[str] = field(default_factory=list)  # can be >1 -- multi-affiliation on one paper is real
+    coauthor_names: list[str] = field(default_factory=list)  # every other author on this work (excludes this person's own resolved author_idx)
     topic_entropy: float | None = None  # own-work topic diversity, once work_topic_diversity.parquet exists
     novelty_score: float | None = None  # per-work Uzzi score, once integrated
     conventionality_score: float | None = None
@@ -197,6 +198,13 @@ class Dossier:
         # ("two Harvard papers is better than one Harvard paper")
         return Counter(inst for w in self.works_through(through_year) for inst in w.institution_names)
 
+    def coauthor_counts(self, through_year: int | None = None) -> Counter[str]:
+        # same accumulate-don't-dedupe logic as institution_counts() -- a coauthor appearing on
+        # 2+ works should count 2+ times, since "does this person have recurring collaborators"
+        # is exactly what this is for (a real career usually does; an oeuvre where every paper's
+        # author list is disjoint from every other is a contamination signal).
+        return Counter(c for w in self.works_through(through_year) for c in w.coauthor_names)
+
     def mean_topic_entropy(self, through_year: int | None = None) -> float | None:
         vals = [w.topic_entropy for w in self.works_through(through_year) if w.topic_entropy is not None]
         return sum(vals) / len(vals) if vals else None
@@ -261,6 +269,10 @@ class Dossier:
         lines.append(f"- by outlet: {dict(by_outlet) if by_outlet else '(not yet available, pending outlet columns)'}")
         inst = self.institution_counts()
         lines.append(f"- institutions: {dict(inst) if inst else '(not yet available, pending own_institution_metrics.parquet)'}")
+        coauth = self.coauthor_counts()
+        top_coauth = dict(coauth.most_common(10))
+        lines.append(f"- top coauthors (whole oeuvre): {top_coauth if top_coauth else '(none)'} "
+                     f"({len(coauth)} distinct, {sum(1 for n in coauth.values() if n >= 2)} recurring)")
         mte = self.mean_topic_entropy()
         lines.append(f"- mean topic entropy: {mte if mte is not None else '(not yet available, pending work_topic_diversity.parquet)'}")
         mns = self.mean_novelty_score()
@@ -305,3 +317,4 @@ class Dossier:
             lines.append(f"  - coauthors on piled works: {', '.join(p.coauthor_names) if p.coauthor_names else '(none)'}")
 
         return "\n".join(lines)
+

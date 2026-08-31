@@ -27,6 +27,7 @@ from analysis.utils.dedup import create_deduped_works, count_exclusions
 from src.utils.oeuvre_build import AUTH_GLOB, STAGE3_SURVIVORS
 from src.utils.work_piling import PILING_RESULTS_GLOB, _safe_list
 from src.utils.cluster_checks import for2020_all_fields, for2020_all_subfields
+from src.utils.pipeline_freshness import assert_fresh
 from importlib import import_module
 
 _ecr = import_module("analysis.07_analyse_ecr_fellowships")
@@ -35,8 +36,31 @@ GRANT_MAP = str(PROCESSED_DATA / "arc_grant_cluster_map.parquet")
 GRANTS_FLAT = str(PROCESSED_DATA / "grants_flat.parquet")
 INV_RAW = str(PROCESSED_DATA / "investigators_raw.parquet")
 OEUVRES = str(OUTPUT_ROOT / "analysis" / "oeuvres.parquet")
+RESOLVED = str(PROCESSED_DATA / "arc_oax_resolved.parquet")
 ANNUAL_METRICS = str(OUTPUT_ROOT / "analysis" / "annual_metrics.parquet")
 AWARDS_CIF = str(PROCESSED_DATA / "awards_cif.parquet")
+
+# annual_metrics.parquet is the sole source of truth for aggregate per-year oeuvre stats (see
+# analysis/03_annual_metrics.py's own docstring) -- it always fully regenerates when that script
+# is run, so the real risk isn't the script producing stale output, it's a *caller* here reading
+# an old copy after oeuvres.parquet changed underneath it (a Stage 1/3 rerun, a manual oeuvre
+# correction) without 03_annual_metrics.py having been rerun since. Checked once, not per-call,
+# to keep repeated build_dossier() calls in a batch loop cheap.
+_ANNUAL_METRICS_SOURCE = Path(__file__).resolve().parents[2] / "analysis" / "03_annual_metrics.py"
+_DEDUP_SOURCE = Path(__file__).resolve().parent / "dedup.py"
+_annual_metrics_checked = False
+
+
+def _ensure_annual_metrics_fresh() -> None:
+    global _annual_metrics_checked
+    if _annual_metrics_checked:
+        return
+    assert_fresh(
+        "dossier_build (annual_metrics.parquet)",
+        outputs=[Path(ANNUAL_METRICS)],
+        inputs=[Path(OEUVRES), _ANNUAL_METRICS_SOURCE, _DEDUP_SOURCE],
+    )
+    _annual_metrics_checked = True
 
 _admin_orgs = pd.read_csv(ADMIN_ORGS_CSV)
 HEP_CODE_TO_NAME: dict[str, str] = dict(
@@ -205,6 +229,20 @@ def _fetch_piling_diagnostics(cluster_id: str, con: duckdb.DuckDBPyConnection) -
     return out
 
 
+def _fetch_own_author_idx(cluster_id: str, con: duckdb.DuckDBPyConnection) -> int | None:
+    """This ACIF's own resolved (winning) OpenAlex author_idx, from 04_resolve_links.py's own
+    output -- the string oax_id ("https://openalex.org/A...") converted to the native integer
+    key, same pattern as 01_fetch_oeuvres.py's build_author_map() and every other raw-OpenAlex
+    join in this codebase (see CLAUDE.md's OpenAlex Snapshot Migration note on why the string
+    form must never be used for a raw-table join)."""
+    row = con.execute(f"""
+        SELECT TRY_CAST(regexp_replace(oax_id, 'https://openalex.org/A', '') AS BIGINT)
+        FROM read_parquet('{RESOLVED}')
+        WHERE arc_id = ?
+    """, [cluster_id]).fetchone()
+    return row[0] if row else None
+
+
 def _fetch_works(cluster_id: str, con: duckdb.DuckDBPyConnection) -> tuple[list[Work], dict[str, int]]:
     safe_id = cluster_id.replace("'", "''")  # arc_ids are pipeline-controlled, but guard anyway
     person_oeuvres = f"(SELECT * FROM read_parquet('{OEUVRES}') WHERE arc_id = '{safe_id}' AND is_primary_author_id = TRUE)"
@@ -218,10 +256,30 @@ def _fetch_works(cluster_id: str, con: duckdb.DuckDBPyConnection) -> tuple[list[
         FROM _dossier_deduped_works
         ORDER BY publication_year
     """).fetchall()
+
+    own_author_idx = _fetch_own_author_idx(cluster_id, con)
+    inst_by_work: dict[int, list[str]] = {}
+    coauth_by_work: dict[int, list[str]] = {}
+    if own_author_idx is not None and rows:
+        work_idxs = [r[0] for r in rows]
+        au = con.execute(f"""
+            SELECT work_idx, author_idx, author_name, institution_name
+            FROM read_parquet('{AUTH_GLOB}')
+            WHERE work_idx IN ({','.join(str(w) for w in work_idxs)})
+        """).fetchdf()
+        own = au[au["author_idx"] == own_author_idx]
+        for w, names in own.groupby("work_idx")["institution_name"]:
+            inst_by_work[w] = sorted({n for n in names if isinstance(n, str) and n})
+        other = au[au["author_idx"] != own_author_idx]
+        for w, names in other.groupby("work_idx")["author_name"]:
+            coauth_by_work[w] = sorted({n for n in names if isinstance(n, str) and n})
+
     works = [
         Work(
             work_idx=r[0], publication_year=r[1], cited_by_count=r[2], type=r[3], title=r[4],
             field_name=r[5], subfield_name=r[6], domain_name=r[7],
+            institution_names=inst_by_work.get(r[0], []),
+            coauthor_names=coauth_by_work.get(r[0], []),
         )
         for r in rows
     ]
@@ -229,6 +287,7 @@ def _fetch_works(cluster_id: str, con: duckdb.DuckDBPyConnection) -> tuple[list[
 
 
 def _fetch_annual_series(cluster_id: str, con: duckdb.DuckDBPyConnection) -> tuple[list[YearRecord], int | None]:
+    _ensure_annual_metrics_fresh()
     rows = con.execute(f"""
         SELECT year, first_pub_year, n_pubs, n_citations_snapshot, h_index, n_works_cumul,
                total_citations_cumul, top_field, n_highly_cited

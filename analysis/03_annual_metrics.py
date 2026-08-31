@@ -3,8 +3,26 @@ Compute per-person, per-year bibliometric metrics from oeuvres.parquet.
 
 No OAX scan needed — reads only the persisted oeuvres parquet.
 
+annual_metrics.parquet is the SOLE source of truth for aggregate per-year oeuvre stats
+(n_pubs, citations, cumulative h-index, and any future per-year metric) — a downstream
+consumer (Dossier(), a chart, a report) must read this table, never recompute an aggregate
+directly from oeuvres.parquet/works itself. Two independent computations of "publications in
+year Y" for the same person is exactly the kind of drift this project has repeatedly found and
+fixed elsewhere (see CLAUDE.md's 03b/04 consolidation, 01a_diagnose.py's scope-derivation
+drift) — don't reintroduce it here.
+
+2026-08-31: fixed a real bug where this held even though it wasn't true. MIN_PUB_YEAR/
+MAX_PUB_YEAR (1950-2026) is the range create_deduped_works()/first_pub actually use, but the
+metrics-generation SQL below had four separate hardcoded "2000"/"2025" literals instead of
+those same constants — a narrower, stale sub-window (its origin untraced) that silently dropped
+any real work outside it from annual_metrics.parquet, even though deduped_works itself already
+correctly included it. Found via a real case: Sarah Legge (DP0210086) has genuine 1996/1997/1999
+works missing from what this table used to produce. Now uses MIN_PUB_YEAR/MAX_PUB_YEAR
+throughout, so the table's own year range is whatever the data actually spans, not a fixed
+assumption.
+
 Outputs:
-  annual_metrics.parquet  — arc_id × year (2000–2025), cumulative and annual stats
+  annual_metrics.parquet  — arc_id × year (MIN_PUB_YEAR..MAX_PUB_YEAR), cumulative and annual stats
   collab_metrics.parquet  — arc_id × year × country/institution co-author counts
 
 H-index note: computed cumulatively for works published up to and including each year,
@@ -92,13 +110,13 @@ def main(sample_n=None):
     # Cumulative H-index and citation totals for each arc_id × year
     # Using CROSS JOIN with years spine — each person × each year gets all their
     # works published up to that year, ranked by citations.
-    con.execute("""
+    con.execute(f"""
     CREATE TABLE annual AS
     WITH years AS (
         SELECT generate_series AS year
-        FROM generate_series(2000, 2025)
+        FROM generate_series({MIN_PUB_YEAR}, {MAX_PUB_YEAR})
     ),
-    -- cumulative works: each work × each year from publication_year to 2025
+    -- cumulative works: each work × each year from publication_year to MAX_PUB_YEAR
     cumul AS (
         SELECT
             w.arc_id,
@@ -130,7 +148,7 @@ def main(sample_n=None):
                SUM(cited_by_count) AS n_citations_snapshot,
                MODE(field_name) AS top_field
         FROM deduped_works
-        WHERE publication_year BETWEEN 2000 AND 2025
+        WHERE publication_year BETWEEN {MIN_PUB_YEAR} AND {MAX_PUB_YEAR}
         GROUP BY arc_id, publication_year
     )
     SELECT
@@ -159,7 +177,7 @@ def main(sample_n=None):
         SELECT field_name, publication_year, p90, p99
         FROM read_parquet('{QUANTILES}')
         """)
-        con.execute("""
+        con.execute(f"""
         CREATE TABLE annual_hc AS
         SELECT
             w.arc_id,
@@ -167,7 +185,7 @@ def main(sample_n=None):
             COUNT(*) FILTER (WHERE w.cited_by_count >= q.p90) AS n_hc_p90,
             COUNT(*) FILTER (WHERE w.cited_by_count >= q.p99) AS n_hc_p99
         FROM deduped_works w
-        CROSS JOIN (SELECT generate_series AS year FROM generate_series(2000,2025)) y
+        CROSS JOIN (SELECT generate_series AS year FROM generate_series({MIN_PUB_YEAR},{MAX_PUB_YEAR})) y
         LEFT JOIN quantiles q
             ON q.field_name = w.field_name
             AND q.publication_year = w.publication_year
@@ -198,12 +216,12 @@ def main(sample_n=None):
     # from the authorships parquet, extract their institution and country.
     print("Computing collaboration metrics (requires authorships scan)...")
 
-    # Get ARC work_idxs (2000-2025 only for collab metrics)
-    con.execute("""
+    # Get ARC work_idxs (same MIN_PUB_YEAR..MAX_PUB_YEAR scope as annual_metrics itself)
+    con.execute(f"""
     CREATE TABLE arc_work_ids AS
     SELECT DISTINCT arc_id, work_idx, publication_year AS year
     FROM deduped_works
-    WHERE publication_year BETWEEN 2000 AND 2025
+    WHERE publication_year BETWEEN {MIN_PUB_YEAR} AND {MAX_PUB_YEAR}
     """)
 
     # Need the arc_author_map to exclude the ARC person's own authorship row

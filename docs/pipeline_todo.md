@@ -90,6 +90,7 @@ last.
 16. **Extract `author_position`** — purely opportunistic, do only when the OpenAlex snapshot is next re-converted for an unrelated reason
 17. **Work through the `accuracy_checks.md` checklist** (largest, most multi-part, least urgent — a standing backlog, not a single task)
 18. **HEP-affiliation-history candidate-pool pruning for common-name mega-pools** — real, partial win, not built (see its own entry below)
+19. **Audit `analysis/` for other stale hardcoded literals** — found once already (`03_annual_metrics.py`'s hardcoded 2000/2025 window, see its own entry below); `analysis/` hasn't been kept up to date the way `src/` has, so this specific bug is unlikely to be the only one
 
 ---
 
@@ -349,6 +350,24 @@ case. Proposed downstream diagnostic, not built: scan piling results for known h
 ARC-funded people with implausibly low total work-count, then chase down their real
 `author_idx` from there as a manual follow-up, the same evidence-first pattern as the `4u`
 review work.
+
+### 19 — Audit `analysis/` for other stale hardcoded literals
+Found 2026-08-31 while building a dossier-page redesign: `analysis/03_annual_metrics.py`
+correctly used `MIN_PUB_YEAR`/`MAX_PUB_YEAR` (1950-2026) for deduping/loading works, but four
+separate SQL blocks inside the same script hardcoded a stale `2000`/`2025` literal window for
+the actual metrics-generation step — silently dropping any real work outside that narrower
+range from `annual_metrics.parquet`, even though `deduped_works` itself already correctly
+included it. Confirmed via a real case (Sarah Legge, `DP0210086` — genuine 1996/1997/1999
+works and a 2026 one were all missing from what the table used to produce). Fixed (all four
+sites now use the same constants), full rerun: 546,076 → 873,887 rows / 22,625 → 22,671
+persons — a real, substantial population-wide effect, not a one-person edge case.
+
+`analysis/` (as opposed to `src/`) hasn't been through the same level of scrutiny this project
+has repeatedly applied to the identity-resolution pipeline this year — this specific bug was
+found by accident (building a chart, not auditing), which means there's no reason to believe
+it's the only one. Needs a systematic sweep of `analysis/*.py` and `analysis/utils/*.py` for
+other hardcoded year ranges, magic thresholds, or other literals that have quietly drifted out
+of sync with the constants/config they should be deriving from — not scoped or started.
 
 ---
 
