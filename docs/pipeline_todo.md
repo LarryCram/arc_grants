@@ -91,6 +91,7 @@ last.
 17. **Work through the `accuracy_checks.md` checklist** (largest, most multi-part, least urgent — a standing backlog, not a single task)
 18. **HEP-affiliation-history candidate-pool pruning for common-name mega-pools** — real, partial win, not built (see its own entry below)
 19. **Audit `analysis/` for other stale hardcoded literals** — found once already (`03_annual_metrics.py`'s hardcoded 2000/2025 window, see its own entry below); `analysis/` hasn't been kept up to date the way `src/` has, so this specific bug is unlikely to be the only one
+20. **Extract `raw_affiliation_string` on the next OpenAlex snapshot conversion, then filter junk-matched authorship institutions** — a real, confirmed OpenAlex-side data-quality bug found via two dossier examples (see its own entry below); needs new data before it's actionable, so opportunistic like the existing `author_position` item, not urgent standalone
 
 ---
 
@@ -368,6 +369,52 @@ found by accident (building a chart, not auditing), which means there's no reaso
 it's the only one. Needs a systematic sweep of `analysis/*.py` and `analysis/utils/*.py` for
 other hardcoded year ranges, magic thresholds, or other literals that have quietly drifted out
 of sync with the constants/config they should be deriving from — not scoped or started.
+
+### 20 — Extract `raw_affiliation_string`, filter junk-matched authorship institutions
+Found 2026-08-31 investigating a real, recurring anomaly surfaced by the redesigned dossier
+page: "Schlumberger (Ireland)" (an Irish oilfield-services company) appeared in the oeuvre of
+two unrelated Charles Darwin University wildlife ecologists (Sarah Legge, Christine
+Schlesinger), on works with titles decisively unrelated to oil/gas (fire ecology, feral cats,
+threatened mammals, desert lizards). Checked and ruled out: not a person-identity mixup (the
+`author_idx` on both is each person's own confirmed OpenAlex identity, not a shared/wrong one).
+
+**Root cause, confirmed via the live OpenAlex API** (user-supplied): the raw
+`authorships[].raw_affiliation_string` for Sarah Legge on one of these works is literally
+`"KCorresponding author. Email: sarahmarialegge@gmail.com"` — a mis-parsed "Corresponding
+author" footnote/email line, not a real affiliation, matched by OpenAlex's own
+affiliation-disambiguation pipeline to `institution_idx 4210108542` ("Schlumberger (Ireland)").
+The same work's `corresponding_institution_ids` also included **Services Australia**
+(Australia's social-security/government-services agency) alongside the two real institutions
+(ANU, Charles Darwin University) — user independently confirmed this second one is also a
+genuine error, not a real affiliation. Two garbage matches on one paper, not a Schlumberger-
+specific quirk.
+
+**Confirmed systemic, not a one-off**: checked the field distribution of all ~41,291 works
+tagged with `institution_idx 4210108542` in this project's own authorships extract — Social
+Sciences (13,534), Agricultural/Biological Sciences (7,385), and Medicine (6,706) all far
+outnumber Engineering (3,671, only 8th) and Earth/Planetary Sciences (1,828), which is the
+reverse of what a real oilfield-services company's actual publication footprint would look
+like. This points to a systemic weakness in OpenAlex's own affiliation parser — force-matching
+garbled non-affiliation text to *some* real institution rather than leaving it unresolved —
+not something specific to this one institution ID or these two people.
+
+**Blocked on missing data**: `raw_affiliation_string` does not exist anywhere in this
+project's own local OpenAlex extract (checked directly — absent from `authorships`, `works`,
+and `work_topics`). By the time data reaches the local snapshot, the junk string has already
+been collapsed into a clean-looking `institution_name`, indistinguishable locally from a real
+affiliation — so this can't be filtered against current data at all.
+
+**Two-part fix, not yet started**: (1) add `raw_affiliation_string` to the fields pulled on
+the next OpenAlex snapshot re-conversion — same "opportunistic, do it next time the snapshot
+is touched for another reason" framing as the existing `author_position` item (#16); (2) once
+that data exists, add a Stage-1-style exclusion (alongside the existing `corrupt_authorship`
+category) dropping an *authorship row's* institution (not necessarily the whole work) whenever
+`raw_affiliation_string` matches a junk pattern — candidate regex, derived from the one
+confirmed example plus standard academic-paper conventions for this category, not yet
+validated against a real corpus: `^.{0,5}corresponding\s+author\b` (case-insensitive; the
+leading `.{0,5}` catches garbled footnote-marker prefixes like the "K"), or contains `email:`
+/ a bare email-address pattern with little other text, or "To whom correspondence should be
+addressed."
 
 ---
 
