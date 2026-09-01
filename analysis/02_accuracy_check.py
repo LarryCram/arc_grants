@@ -16,12 +16,19 @@ Key checks:
 """
 
 import argparse
+import datetime
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import duckdb
 from config.settings import PROCESSED_DATA, OPENALEX_DIR, OUTPUT_ROOT
+from analysis.utils.dedup import MIN_PUB_YEAR, MAX_PUB_YEAR
+
+# "Academic age" (years since first publication) is relative to the real calendar year the
+# check is run in, not a fixed literal -- 2026-09-01: found hardcoded as "2025" here, already
+# stale by the time this fix landed. Computed once per run, not per-row.
+CURRENT_YEAR = datetime.date.today().year
 
 ANALYSIS_OUT  = OUTPUT_ROOT / "analysis"
 RESOLVED      = str(PROCESSED_DATA / "arc_oax_resolved.parquet")
@@ -217,7 +224,7 @@ def main(sample_n=None):
         ),
         in_range AS (
             SELECT * FROM raw
-            WHERE publication_year BETWEEN 1950 AND 2026
+            WHERE publication_year BETWEEN {MIN_PUB_YEAR} AND {MAX_PUB_YEAR}
         ),
         title_ranked AS (
             SELECT work_idx,
@@ -237,7 +244,7 @@ def main(sample_n=None):
         )
         SELECT
             COUNT(*)                          AS n_raw,
-            SUM(CASE WHEN r.publication_year BETWEEN 1950 AND 2026 THEN 1 ELSE 0 END)
+            SUM(CASE WHEN r.publication_year BETWEEN {MIN_PUB_YEAR} AND {MAX_PUB_YEAR} THEN 1 ELSE 0 END)
                                               AS n_in_range,
             SUM(CASE WHEN tr.rn = 1 THEN 1 ELSE 0 END)
                                               AS n_after_dedup
@@ -245,7 +252,7 @@ def main(sample_n=None):
         LEFT JOIN title_ranked tr ON tr.work_idx = r.work_idx
     """).fetchone()
     print(f"  Raw oeuvre works       : {excl[0]:>10,}")
-    print(f"  After year filter      : {excl[1]:>10,}  ({excl[0]-excl[1]:,} excluded, <1950 or >2026)")
+    print(f"  After year filter      : {excl[1]:>10,}  ({excl[0]-excl[1]:,} excluded, <{MIN_PUB_YEAR} or >{MAX_PUB_YEAR})")
     print(f"  After title dedup      : {excl[2]:>10,}  ({excl[1]-excl[2]:,} title duplicates collapsed)")
     print(f"  → effective metric rows: {excl[2]:>10,}")
 
@@ -294,14 +301,14 @@ def main(sample_n=None):
             MIN(first_pub_year) AS earliest,
             MAX(first_pub_year) AS latest_first_pub,
             ROUND(AVG(first_pub_year), 1) AS avg_first_pub,
-            ROUND(AVG(2025 - first_pub_year), 1) AS avg_academic_age_2025,
+            ROUND(AVG({CURRENT_YEAR} - first_pub_year), 1) AS avg_academic_age,
             COUNT(*) FILTER (WHERE first_pub_year > 2000) AS n_post2000_debut,
             COUNT(*) FILTER (WHERE first_pub_year < 1990) AS n_pre1990_debut
         FROM per_person
     """).fetchone()
     assert yr_stats is not None
     print(f"  first_pub_year range: {yr_stats[0]}–{yr_stats[1]}, mean: {yr_stats[2]}")
-    print(f"  Mean academic age at 2025 (2025 − first_pub): {yr_stats[3]} years")
+    print(f"  Mean academic age at {CURRENT_YEAR} ({CURRENT_YEAR} − first_pub): {yr_stats[3]} years")
     print(f"  Persons first published after 2000: {yr_stats[4]:,}")
     print(f"  Persons first published before 1990: {yr_stats[5]:,}")
 
@@ -310,7 +317,7 @@ def main(sample_n=None):
         WITH years_pub AS (
             SELECT DISTINCT arc_id, publication_year AS yr
             FROM read_parquet('{oeuvres}')
-            WHERE publication_year BETWEEN 1980 AND 2025
+            WHERE publication_year BETWEEN {MIN_PUB_YEAR} AND {MAX_PUB_YEAR}
         ),
         per_person AS (
             SELECT arc_id, MIN(yr) AS first_yr, MAX(yr) AS last_yr
@@ -321,7 +328,7 @@ def main(sample_n=None):
             SELECT p.arc_id, gs.yr,
                    (y.yr IS NOT NULL) AS has_pub
             FROM per_person p
-            CROSS JOIN (SELECT generate_series AS yr FROM generate_series(1980, 2025)) gs
+            CROSS JOIN (SELECT generate_series AS yr FROM generate_series({MIN_PUB_YEAR}, {MAX_PUB_YEAR})) gs
             LEFT JOIN years_pub y ON y.arc_id = p.arc_id AND y.yr = gs.yr
             WHERE gs.yr BETWEEN p.first_yr AND p.last_yr
         ),
@@ -352,20 +359,20 @@ def main(sample_n=None):
                 MAX(publication_year) AS last_pub,
                 COUNT(DISTINCT work_idx) AS n_works,
                 COUNT(DISTINCT publication_year) AS active_years,
-                (2025 - MIN(publication_year)) AS academic_age_2025
+                ({CURRENT_YEAR} - MIN(publication_year)) AS academic_age
             FROM read_parquet('{oeuvres}')
             WHERE publication_year IS NOT NULL
             GROUP BY arc_id ORDER BY arc_id
         """).fetchall()
         for row in profiles:
             print(f"  {str(row[0]):30s}  {row[1]}–{row[2]}  works={row[3]:4d}"
-                  f"  active_yrs={row[4]}  acad_age_2025={row[5]}")
+                  f"  active_yrs={row[4]}  acad_age={row[5]}")
 
     # ── 7. Work-level quality flags ────────────────────────────────────────
     # Separate from author flags: these are OAX work metadata errors within
     # an otherwise correctly linked oeuvre.
-    #   implausible_year : publication_year < 1950 (OAX year error, e.g. 1934 not 1984)
-    #   future_year      : publication_year > 2026
+    #   implausible_year : publication_year < MIN_PUB_YEAR (OAX year error, e.g. 1934 not 1984)
+    #   future_year      : publication_year > MAX_PUB_YEAR
     #   domain_outlier   : work's domain not among the person's established domains
     #                      (≥5% of works or top-3); only fires for persons with ≥20 works
     section("7. Work-level quality flags (OAX data errors within correct oeuvres)")
@@ -408,8 +415,8 @@ def main(sample_n=None):
                 o.domain_name,
                 pt.total_works,
                 CASE
-                    WHEN o.publication_year < 1950           THEN 'implausible_year'
-                    WHEN o.publication_year > 2026           THEN 'future_year'
+                    WHEN o.publication_year < {MIN_PUB_YEAR} THEN 'implausible_year'
+                    WHEN o.publication_year > {MAX_PUB_YEAR} THEN 'future_year'
                     WHEN o.domain_name IS NOT NULL
                      AND ed.arc_id IS NULL
                      AND pt.total_works >= 20               THEN 'domain_outlier'

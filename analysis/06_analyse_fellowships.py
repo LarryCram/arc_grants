@@ -1,7 +1,8 @@
 """
 Fellowship bibliometric analysis.
 
-Plot 1: Distribution of academic ages (2025 − first_pub_year) by fellowship role_code.
+Plot 1: Distribution of academic ages at award (award_year − first_pub_year) by fellowship
+         role_code.
 Plot 2: Median annual publications vs Δyear (publication_year − award_year) by role_code,
          among fellows who published in each year (inactive fellows excluded).
 
@@ -26,15 +27,13 @@ import matplotlib.ticker as mticker
 import numpy as np
 
 from config.settings import PROCESSED_DATA, OUTPUT_ROOT
+from analysis.utils.dedup import MIN_PUB_YEAR, MAX_PUB_YEAR
 
 ANALYSIS_OUT = OUTPUT_ROOT / "analysis"
 PLOTS_OUT    = Path(__file__).parent.parent / "plots"
 INV_RAW      = str(PROCESSED_DATA / "investigators_raw.parquet")
 GRANT_MAP    = str(PROCESSED_DATA / "arc_grant_cluster_map.parquet")
 GRANTS_FLAT  = str(PROCESSED_DATA / "grants_flat.parquet")
-
-MIN_PUB_YEAR = 1950
-MAX_PUB_YEAR = 2026
 
 # Fellowship role codes to include and their display labels
 ROLES = {

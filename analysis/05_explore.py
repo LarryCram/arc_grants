@@ -8,6 +8,7 @@ Usage:
 """
 
 import argparse
+import datetime
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -16,9 +17,15 @@ import duckdb
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from config.settings import PROCESSED_DATA, OUTPUT_ROOT
+from analysis.utils.dedup import MIN_PUB_YEAR, MAX_PUB_YEAR
 
 ANALYSIS_OUT = OUTPUT_ROOT / "analysis"
 PERSONS      = str(PROCESSED_DATA / "awards_cif.parquet")
+
+# "Academic age" is relative to the real calendar year this is run in, not a fixed literal --
+# 2026-09-01: found hardcoded as "2026" here (already coincidentally correct at the time, but
+# for the wrong reason -- it was never meant to track the real date).
+CURRENT_YEAR = datetime.date.today().year
 
 def paths(sample_n):
     s = f"_sample-{sample_n}" if sample_n else ""
@@ -70,7 +77,10 @@ def main(sample_n=None):
 
     # ── H-index distribution (most recent year) ────────────────────────────
     if Path(p["annual"]).exists():
-        print("\nH-index distribution at 2024:")
+        latest_year = con.execute(f"""
+            SELECT MAX(year) FROM read_parquet('{p["annual"]}') WHERE h_index IS NOT NULL
+        """).fetchone()[0]
+        print(f"\nH-index distribution at {latest_year}:")
         hdist = con.execute(f"""
             SELECT
                 CASE
@@ -83,7 +93,7 @@ def main(sample_n=None):
                 END AS bucket,
                 COUNT(*) AS n_persons
             FROM read_parquet('{p["annual"]}')
-            WHERE year = 2024 AND h_index IS NOT NULL
+            WHERE year = {latest_year} AND h_index IS NOT NULL
             GROUP BY bucket
             ORDER BY MIN(h_index)
         """).fetchall()
@@ -93,10 +103,10 @@ def main(sample_n=None):
 
     # ── Academic age distribution ──────────────────────────────────────────
     if Path(p["annual"]).exists():
-        print("\nAcademic age (2026 − first_pub_year) distribution:")
+        print(f"\nAcademic age ({CURRENT_YEAR} − first_pub_year) distribution:")
         age = con.execute(f"""
             SELECT
-                2026 - first_pub_year AS acad_age,
+                {CURRENT_YEAR} - first_pub_year AS acad_age,
                 COUNT(*) AS n
             FROM (
                 SELECT arc_id, MIN(first_pub_year) AS first_pub_year
@@ -119,20 +129,20 @@ def main(sample_n=None):
         arc = con.execute(f"""
             SELECT year, SUM(n_pubs) AS n_pubs, SUM(total_citations_cumul) AS cites
             FROM read_parquet('{p["annual"]}')
-            WHERE year BETWEEN 2000 AND 2024
+            WHERE year BETWEEN {MIN_PUB_YEAR} AND {MAX_PUB_YEAR}
             GROUP BY year ORDER BY year
         """).df()
 
         au = con.execute(f"""
             SELECT year, n_pubs, total_citations
             FROM read_parquet('{p["au_annual"]}')
-            WHERE year BETWEEN 2000 AND 2024
+            WHERE year BETWEEN {MIN_PUB_YEAR} AND {MAX_PUB_YEAR}
         """).df()
 
         world = con.execute(f"""
             SELECT year, n_pubs
             FROM read_parquet('{p["world_annual"]}')
-            WHERE year BETWEEN 2000 AND 2024
+            WHERE year BETWEEN {MIN_PUB_YEAR} AND {MAX_PUB_YEAR}
         """).df()
 
         fig, axes = plt.subplots(1, 2, figsize=(14, 5))

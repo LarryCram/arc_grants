@@ -25,9 +25,6 @@ H_INDEX_SQL = """
 MAX(rk) FILTER (WHERE cited_by_count >= rk)
 """
 
-MIN_PUB_YEAR = 1950
-MAX_PUB_YEAR = 2026
-
 CUMUL_SQL = """
 WITH years AS (
     SELECT generate_series AS year FROM generate_series(2000, 2024)

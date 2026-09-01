@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import duckdb
 from config.settings import OPENALEX_COMPACT_DIR, OUTPUT_ROOT
+from analysis.utils.dedup import MIN_PUB_YEAR, MAX_PUB_YEAR
 
 ANALYSIS_OUT  = OUTPUT_ROOT / "analysis"
 ANALYSIS_OUT.mkdir(parents=True, exist_ok=True)
@@ -58,7 +59,7 @@ def main():
                 bt.field_name
             FROM read_parquet('{WORK_GLOB}') w
             JOIN best_topic bt ON bt.work_idx = w.work_idx
-            WHERE w.publication_year BETWEEN 1990 AND 2025
+            WHERE w.publication_year BETWEEN {MIN_PUB_YEAR} AND {MAX_PUB_YEAR}
               AND w.cited_by_count IS NOT NULL
               AND bt.field_name IS NOT NULL
         )

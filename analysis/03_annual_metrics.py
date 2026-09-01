@@ -45,7 +45,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import duckdb
 from config.settings import PROCESSED_DATA, OPENALEX_COMPACT_DIR, OUTPUT_ROOT
-from analysis.utils.dedup import create_deduped_works
+from analysis.utils.dedup import create_deduped_works, MIN_PUB_YEAR, MAX_PUB_YEAR
 
 ANALYSIS_OUT   = OUTPUT_ROOT / "analysis"
 AUTH_GLOB      = str(OPENALEX_COMPACT_DIR / "authorships" / "*.parquet")
@@ -55,8 +55,10 @@ OUT_COLLAB     = str(ANALYSIS_OUT / "collab_metrics.parquet")
 
 # Works with publication_year outside this range are treated as OAX data errors
 # and excluded from all metrics (but remain in oeuvres.parquet for provenance).
-MIN_PUB_YEAR = 1950
-MAX_PUB_YEAR = 2026
+# MIN_PUB_YEAR/MAX_PUB_YEAR imported from dedup.py -- the single source of truth (2026-09-01:
+# this file used to redefine its own copy, one of four independent redefinitions found in an
+# analysis/-wide audit; consolidated to prevent exactly the kind of drift that caused the
+# 2000/2025 hardcoded-window bug this file's own docstring documents above).
 
 
 def oeuvres_path(sample_n):

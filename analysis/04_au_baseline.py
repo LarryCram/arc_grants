@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import duckdb
 from config.settings import OPENALEX_COMPACT_DIR, OUTPUT_ROOT
+from analysis.utils.dedup import MIN_PUB_YEAR, MAX_PUB_YEAR
 
 ANALYSIS_OUT  = OUTPUT_ROOT / "analysis"
 ANALYSIS_OUT.mkdir(parents=True, exist_ok=True)
@@ -94,7 +95,7 @@ def main():
                 cited_by_count,
                 ROW_NUMBER() OVER (PARTITION BY publication_year ORDER BY cited_by_count DESC) AS rk
             FROM read_parquet('{OUT_AU_WORKS}')
-            WHERE publication_year BETWEEN 2000 AND 2025
+            WHERE publication_year BETWEEN {MIN_PUB_YEAR} AND {MAX_PUB_YEAR}
         )
         SELECT
             year,
@@ -118,7 +119,7 @@ def main():
             COUNT(*) AS n_pubs,
             SUM(cited_by_count) AS total_citations
         FROM read_parquet('{WORK_GLOB}')
-        WHERE publication_year BETWEEN 2000 AND 2025
+        WHERE publication_year BETWEEN {MIN_PUB_YEAR} AND {MAX_PUB_YEAR}
         GROUP BY publication_year
         ORDER BY publication_year
     ) TO '{OUT_WORLD}' (FORMAT PARQUET)
