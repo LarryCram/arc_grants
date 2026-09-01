@@ -63,6 +63,72 @@ def find_candidates(first_name: str, family_name: str, institution_names: list[s
     return candidates
 
 
+def _name_matches(full_name: str, family_tokens: list[str], initial_lower: str) -> bool:
+    """True if full_name's own trailing tokens equal family_tokens (handles simple compound
+    family names, e.g. "van der Berg") and at least one of the remaining, leading tokens
+    starts with initial_lower. Word-boundary-safe (checks whole tokens, not a raw string
+    suffix) -- a naive `.endswith(family)` would wrongly match e.g. family="an" against
+    "...tristan"."""
+    tokens = full_name.lower().replace("-", " ").split()
+    n = len(family_tokens)
+    if len(tokens) <= n or tokens[-n:] != family_tokens:
+        return False
+    return any(t[:1] == initial_lower for t in tokens[:-n] if t)
+
+
+def find_candidates_by_institution(family_name: str, first_initial: str,
+                                    institution_names: list[str]) -> list[dict]:
+    """Institution-first fallback for ARC records whose first_name is a bare initial (or
+    otherwise doesn't match ORCID's own full given-name string) -- find_candidates()'s exact
+    "{first} {family}" match structurally can't reach these, since ORCID accounts almost
+    always carry a real given name, not a bare initial (2026-08-31, user-directed: "I am not
+    sure about avoiding initial-only names... a matching name combined with an institution
+    that is a member of the set of eligible orgs for the candidate's grants is a strong
+    signal" -- most Australian academics active post-2015 have an institution-created ORCID).
+
+    Queries by institution FIRST (narrows to a small candidate set before any name check),
+    then filters to people whose own name/alias family-name tokens match family_name and
+    whose given-name tokens include one starting with first_initial. Same conservatism as
+    every other bulk-DB/institution-search path in this project: no ranking, no "closest
+    match" -- callers should only trust this when it narrows to exactly one person."""
+    if not institution_names:
+        return []
+    con = duckdb.connect()
+    wanted = [i.lower() for i in institution_names]
+    rows = con.execute(
+        """
+        SELECT DISTINCT p.orcid, p.name, p.aliases, p.n_pubmed_works
+        FROM read_parquet(?) a
+        JOIN read_parquet(?) p ON a.orcid = p.orcid
+        WHERE lower(a.org_name) = ANY(?)
+        """,
+        [ORCID_AFFIL, ORCID_PERSONS, wanted],
+    ).fetchall()
+
+    fam_tokens = family_name.lower().replace("-", " ").split()
+    init = first_initial.lower()
+    candidates = []
+    for orcid, name, aliases, n_works in rows:
+        forms = [name] + (list(aliases) if aliases is not None else [])
+        if not any(_name_matches(f, fam_tokens, init) for f in forms if f):
+            continue
+        affil = con.execute(
+            """
+            SELECT kind, org_name, start, "end", role
+            FROM read_parquet(?)
+            WHERE orcid = ?
+            ORDER BY start
+            """,
+            [ORCID_AFFIL, orcid],
+        ).fetchall()
+        matched = [a for a in affil if a[1] and a[1].lower() in set(wanted)]
+        candidates.append({
+            "orcid": orcid, "name": name, "aliases": list(aliases) if aliases is not None else [],
+            "n_pubmed_works": n_works, "affiliations": affil, "matched_institutions": matched,
+        })
+    return candidates
+
+
 def fetch_by_orcid(orcids: list[str]):
     """Bulk KEYED lookup -- every given ORCID's own (name, aliases) from the local snapshot, in
     one query (~0.6s for this project's whole ~18K-ORCID population, confirmed by direct

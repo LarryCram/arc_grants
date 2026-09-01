@@ -20,6 +20,17 @@ under-merge population is now 0. Item 5 has since been worked and closed too —
 was independently driven to UNRESOLVED=0 by later, more thorough sessions, so nothing from
 it could still be unaddressed.
 
+**2026-09-01 resequencing**: former #9 (HDBSCAN vs DBSCAN comparison) dropped outright — user
+decision, DBSCAN is good enough, not worth the comparison effort. Former #10 ("multi-pile,
+2+ confirmed" bucket spot-check) folded into #9/piling-gaps (now #9 below) — same
+investigation, no reason to track separately. Former #19 (audit `analysis/` for stale
+hardcoded literals) moved up to #6 — user's own call, agreed: it's cheap, fully decoupled
+from everything else on this list, and the one bug it already found (`03_annual_metrics.py`'s
+hardcoded 2000/2025 window) was a real, silent, substantial data-loss bug, so there's a real
+chance another one is sitting undetected while other work builds on top of it. Everything from
+former #11 onward renumbered down accordingly (net: two items dropped/merged, one moved up,
+final count 19).
+
 This file lives in `docs/` (moved here from a local Claude Code plan file, which isn't
 version-controlled or shared across machines) so it persists as a real, checked-in project
 artifact rather than session-local state.
@@ -27,9 +38,9 @@ artifact rather than session-local state.
 ## Recommended sequence
 
 Fast, low-risk cleanups first (they close out review threads already in flight and cost
-little), then the structural work that unlocks better automation (merge operator), then the
-oeuvre/piling correctness work, then the roadmap continuation, then the larger/optional items
-last.
+little), then a cheap decoupled audit, then the structural work that unlocks better
+automation (merge operator), then the oeuvre/piling correctness work, then the roadmap
+continuation, then the larger/optional items last.
 
 1. ~~Record the 3 confirmed wrong-merges in `manual_splits.csv`~~ — **DONE, no action was
    needed.** Investigated 2026-08-26: all three (Wang/Duan, Bunda/Lasczik, Curran/Gallagher)
@@ -77,21 +88,24 @@ last.
    370/370 tests passing. One real side-finding: 2 clusters briefly regressed to UNRESOLVED
    purely as an artifact of this session's own merges (broadened FOR-code spread tripping the
    division-mismatch heuristic) — fixed via `manual_confirmed_not_suspicious.csv`.
-6. **Build the `merge()` operator + candidate-pair proposer** (incl. B3 signal) — the structural fix that makes under-merge detectable at all, and de-risks items like #1/#2 above from ever recurring
-7. **Re-derive `ACCEPTABLE_DIVISION_PAIRS` properly** (slow, named-case-first this time — 3 prior attempts failed)
-8. **Close the two known oeuvre/piling gaps**: mega-pool false bridging, within-pile contamination (Hayward-style)
-9. **HDBSCAN vs DBSCAN comparison** (directly feeds #8)
-10. **Spot-check the "multi-pile, 2+ confirmed" bucket growth**
-11. **Build the person-relative implausible-year filter**
-12. **Roadmap step 3**: drop zero-work `author_idx` from `oax_candidates`
-13. **Roadmap step 4**: definitive-evidence gate / `Dossier()` construction by selection
-14. **Plan Part B**: `Dossier()` ARC-story header, `dossier_build_arc.py`/`dossier_build_oax.py` split
-15. (optional/low-value) **Frequency-plurality fallback for `family_name_main`** — set-overlap fix already shipped, this is a residual refinement only
-16. **Extract `author_position`** — purely opportunistic, do only when the OpenAlex snapshot is next re-converted for an unrelated reason
-17. **Work through the `accuracy_checks.md` checklist** (largest, most multi-part, least urgent — a standing backlog, not a single task)
-18. **HEP-affiliation-history candidate-pool pruning for common-name mega-pools** — real, partial win, not built (see its own entry below)
-19. **Audit `analysis/` for other stale hardcoded literals** — found once already (`03_annual_metrics.py`'s hardcoded 2000/2025 window, see its own entry below); `analysis/` hasn't been kept up to date the way `src/` has, so this specific bug is unlikely to be the only one
-20. **Extract `raw_affiliation_string` on the next OpenAlex snapshot conversion, then filter junk-matched authorship institutions** — a real, confirmed OpenAlex-side data-quality bug found via two dossier examples (see its own entry below); needs new data before it's actionable, so opportunistic like the existing `author_position` item, not urgent standalone
+6. ~~Audit `analysis/` for other stale hardcoded literals~~ — **DONE, same session.** Real
+   fixes in `04_au_baseline.py`, `04b_citation_quantiles.py`, `02_accuracy_check.py`,
+   `05_explore.py` (hardcoded year windows narrower than `MIN_PUB_YEAR`/`MAX_PUB_YEAR`, and
+   "academic age" hardcoded against a fixed year rather than computed live); consolidated
+   4 duplicate `MIN_PUB_YEAR`/`MAX_PUB_YEAR` definitions down to 1. 462/462 tests passing.
+7. **Build the `merge()` operator + candidate-pair proposer** (incl. B3 signal) — the structural fix that makes under-merge detectable at all, and de-risks items like #1/#2 above from ever recurring
+8. **Re-derive `ACCEPTABLE_DIVISION_PAIRS` properly** (slow, named-case-first this time — 3 prior attempts failed)
+9. **Close the two known oeuvre/piling gaps**: mega-pool false bridging, within-pile contamination (Hayward-style); includes the "multi-pile, 2+ confirmed" bucket growth spot-check (folded in — same investigation). HDBSCAN comparison dropped — DBSCAN is good enough
+10. **Build the person-relative implausible-year filter**
+11. **Roadmap step 3**: drop zero-work `author_idx` from `oax_candidates`
+12. **Roadmap step 4**: definitive-evidence gate / `Dossier()` construction by selection
+13. **Plan Part B**: `Dossier()` ARC-story header, `dossier_build_arc.py`/`dossier_build_oax.py` split
+14. (optional/low-value) **Frequency-plurality fallback for `family_name_main`** — set-overlap fix already shipped, this is a residual refinement only
+15. **Extract `author_position`** — purely opportunistic, do only when the OpenAlex snapshot is next re-converted for an unrelated reason
+16. **Work through the `accuracy_checks.md` checklist** (largest, most multi-part, least urgent — a standing backlog, not a single task)
+17. **HEP-affiliation-history candidate-pool pruning for common-name mega-pools** — real, partial win, not built (see its own entry below)
+18. **Extract `raw_affiliation_string` on the next OpenAlex snapshot conversion, then filter junk-matched authorship institutions** — a real, confirmed OpenAlex-side data-quality bug found via two dossier examples (see its own entry below); needs new data before it's actionable, so opportunistic like the existing `author_position` item, not urgent standalone
+19. **Consolidate pre-linking ORCID processing into `00b_enrich_orcid.py`; clean out the scattered/duplicated local-ORCID-source code this session's exploration left behind** — high priority, blocks trusting any further ORCID enrichment work until done
 
 ---
 
@@ -222,7 +236,91 @@ division-mismatch heuristic — the same "reviewed forever" loop pattern
 their merge (Jun Li: ORCID + matching co-authored paper; Richard Jones: ORCID, already
 documented). Recorded in `manual_confirmed_not_suspicious.csv`; rerun confirmed 0/0 clean.
 
-### 6 — No standalone `AwardsCIF` merge() operator; under-merge structurally undetectable
+### 6 — Audit `analysis/` for other stale hardcoded literals
+Found 2026-08-31 while building a dossier-page redesign: `analysis/03_annual_metrics.py`
+correctly used `MIN_PUB_YEAR`/`MAX_PUB_YEAR` (1950-2026) for deduping/loading works, but four
+separate SQL blocks inside the same script hardcoded a stale `2000`/`2025` literal window for
+the actual metrics-generation step — silently dropping any real work outside that narrower
+range from `annual_metrics.parquet`, even though `deduped_works` itself already correctly
+included it. Confirmed via a real case (Sarah Legge, `DP0210086` — genuine 1996/1997/1999
+works and a 2026 one were all missing from what the table used to produce). Fixed (all four
+sites now use the same constants), full rerun: 546,076 → 873,887 rows / 22,625 → 22,671
+persons — a real, substantial population-wide effect, not a one-person edge case.
+
+`analysis/` (as opposed to `src/`) hasn't been through the same level of scrutiny this project
+has repeatedly applied to the identity-resolution pipeline this year — this specific bug was
+found by accident (building a chart, not auditing), which means there's no reason to believe
+it's the only one. Needs a systematic sweep of `analysis/*.py` and `analysis/utils/*.py` for
+other hardcoded year ranges, magic thresholds, or other literals that have quietly drifted out
+of sync with the constants/config they should be deriving from — not scoped or started.
+
+**Moved up in sequence 2026-09-01** (was #19) — user's call, agreed: cheap, fully decoupled
+from the merge-operator/piling work below, and the one bug already found here was a real,
+silent, substantial one, so there's a real chance another is lurking while other work
+proceeds. No dependency reason it had to move, just no reason to wait either.
+
+**DONE, same session.** Full grep sweep of every `analysis/*.py`/`analysis/utils/*.py` file
+for suspicious year literals, cross-checked each hit against context (real filter dropping
+data vs. benign display/sample/documentation) before touching anything. Real findings, all
+fixed:
+- **`analysis/04_au_baseline.py`** (`au_annual.parquet`/`world_annual.parquet`): both
+  `publication_year BETWEEN 2000 AND 2025` filters (building the AU-wide and world-wide
+  citation baselines these get compared against) silently dropped any work outside that
+  window — same bug class as the original `03_annual_metrics.py` fix, and now doubly stale
+  since 2026 has already started. Fixed to `MIN_PUB_YEAR`/`MAX_PUB_YEAR`. One of the two
+  occurrences was missed on the first pass (different indentation defeated an exact-string
+  `replace_all`) and caught by a re-sweep after the first round of fixes — a reminder that
+  even a targeted fix needs its own verification pass, not just a first attempt.
+- **`analysis/04b_citation_quantiles.py`** (`citation_quantiles.parquet`, feeds
+  `03_annual_metrics.py`'s `n_highly_cited` backfill): `BETWEEN 1990 AND 2025` was narrower
+  than what `03_annual_metrics.py` itself covers (1950-2026), so `n_highly_cited` silently
+  stayed null for any work before 1990 or in 2026. Fixed to `MIN_PUB_YEAR`/`MAX_PUB_YEAR`.
+- **`analysis/02_accuracy_check.py`**: three separate issues — (1) `BETWEEN 1980 AND 2025` /
+  `generate_series(1980, 2025)` for career year-gap detection, narrower than the project's
+  own 1950-2026 range, fixed; (2) bare `1950`/`2026` literals (matching the real constants by
+  coincidence, not by reference) in the implausible/future-year classification, replaced with
+  the named constants to remove the coincidence; (3) **academic age hardcoded as "2025"** in
+  two places (`avg_academic_age`, `academic_age`) — genuinely stale now, since today's real
+  date is 2026-09-01, meaning every academic-age figure this script printed was already a
+  year off. Fixed to compute the real current year at runtime (`datetime.date.today().year`),
+  not a literal.
+- **`analysis/05_explore.py`**: three issues of the same shape — (1) "H-index distribution at
+  2024" was hardcoded despite the surrounding comment already saying "(most recent year)",
+  contradicting its own stated intent; fixed to actually compute the latest year present in
+  the data; (2) "Academic age (2026 − first_pub_year)" hardcoded, same real-current-year fix
+  as `02_accuracy_check.py`; (3) three `BETWEEN 2000 AND 2024` windows on the ARC-vs-AU-vs-
+  World time-series plot, stale and inconsistent with every other window in the project, now
+  a third different hardcoded range on top of the ones already found — aligned to
+  `MIN_PUB_YEAR`/`MAX_PUB_YEAR`.
+- **Duplicated constant definitions**: `MIN_PUB_YEAR`/`MAX_PUB_YEAR` (1950/2026) were
+  independently redefined in four places — `analysis/utils/dedup.py` (the real source),
+  `03_annual_metrics.py`, `06_analyse_fellowships.py`, and `analysis/tests/test_metrics.py` —
+  all consistent today but a structural drift risk (exactly this bug class, again, the next
+  time one gets bumped and the others don't). Consolidated: the three duplicates now import
+  from `dedup.py` instead of redefining; `test_metrics.py`'s copy was fully unused dead code,
+  removed outright. `04_au_baseline.py`, `04b_citation_quantiles.py`, `02_accuracy_check.py`,
+  and `05_explore.py` all gained a fresh import from `dedup.py` rather than yet another local
+  redefinition.
+- **`06_analyse_fellowships.py`**: one stale line in the module docstring ("academic ages
+  (2025 − first_pub_year)") describing an old calculation method the code no longer uses —
+  the real, current code correctly computes age at `award_year` (already using
+  `MIN_PUB_YEAR`/`MAX_PUB_YEAR` properly throughout its real queries, no bug there) — docstring
+  corrected to match. The `award_year >= 2015` filter on the trajectory plot (line ~168) was
+  checked and confirmed intentional, already documented in CLAUDE.md's own 2026-06-18 session
+  notes — left unchanged.
+
+**Checked and confirmed benign, not touched**: `01_fetch_oeuvres.py`'s `pre2000` count (a pure
+diagnostic count, not a filter — the file's own docstring already says "No year filter"),
+`02_accuracy_check.py`'s `first_pub_year > 2000`/`< 1990` debut thresholds (fixed historical
+markers, not meant to track the current year), sample-year print statements in
+`04_au_baseline.py`/`04b_citation_quantiles.py`/`04c_subfield_cooccurrence_baseline.py`
+(illustrative spot-checks, not filters), and comment-only date references in
+`analysis/utils/dossier.py`/`dossier_build.py`/`07_analyse_ecr_fellowships.py`.
+
+Verified: `.venv/bin/python -m pytest analysis/tests/ tests/ -q` — 462/462 passing throughout,
+including after the missed-occurrence catch.
+
+### 7 — No standalone `AwardsCIF` merge() operator; under-merge structurally undetectable
 `awards_cif.py` has a low-level `_merge_awards_cifs()` primitive but every call site fires
 from one fixed, early-pipeline sequence before OAX candidates/oeuvre/piling exist —
 nothing downstream can invoke a merge based on evidence discovered later. Needs: a real
@@ -233,7 +331,7 @@ candidates / shared coauthors / etc.) that specifically includes the cross-grant
 + same-admin_org check) — folded in here rather than as a separate line item since it
 would duplicate logic the general operator needs anyway.
 
-### 7 — `ACCEPTABLE_DIVISION_PAIRS` re-derivation
+### 8 — `ACCEPTABLE_DIVISION_PAIRS` re-derivation
 Needed because `division_mismatch_for2020()` was switched to all-codes divisions (not
 just primary), so the existing 41-pair whitelist is now tested against a broader
 population than it was calibrated for. Three re-derivation attempts each surfaced a new
@@ -244,68 +342,74 @@ for manual review (safe direction) rather than under-flags. The original derivat
 was never persisted, so there's no way to diff against it directly. Needs a slower pass
 grounded in real, named-case validation from the start, not aggregate statistics alone.
 
-### 8 — Group-level ACIF-membership gate: two remaining real gaps
+### 9 — Group-level ACIF-membership gate: two remaining real gaps
 Design done, channeling + persistence + `Dossier()` wiring done (2026-08-18). Two
 confirmed, unresolved gaps:
 - **Mega-pool false bridging**: in large candidate pools (WeiWang/MohammadIslam scale),
   DBSCAN at the eps needed to unify a genuinely coherent career can also merge two
   confirmed-different people via an indirect chain through *other* candidates in the same
-  pool — even when the two aren't directly similar. HDBSCAN identified as the likely fix
-  (see #9), not yet tried.
+  pool — even when the two aren't directly similar. An HDBSCAN comparison was considered as a
+  possible fix but **dropped 2026-09-01 (user decision)** — DBSCAN is good enough; address
+  this instead via candidate-pool pruning shrinking the pool before piling ever sees it (see
+  the oeuvre-QA plan's item 2, `write-out-the-full-floofy-starfish.md`).
 - **Within-pile contamination**: a nominally "correct" dominant pile can still be
   majority-wrong internally (Hayward's main pile was only 59% the ORCID-confirmed correct
   candidate) — piling's own clustering doesn't guarantee purity within a pile, and the
   pile-to-ACIF channeling step wasn't confirmed to catch this. Not resolved.
+- **"Multi-pile, 2+ confirmed" bucket growth** (folded in 2026-09-01, formerly tracked
+  separately): the Stage 3 ORCID/small-pool gates roughly doubled this bucket population-wide
+  (ECR cohort: 1,133 → 1,413 → 2,094 across two rounds of gate changes). Plausibly genuine
+  fragment-splitting now visible because more real data reaches piling, but could also be
+  over-permissive corroboration letting wrong piles through — the same failure mode
+  subfield-level matching was originally adopted to prevent. Not checked either way — the
+  same population-scale measurement pass that addresses the two gaps above should cover this.
 
-### 9 — HDBSCAN vs DBSCAN systematic comparison
-Requested 2026-08-18, not yet done — user-deferred until other in-flight work finished.
-Test `sklearn.cluster.HDBSCAN` (already available, no new dependency) against the same
-cross-section used to validate DBSCAN (Hessel for "does it still unify a clean career",
-WeiWang/MohammadIslam for "does it stop mega-pool false bridging").
+Approach: measure population scale first (none of the three above is currently measured
+beyond 1–2 named cases), then fix — consistent with this project's own standing rule against
+building before profiling.
 
-### 10 — "Multi-pile, 2+ confirmed" bucket growth spot-check
-The Stage 3 ORCID/small-pool gates roughly doubled this bucket population-wide (ECR
-cohort: 1,133 → 1,413 → 2,094 across two rounds of gate changes). Plausibly genuine
-fragment-splitting now visible because more real data reaches piling, but could also be
-over-permissive corroboration letting wrong piles through — the same failure mode
-subfield-level matching was originally adopted to prevent. Not checked either way.
-
-### 11 — Person-relative implausible-year filter
+### 10 — Person-relative implausible-year filter
 Stage 1's `implausible_year` check only catches globally-implausible years (outside
 1950–2026) — it can't catch a work whose year is merely impossible *for this specific
 person* (e.g. Adam Hulme's contaminated 1960/1971/1985 works sit comfortably inside the
 global range). Flagged as possibly as effective as field-based filtering, and safer (a
 wrong-decade work is a cleaner signal than a wrong-field one). Not implemented.
 
-### 12 — Roadmap step 3: drop zero-work `author_idx` from `oax_candidates`
+### 11 — Roadmap step 3: drop zero-work `author_idx` from `oax_candidates`
 Named directly in the `oeuvre_build.py` section as not built this pass. Prunes candidates
 that never contributed any oeuvre work.
 
-### 13 — Roadmap step 4: definitive-evidence gate / `Dossier()` construction by selection
+### 12 — Roadmap step 4: definitive-evidence gate / `Dossier()` construction by selection
 Named directly alongside step 3 as not built this pass — the actual selection mechanism
 that turns a scored/piled candidate set into a `Dossier()`.
 
-### 14 — Plan Part B: `Dossier()` ARC-story header + `dossier_build_arc.py`/`dossier_build_oax.py` split
+### 13 — Plan Part B: `Dossier()` ARC-story header + `dossier_build_arc.py`/`dossier_build_oax.py` split
 Part A (verification infrastructure: `01a_diagnose.py`'s structured result type,
 `--sample-4u`, `cluster_detail_data()`/`cluster_detail_text()` relocation) is done. Part B
 was not started in the 2026-08-24 session; plan file
 `/home/lc/.claude/plans/how-do-yo-know-linked-diffie.md` is still current for it.
 
-### 15 — `family_name_main` frequency/plurality fallback (residual, optional)
+User's own characterization, 2026-09-01: "the whole `Dossier()` build is a mess" — beyond
+just Part B's own scope (the arc/oax split + ARC-story header), this likely also covers
+`Dossier.works` currently reading `analysis/01_fetch_oeuvres.py`'s independent, unfiltered
+pipeline rather than anything the candidate/work cleaning work produces (see the oeuvre-QA
+plan's item 10, `write-out-the-full-floofy-starfish.md`) — not scoped further than that yet.
+
+### 14 — `family_name_main` frequency/plurality fallback (residual, optional)
 The set-overlap blocking fix (option 2) already shipped 2026-08-25 and is confirmed
 working. Option 1 — picking `family_name_main` itself by frequency/plurality rather than
 raw string length — was never built. Same class of bug already independently fixed in the
 two ARC-internal Python grouping functions. Low priority: the core over-merge/under-merge
 risk this was protecting against is already addressed by the shipped fix.
 
-### 16 — Extract `author_position` on next OpenAlex snapshot conversion
+### 15 — Extract `author_position` on next OpenAlex snapshot conversion
 Check the raw native snapshot carries the field, re-extract as an explicit persisted
 column (never inferred from row order — found unreliable both ways in this project's own
 investigation, see `docs/author_position_investigation.md`), then verify against real
 known works before trusting it downstream. Not urgent standalone — do opportunistically
 next time the snapshot conversion runs for any other reason.
 
-### 17 — `accuracy_checks.md` checklist
+### 16 — `accuracy_checks.md` checklist
 Kept as a live TODO (2026-08-25), not parked; none of its items are built yet. Covers: a
 repair-reporting mechanism for any OAX author id mapped to 2+ ARC persons; earliest-year-
 on-duplicate-title logic; a flag/hide rule for implausible 2026+ publication years; a
@@ -315,7 +419,7 @@ year-continuity check; and an ECR/MCR/senior academic-age-at-award check keyed t
 not-yet-fully-compiled fellowship-scheme-to-career-stage list, with real undefined
 exceptions (career breaks).
 
-### 18 — HEP-affiliation-history candidate-pool pruning for common-name mega-pools
+### 17 — HEP-affiliation-history candidate-pool pruning for common-name mega-pools
 Found 2026-08-27 investigating why piling kept crashing on a handful of common-name
 mega-pool ACIFs (`LP0777033_WeiZhang` 67,475 Stage-3 survivor works, `DE130100488_YanYan`
 80,579, `DP0342641_JunWang` 69,354, `DP120102205_XiaodongLi` 25,635) — see CLAUDE.md's
@@ -341,7 +445,7 @@ took ~50-60s per cluster scanning the full 119M-row OpenAlex authors table — n
 proper one-time bulk join, not N ad hoc queries), (3) accept that this only helps the
 foreign-noise-contamination shape of mega-pool (confirmed real for WeiZhang/YanYan-style
 cases) and won't materially shrink the same-country-common-name shape (XiaodongLi-style) —
-the `MAX_POOL_SIZE` cap (or a proper merge-operator/candidate-pool-pruning fix, see item 6)
+the `MAX_POOL_SIZE` cap (or a proper merge-operator/candidate-pool-pruning fix, see item 7)
 still does the real work for those.
 
 **A third, different failure mode noted but not pursued** (user's own recollection): a real,
@@ -352,25 +456,7 @@ ARC-funded people with implausibly low total work-count, then chase down their r
 `author_idx` from there as a manual follow-up, the same evidence-first pattern as the `4u`
 review work.
 
-### 19 — Audit `analysis/` for other stale hardcoded literals
-Found 2026-08-31 while building a dossier-page redesign: `analysis/03_annual_metrics.py`
-correctly used `MIN_PUB_YEAR`/`MAX_PUB_YEAR` (1950-2026) for deduping/loading works, but four
-separate SQL blocks inside the same script hardcoded a stale `2000`/`2025` literal window for
-the actual metrics-generation step — silently dropping any real work outside that narrower
-range from `annual_metrics.parquet`, even though `deduped_works` itself already correctly
-included it. Confirmed via a real case (Sarah Legge, `DP0210086` — genuine 1996/1997/1999
-works and a 2026 one were all missing from what the table used to produce). Fixed (all four
-sites now use the same constants), full rerun: 546,076 → 873,887 rows / 22,625 → 22,671
-persons — a real, substantial population-wide effect, not a one-person edge case.
-
-`analysis/` (as opposed to `src/`) hasn't been through the same level of scrutiny this project
-has repeatedly applied to the identity-resolution pipeline this year — this specific bug was
-found by accident (building a chart, not auditing), which means there's no reason to believe
-it's the only one. Needs a systematic sweep of `analysis/*.py` and `analysis/utils/*.py` for
-other hardcoded year ranges, magic thresholds, or other literals that have quietly drifted out
-of sync with the constants/config they should be deriving from — not scoped or started.
-
-### 20 — Extract `raw_affiliation_string`, filter junk-matched authorship institutions
+### 18 — Extract `raw_affiliation_string`, filter junk-matched authorship institutions
 Found 2026-08-31 investigating a real, recurring anomaly surfaced by the redesigned dossier
 page: "Schlumberger (Ireland)" (an Irish oilfield-services company) appeared in the oeuvre of
 two unrelated Charles Darwin University wildlife ecologists (Sarah Legge, Christine
@@ -424,7 +510,7 @@ affiliation — so this can't be filtered against current data at all.
 
 **Two-part fix, not yet started**: (1) add `raw_affiliation_string` to the fields pulled on
 the next OpenAlex snapshot re-conversion — same "opportunistic, do it next time the snapshot
-is touched for another reason" framing as the existing `author_position` item (#16); (2) once
+is touched for another reason" framing as the existing `author_position` item (#15); (2) once
 that data exists, add a Stage-1-style exclusion (alongside the existing `corrupt_authorship`
 category) dropping an *authorship row's* institution (not necessarily the whole work) whenever
 `raw_affiliation_string` matches a junk pattern — candidate regex, derived from the one
@@ -433,6 +519,89 @@ validated against a real corpus: `^.{0,5}corresponding\s+author\b` (case-insensi
 leading `.{0,5}` catches garbled footnote-marker prefixes like the "K"), or contains `email:`
 / a bare email-address pattern with little other text, or "To whom correspondence should be
 addressed."
+
+### 19 — Consolidate pre-linking ORCID processing into `00b_enrich_orcid.py`; clean out the scattered local-ORCID-source mess
+Found 2026-09-01 investigating the NO_ORCID population (4,895 ACIFs) via `orcid.db` — the
+investigation itself surfaced a real code-organization problem, not just a data finding.
+User's framing, taken as the design brief for this item: `00b_enrich_orcid.py` is *the* point
+that should determine everything this project is going to know about ORCID records
+**before** OAX linking — so it should be refactored to a clear, simple plan that does what
+this session ended up doing by hand, rather than leaving that logic scattered across ad hoc
+scripts. Any *post*-link ORCID work (using OAX-side evidence) is explicitly out of scope for
+`00b_` — a separate, later concern, not to be folded in here.
+
+**What's actually scattered right now, concretely:**
+- `src/utils/orcid_bulk_lookup.py` already existed, querying `orcid_persons.parquet`/
+  `orcid_affiliations.parquet` — confirmed this session to be a byte-faithful DuckDB-friendly
+  conversion of `records_hq.json.gz` (see `/home/lc/s/orcid/convert_to_parquet.py`), covering
+  the ~4.8M-person "HQ" subset (ROR-grounded employer/education, or a PubMed-indexed
+  publication) with full aliases and dated employment/education history.
+- This session's own `_search_bulk_db()`/`find_candidates_by_institution()` additions to
+  `00b_enrich_orcid.py`/`orcid_bulk_lookup.py` (mid-session, before being told to stop) are
+  scoped *only* to that same ~4.8M HQ parquet source.
+- Separately, this session discovered and queried `orcid.db` (the Zenodo release's sqlite
+  file, `/home/lc/s/orcid/orcid.db`) directly via ad hoc scratch scripts (DuckDB `ATTACH ...
+  TYPE sqlite`) — a genuinely different, broader (17.15M person rows) but shallower (one
+  name, one current `ror`, no aliases, no dated affiliation history) source, not touched by
+  `orcid_bulk_lookup.py` at all.
+- Also queried `records_hq.json.gz` directly via raw `gzip`/`json` in more scratch scripts
+  (e.g. to pull Simon Kelly's and Brian Wilson's dated employment record) — duplicating
+  exactly what `orcid_bulk_lookup.py`'s existing `find_candidates()` already returns via the
+  parquet form of the identical data, just reached a different, uncommitted way.
+- Every population-scale number reported this session (71,612 distinct name-candidates
+  across the 4,895; the 2,882/4,895 name-match coverage; the 299 clean HEP-corroborated
+  hits; the HEP-code → institution-name crosswalk join) was computed in throwaway scratch
+  scripts against `orcid.db`, not as real, tested, reusable module code anywhere.
+
+**The refactor, as directed:**
+1. Convert `orcid.db` to parquet too (a **preprocessing** step, not a "util" — see the
+   file-placement principle below), the same way `convert_to_parquet.py` already did for
+   `records_hq.json.gz`. User's explicit reasoning: once both sources are parquet, DuckDB
+   query speed is no longer a reason to hit `orcid.db` live via the sqlite attach — it only
+   makes sense to keep both sources instead of one wherever their real, different tradeoffs
+   (broader-but-shallower vs. narrower-but-richer) actually matter to a specific lookup.
+2. Decide, explicitly, which source (or combination) each piece of `00b_enrich_orcid.py`'s
+   logic should use — not leave it implicit or split across whichever script happened to
+   write it: broad name+institution discovery probably wants the wider `orcid.db` population
+   (catches cases like the institution-issued, uncurated accounts found this session — Xu Jia
+   Wang, Jianxin Zhao, etc. — that the narrower HQ subset may or may not contain); the
+   dated-employment/role corroboration step (the thing that turned "ambiguous" into "clearly
+   this one" for Simon Kelly and Brian Wilson) wants the HQ parquet's `orcid_affiliations`
+   table, keyed by the specific candidate ORCID once one is already in hand — not a second,
+   duplicate raw-JSON read.
+3. Rebuild `00b_enrich_orcid.py`'s pipeline around that decision as one clear, ordered plan
+   (something like: raw ARC orcid → live-API-cache hits already on file → bulk-DB name match
+   → institution-overlap tie-break using the ACIF's own HEP list (already crosswalked via
+   `admin_orgs.csv`) → dated-employment corroboration by ORCID for anything still
+   ambiguous), replacing the current mix of live-API-first logic, the narrowly-scoped bulk-DB
+   addition, and everything this session did instead in scratch scripts.
+4. Promote the real, working pieces of this session's scratch exploration into actual
+   `src`/`src/utils` code once step 3's plan is settled — the HEP-code-to-institution-name
+   join, the name-explode-and-match query, the institution-overlap tie-break, the
+   ORCID-keyed employment lookup — rather than leaving them as one-off throwaway scripts that
+   would need re-deriving from scratch next time.
+5. Leave `widen_names_with_orcid_bulk_db()` (`awards_cif.py` — widens name *forms* for
+   clusters that already have a resolved ORCID) alone unless step 3's plan naturally
+   subsumes it; it's a different, narrower, already-working job from ORCID *discovery*.
+
+**File-placement principle to apply throughout** (the user's own framing, to settle the
+`src/` vs `src/utils/` question this session blurred): an API lookup/cache wrapper
+(`orcid_client.py`-style — stateless, reusable, called from multiple places, produces no
+persisted checkpoint of its own) is a genuine `src/utils/` **util**. A one-time or
+occasional conversion of a raw external dump (a `.json.gz`, a `.db`) into this project's own
+clean parquet form is a **preprocessor**, not a util — it belongs alongside this project's
+other numbered `src/NN_*.py` preprocessing stages (in spirit like `00_extract_arc.py`/
+`02_prepare_oax.py`), since it produces a persisted, checkable artifact the rest of the
+pipeline depends on, the same way those do. A stateless query *function* that only ever
+reads an already-prepared local parquet/table (no raw-source parsing, no network call) sits
+in the middle and is reasonably a util either way — the user was explicit that this specific
+distinction (SQL-against-already-local-data) wasn't the confusing part; the conversion step
+was.
+
+Not yet started — this is a design/cleanup item, no code changes made toward it yet beyond
+the (now-to-be-reconciled) mid-session `_search_bulk_db()`/`find_candidates_by_institution()`
+additions and the `fetch_record()` None-key guard (both still sitting in the working tree,
+uncommitted).
 
 ---
 

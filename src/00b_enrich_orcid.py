@@ -9,8 +9,18 @@ Two DiskCache stores (DISKCACHE_DIR/):
 
 For each distinct (first_name, family_name) pair in scope:
   - Has ARC ORCID  → fetch /record into record_cache (no search)
-  - No ORCID       → search API → resolve AU candidates → store in search_cache
+  - No ORCID       → local bulk ORCID snapshot first, live API only as fallback →
+                     resolve AU candidates → store in search_cache
                      (also fetches /record for each candidate → record_cache)
+
+2026-08-31: the local ORCID bulk snapshot (src/utils/orcid_bulk_lookup.py, ~4.8M records, no
+rate limit, no daily quota) is now tried FIRST for every no-ORCID search (_search_bulk_db(),
+called from _search_orcid()) -- it supersedes the live ORCID Public API as the primary
+discovery mechanism, not just a source for widening name forms of already-resolved ORCIDs
+(that's a separate, older use -- awards_cif.py::widen_names_with_orcid_bulk_db()). The live API
+is now the fallback for whatever the bulk snapshot's own real, known coverage gaps miss (a
+frozen 2024 crawl -- e.g. a real case this project found where a person's genuine ORCID simply
+wasn't in the snapshot at all), not the first thing tried.
 
 Both caches are checked before any API call; re-runs make zero network calls
 unless forced.
@@ -18,13 +28,18 @@ unless forced.
 Output:
     processed/orcid_enrichment.parquet  — written from search_cache
     columns: first_name, family_name, name_key, orcid, confidence, num_found,
-             works_count, external_ids, au_candidates
+             works_count, external_ids, au_candidates, source
     confidence: 'high' | 'au_match' | 'low' | 'not_found' | 'too_common'
                 'wildcard_high' | 'wildcard_au_match'
+                ('high'/'au_match' can now come from either the bulk snapshot or the live API --
+                see `source` to tell which; the semantics of each confidence level are identical
+                either way, see _search_bulk_db()'s own docstring for why.)
     works_count:   int — work groups for chosen orcid (0 if none chosen)
     external_ids:  JSON string dict — Scopus/ResearcherID etc. for chosen orcid
     au_candidates: JSON string list of {orcid, works_count, external_ids} for all
                    AU-qualifying candidates
+    source:        'bulk_db_institution' | 'bulk_db_name_unique' | 'live_api' — which mechanism
+                   produced this row (rows written before 2026-08-31 are all 'live_api')
 
 Flags:
     --dry-run              Print counts, make no API calls
@@ -49,6 +64,8 @@ from src.utils.name_diacritic_variants import strip_diacriticals
 from src.utils.io import setup_stdout_utf8
 from src.utils.orcid_cache import orcid_addresses, orcid_external_ids, orcid_works_count
 from src.utils.era_journals import load_era_lookup, orcid_for_codes
+from src.utils.orcid_bulk_lookup import find_candidates as bulk_find_candidates
+from src.utils.orcid_bulk_lookup import find_candidates_by_institution as bulk_find_by_institution
 from src.utils.orcid_client import get_access_token, ORCID_CLIENT_ID, default_cache
 
 PROJECT_DATA = Path(__file__).resolve().parents[1] / "data_persisted"
@@ -127,6 +144,72 @@ def _query_expanded(q: str) -> dict | None:
         return None
 
 
+def _search_bulk_db(first: str, family: str, institution_names: list[str],
+                    record_cache: diskcache.Cache, for_cache: diskcache.Cache,
+                    era_lookup: dict) -> dict | None:
+    """Try the local ORCID bulk snapshot (orcid_bulk_lookup.find_candidates(), ~4.8M records,
+    no rate limit, no daily quota) before ever reaching for the live ORCID Public API search.
+    Supersedes the live API as the PRIMARY discovery mechanism -- confirmed this session that
+    the bulk snapshot is already capable of exactly this name+institution matching (it was used
+    successfully, ad hoc, for individual cases during the 4u under-merge review, e.g.
+    DP160100119_JianZhao, LP160100828_RobertEvans) but had never been wired into the bulk,
+    population-scale NO_ORCID search this function performs -- only into
+    widen_names_with_orcid_bulk_db() (awards_cif.py), which only widens name forms for clusters
+    that ALREADY have a resolved ORCID, never discovers a new one.
+
+    Returns a result dict in the same shape _resolve_results()/_search_by_institution() produce,
+    or None if the bulk snapshot doesn't yield a confident answer -- callers should then fall
+    through to the existing live-API search, not treat None as a final answer (the snapshot is a
+    frozen 2024 crawl with real, known coverage gaps -- e.g. Yang Song's real ORCID wasn't in it
+    at all in an earlier session).
+
+    Confidence levels are the EXISTING, already-trusted vocabulary
+    (_apply_enriched_orcids()/apply_enriched_orcids() already promote 'high'/'au_match'
+    unchanged) -- deliberately not inventing a new label, since the semantics line up exactly:
+      - exactly one bulk-snapshot candidate has a matched_institutions hit -> 'au_match'
+        (same meaning as the live path's "single AU-country-address candidate", just
+        institution-corroborated rather than country-corroborated -- at least as strong).
+      - no institution corroboration, but the name is globally unique in the bulk snapshot
+        (exactly one candidate at all) -> 'high' (same meaning as the live path's "num_found==1
+        globally", which is *also* not AU-filtered -- see _resolve_results()).
+    Multiple institution-matched candidates, or multiple candidates with no institution
+    corroboration, return None -- same conservatism as _search_by_institution(): a genuine
+    ambiguity here should defer to the existing broader mechanism, not guess.
+    """
+    candidates = bulk_find_candidates(first, family, institution_names or None)
+    if not candidates:
+        return None
+
+    inst_matched = [c for c in candidates if c["matched_institutions"]]
+    if len(inst_matched) == 1:
+        orcid = inst_matched[0]["orcid"]
+        rec = fetch_record(orcid, record_cache, for_cache, era_lookup)
+        meta = _candidate_meta(orcid, rec)
+        return {
+            "orcid": orcid, "confidence": "au_match", "num_found": len(candidates),
+            "works_count":   meta["works_count"],
+            "external_ids":  json.dumps(meta["external_ids"]),
+            "au_candidates": json.dumps([meta]),
+            "source":        "bulk_db_institution",
+        }
+    if inst_matched:
+        return None  # 2+ institution-matched candidates -- genuine ambiguity, defer
+
+    if len(candidates) == 1:
+        orcid = candidates[0]["orcid"]
+        rec = fetch_record(orcid, record_cache, for_cache, era_lookup)
+        meta = _candidate_meta(orcid, rec)
+        return {
+            "orcid": orcid, "confidence": "high", "num_found": 1,
+            "works_count":   meta["works_count"],
+            "external_ids":  json.dumps(meta["external_ids"]),
+            "au_candidates": json.dumps([meta]),
+            "source":        "bulk_db_name_unique",
+        }
+    return None  # 2+ candidates, no institution corroboration -- defer to the live API's own
+                 # country-filter logic rather than guess among them
+
+
 def _search_by_institution(first: str, family: str, institution_names: list[str],
                            record_cache: diskcache.Cache, for_cache: diskcache.Cache,
                            era_lookup: dict) -> dict | None:
@@ -177,6 +260,12 @@ def fetch_record(orcid: str, record_cache: diskcache.Cache,
     If for_cache and era_lookup are supplied, also derives and caches FOR codes
     from the record's works — no extra API call needed.
     """
+    if not orcid:
+        # Guard against a caller passing a missing/blank orcid (e.g. a malformed API result
+        # dict with no "orcid-id" key) -- writing record_cache[None] here would silently poison
+        # the cache for every future run's "derive FOR codes for cached records" pre-pass, which
+        # iterates every record_cache key expecting it to be a real, re-readable ORCID.
+        return {"_error": "no_orcid"}
     if not force and orcid in record_cache:
         data = record_cache[orcid]
     else:
@@ -275,6 +364,13 @@ def _search_orcid(first: str, family: str,
                   force: bool = False) -> dict:
     """Search for a name; return resolved dict. Uses search_cache unless force=True.
 
+    2026-08-31: tries the local ORCID bulk snapshot first (_search_bulk_db()) -- no rate limit,
+    no daily quota, already proven capable of this exact search during manual review, but never
+    before wired in as the primary bulk-population mechanism. Only when the bulk snapshot has no
+    confident answer does this fall through to the live ORCID Public API (institution-targeted,
+    then plain, then wildcard) exactly as before -- the live API is now the fallback for the
+    bulk snapshot's own known coverage gaps, not the first thing tried.
+
     2026-08-21: tries expanded-search with an affiliation-org-name filter first (one attempt per
     distinct institution this name pair's own ARC grants were administered at -- a person can
     hold grants at 2+ institutions). This is what actually rescues a common name from the
@@ -285,6 +381,12 @@ def _search_orcid(first: str, family: str,
     key = (first, family)
     if not force and key in search_cache:
         return search_cache[key]
+
+    bulk_result = _search_bulk_db(first, family, institution_names or [],
+                                  record_cache, for_cache, era_lookup)
+    if bulk_result is not None:
+        search_cache[key] = bulk_result
+        return bulk_result
 
     if institution_names:
         inst_result = _search_by_institution(first, family, institution_names,
@@ -470,6 +572,10 @@ def _write_enrichment(search_cache: diskcache.Cache, no_orcid_pairs: pd.DataFram
             "works_count":   result.get("works_count", 0),
             "external_ids":  result.get("external_ids", "{}"),
             "au_candidates": result.get("au_candidates", "[]"),
+            # provenance -- which mechanism produced this result. Existing (pre-2026-08-31)
+            # result dicts never set this key, so default to "live_api" rather than leaving it
+            # null for every row written before the bulk-DB search existed.
+            "source":        result.get("source", "live_api"),
         })
     out = PROCESSED_DATA / "orcid_enrichment.parquet"
     pd.DataFrame(rows).to_parquet(out, index=False)
