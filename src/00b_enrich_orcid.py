@@ -13,14 +13,21 @@ For each distinct (first_name, family_name) pair in scope:
                      resolve AU candidates → store in search_cache
                      (also fetches /record for each candidate → record_cache)
 
-2026-08-31: the local ORCID bulk snapshot (src/utils/orcid_bulk_lookup.py, ~4.8M records, no
-rate limit, no daily quota) is now tried FIRST for every no-ORCID search (_search_bulk_db(),
-called from _search_orcid()) -- it supersedes the live ORCID Public API as the primary
-discovery mechanism, not just a source for widening name forms of already-resolved ORCIDs
-(that's a separate, older use -- awards_cif.py::widen_names_with_orcid_bulk_db()). The live API
-is now the fallback for whatever the bulk snapshot's own real, known coverage gaps miss (a
-frozen 2024 crawl -- e.g. a real case this project found where a person's genuine ORCID simply
+2026-08-31: the local ORCID bulk snapshot is now tried FIRST for every no-ORCID search
+(_search_bulk_db(), called from _search_orcid()) -- it supersedes the live ORCID Public API as
+the primary discovery mechanism, not just a source for widening name forms of already-resolved
+ORCIDs (that's a separate, older use -- awards_cif.py::widen_names_with_orcid_bulk_db()). The
+live API is now the fallback for whatever the bulk snapshot's own real, known coverage gaps miss
+(a frozen crawl -- e.g. a real case this project found where a person's genuine ORCID simply
 wasn't in the snapshot at all), not the first thing tried.
+
+2026-09-02: rewired onto src/utils/orcid_processor.py's OrcidProcessor.discover() (backed by
+orcid_bulk.parquet, the FULL 17.15M-person Zenodo population, matching keys computed with this
+project's own HumanNameParser via orcid_processor_arc_adapter.arc_name_normalizer) --
+supersedes the older orcid_bulk_lookup.py/orcid_persons.parquet path, which only covered the
+narrower ~4.8M "HQ" subset with a bare, project-agnostic name parse. See
+docs/pipeline_todo.md #19 for the full before/after account; orcid_bulk_lookup.py itself is
+retired, not just superseded in this one call site.
 
 Both caches are checked before any API call; re-runs make zero network calls
 unless forced.
@@ -64,8 +71,8 @@ from src.utils.name_diacritic_variants import strip_diacriticals
 from src.utils.io import setup_stdout_utf8
 from src.utils.orcid_cache import orcid_addresses, orcid_external_ids, orcid_works_count
 from src.utils.era_journals import load_era_lookup, orcid_for_codes
-from src.utils.orcid_bulk_lookup import find_candidates as bulk_find_candidates
-from src.utils.orcid_bulk_lookup import find_candidates_by_institution as bulk_find_by_institution
+from src.utils.orcid_processor import OrcidProcessor
+from src.utils.orcid_processor_arc_adapter import arc_name_normalizer, institution_matched_candidates
 from src.utils.orcid_client import get_access_token, ORCID_CLIENT_ID, default_cache
 
 PROJECT_DATA = Path(__file__).resolve().parents[1] / "data_persisted"
@@ -144,30 +151,46 @@ def _query_expanded(q: str) -> dict | None:
         return None
 
 
+_ORCID_PROC: OrcidProcessor | None = None
+
+
+def _get_orcid_proc() -> OrcidProcessor:
+    """Lazy module-level singleton -- one OrcidProcessor (one duckdb connection) reused across
+    every name pair a run processes, rather than opening a fresh connection per call. Built with
+    this project's own arc_name_normalizer (HumanNameParser-backed), not OrcidProcessor's bare
+    standalone default, so ORCID-side matching keys use the exact same NFC/NFKC/zero-width/
+    postnominal-strip/diacritic-widening hardening as every other ARC-side name comparison."""
+    global _ORCID_PROC
+    if _ORCID_PROC is None:
+        _ORCID_PROC = OrcidProcessor(name_normalizer=arc_name_normalizer)
+    return _ORCID_PROC
+
+
 def _search_bulk_db(first: str, family: str, institution_names: list[str],
                     record_cache: diskcache.Cache, for_cache: diskcache.Cache,
                     era_lookup: dict) -> dict | None:
-    """Try the local ORCID bulk snapshot (orcid_bulk_lookup.find_candidates(), ~4.8M records,
-    no rate limit, no daily quota) before ever reaching for the live ORCID Public API search.
-    Supersedes the live API as the PRIMARY discovery mechanism -- confirmed this session that
-    the bulk snapshot is already capable of exactly this name+institution matching (it was used
-    successfully, ad hoc, for individual cases during the 4u under-merge review, e.g.
-    DP160100119_JianZhao, LP160100828_RobertEvans) but had never been wired into the bulk,
-    population-scale NO_ORCID search this function performs -- only into
-    widen_names_with_orcid_bulk_db() (awards_cif.py), which only widens name forms for clusters
-    that ALREADY have a resolved ORCID, never discovers a new one.
+    """Try the local ORCID bulk snapshot (OrcidProcessor.discover(), backed by
+    orcid_bulk.parquet -- the full 17.15M-person Zenodo population, no rate limit, no daily
+    quota) before ever reaching for the live ORCID Public API search. Supersedes the live API as
+    the PRIMARY discovery mechanism -- confirmed this session that the bulk snapshot is already
+    capable of exactly this name+institution matching (it was used successfully, ad hoc, for
+    individual cases during the 4u under-merge review, e.g. DP160100119_JianZhao,
+    LP160100828_RobertEvans) but had never been wired into the bulk, population-scale NO_ORCID
+    search this function performs -- only into widen_names_with_orcid_bulk_db() (awards_cif.py),
+    which only widens name forms for clusters that ALREADY have a resolved ORCID, never
+    discovers a new one.
 
     Returns a result dict in the same shape _resolve_results()/_search_by_institution() produce,
     or None if the bulk snapshot doesn't yield a confident answer -- callers should then fall
     through to the existing live-API search, not treat None as a final answer (the snapshot is a
-    frozen 2024 crawl with real, known coverage gaps -- e.g. Yang Song's real ORCID wasn't in it
+    frozen crawl with real, known coverage gaps -- e.g. Yang Song's real ORCID wasn't in it
     at all in an earlier session).
 
     Confidence levels are the EXISTING, already-trusted vocabulary
     (_apply_enriched_orcids()/apply_enriched_orcids() already promote 'high'/'au_match'
     unchanged) -- deliberately not inventing a new label, since the semantics line up exactly:
-      - exactly one bulk-snapshot candidate has a matched_institutions hit -> 'au_match'
-        (same meaning as the live path's "single AU-country-address candidate", just
+      - exactly one bulk-snapshot candidate has an institution_matched_candidates() hit ->
+        'au_match' (same meaning as the live path's "single AU-country-address candidate", just
         institution-corroborated rather than country-corroborated -- at least as strong).
       - no institution corroboration, but the name is globally unique in the bulk snapshot
         (exactly one candidate at all) -> 'high' (same meaning as the live path's "num_found==1
@@ -176,11 +199,11 @@ def _search_bulk_db(first: str, family: str, institution_names: list[str],
     corroboration, return None -- same conservatism as _search_by_institution(): a genuine
     ambiguity here should defer to the existing broader mechanism, not guess.
     """
-    candidates = bulk_find_candidates(first, family, institution_names or None)
+    candidates = _get_orcid_proc().discover(first, family)
     if not candidates:
         return None
 
-    inst_matched = [c for c in candidates if c["matched_institutions"]]
+    inst_matched = institution_matched_candidates(candidates, institution_names) if institution_names else []
     if len(inst_matched) == 1:
         orcid = inst_matched[0]["orcid"]
         rec = fetch_record(orcid, record_cache, for_cache, era_lookup)

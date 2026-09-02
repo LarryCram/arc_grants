@@ -672,8 +672,9 @@ class TestComputeReliability:
 
 # ---------------------------------------------------------------------------
 # widen_names_with_orcid_bulk_db -- additive name-form widening from the local ORCID bulk
-# snapshot (2026-08-25). fetch_by_orcid() is monkeypatched, not a real DB call -- these tests
-# never touch /home/lc/s/orcid/orcid_persons.parquet.
+# snapshot (2026-08-25; 2026-09-02: rewired onto OrcidProcessor.lookup_by_orcid(), the
+# orcid_bulk_lookup.py/orcid_persons.parquet source it read from is retired). lookup_by_orcid()
+# is monkeypatched, not a real DB call -- these tests never touch orcid_bulk.parquet.
 # ---------------------------------------------------------------------------
 class TestWidenNamesWithOrcidBulkDb:
     def test_adds_new_name_forms_from_bulk_db(self, monkeypatch):
@@ -682,10 +683,10 @@ class TestWidenNamesWithOrcidBulkDb:
         )])
 
         monkeypatch.setattr(
-            "src.utils.orcid_bulk_lookup.fetch_by_orcid",
-            lambda orcids: pd.DataFrame([
-                {"orcid": "0000-0001-0001-0001", "name": "Willem van Straten", "aliases": []},
-            ]),
+            "src.utils.orcid_processor.OrcidProcessor.lookup_by_orcid",
+            lambda self, orcids: {
+                "0000-0001-0001-0001": {"name": "Willem van Straten", "aliases": []},
+            },
         )
         out = widen_names_with_orcid_bulk_db([c])
         assert "Willem van Straten" in out[0].full_names
@@ -699,10 +700,10 @@ class TestWidenNamesWithOrcidBulkDb:
         original_family = list(c.family_names)
 
         monkeypatch.setattr(
-            "src.utils.orcid_bulk_lookup.fetch_by_orcid",
-            lambda orcids: pd.DataFrame([
-                {"orcid": "0000-0001-0001-0001", "name": "John Smith", "aliases": []},
-            ]),
+            "src.utils.orcid_processor.OrcidProcessor.lookup_by_orcid",
+            lambda self, orcids: {
+                "0000-0001-0001-0001": {"name": "John Smith", "aliases": []},
+            },
         )
         out = widen_names_with_orcid_bulk_db([c])
         for fam in original_family:
@@ -712,8 +713,8 @@ class TestWidenNamesWithOrcidBulkDb:
         c = _build_awards_cif("A", [_item("G1_A", first_names=["j"], family_names=["smith"])])
         called = []
         monkeypatch.setattr(
-            "src.utils.orcid_bulk_lookup.fetch_by_orcid",
-            lambda orcids: called.append(orcids) or pd.DataFrame(columns=["orcid", "name", "aliases"]),
+            "src.utils.orcid_processor.OrcidProcessor.lookup_by_orcid",
+            lambda self, orcids: called.append(orcids) or {},
         )
         widen_names_with_orcid_bulk_db([c])
         assert called == []
@@ -725,8 +726,8 @@ class TestWidenNamesWithOrcidBulkDb:
         original_full = list(c.full_names)
 
         monkeypatch.setattr(
-            "src.utils.orcid_bulk_lookup.fetch_by_orcid",
-            lambda orcids: pd.DataFrame(columns=["orcid", "name", "aliases"]),
+            "src.utils.orcid_processor.OrcidProcessor.lookup_by_orcid",
+            lambda self, orcids: {},
         )
         out = widen_names_with_orcid_bulk_db([c])
         assert out[0].full_names == original_full
@@ -737,11 +738,10 @@ class TestWidenNamesWithOrcidBulkDb:
         )])
 
         monkeypatch.setattr(
-            "src.utils.orcid_bulk_lookup.fetch_by_orcid",
-            lambda orcids: pd.DataFrame([
-                {"orcid": "0000-0001-0001-0001", "name": "Wenting Cheng",
-                 "aliases": ["Wenting Chen"]},
-            ]),
+            "src.utils.orcid_processor.OrcidProcessor.lookup_by_orcid",
+            lambda self, orcids: {
+                "0000-0001-0001-0001": {"name": "Wenting Cheng", "aliases": ["Wenting Chen"]},
+            },
         )
         out = widen_names_with_orcid_bulk_db([c])
         assert "Wenting Chen" in out[0].full_names

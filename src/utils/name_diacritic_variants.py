@@ -55,21 +55,57 @@ import unicodedata
 # data typically uses the plain ASCII one.
 _QUOTE_VARIANTS = re.compile(r"[‘’ʼ`´ʹ′]")
 
-# Exotic Unicode hyphens → ASCII hyphen
-_EXOTIC_HYPHENS = re.compile(r"[­‐‑‒–—―−－]")
+# Exotic Unicode hyphens → ASCII hyphen. Soft hyphen (U+00AD) deliberately excluded -- see
+# _ZERO_WIDTH_STRIP below: unlike these, it's normally invisible, so substituting it to a
+# *visible* "-" is wrong (2026-09-02 fix -- it used to live in this set and could wrongly split
+# one word into two hyphenated-looking tokens if a PDF-extraction artifact embedded one mid-word).
+_EXOTIC_HYPHENS = re.compile(r"[‐‑‒–—―−－]")
+
+# Invisible/zero-width control characters that leak into scraped/OCR'd/multi-source name data
+# (2026-09-02, added ahead of OrcidProcessor's much more heterogeneous, globally-crawled 17M-record
+# population): soft hyphen (U+00AD, invisible unless a line-break falls inside the word), zero-width
+# space/non-joiner/joiner (U+200B-200D), and the byte-order-mark / zero-width-no-break-space
+# (U+FEFF). None of these have a visible glyph, so they are STRIPPED outright, never substituted
+# to a visible character -- NFKC (applied separately below) does not remove any of these; they
+# aren't "compatibility variants" of a visible character, they're a structurally different class
+# of invisible control code point.
+_ZERO_WIDTH_STRIP = re.compile(r"[­​‌‍﻿]")
 
 
 def canonicalize_name_punctuation(s: str) -> str:
-    """Preprocessor: collapse every apostrophe/quote-mark variant to a canonical ASCII
-    apostrophe and every hyphen/dash variant to a canonical ASCII hyphen. Must run BEFORE
+    """Preprocessor: normalizes Unicode form and strips/substitutes punctuation, BEFORE
     HumanName() parses the string, not just afterward on already-extracted parts -- HumanName's
     own splitting decisions (what counts as one compound token, where a name breaks) depend on
     the punctuation actually being uniform, so canonicalizing only the output is too late to
     help. Call at every HumanName(...) call site on the raw input string; diacritic_variants()
     also applies it internally so anything processed downstream gets it too, even from a caller
-    that forgot to canonicalize up front."""
+    that forgot to canonicalize up front.
+
+    Steps, in order (2026-09-02, hardened against real Unicode-normalization pitfalls in
+    multi-source entity-resolution pipelines -- see docs/pipeline_todo.md and this session's
+    HumanNameParser plan for the full audit of what was already handled vs. genuinely missing):
+      1. NFC normalization -- a consistent baseline regardless of whether the source encoded an
+         accented character as one precomposed code point (NFC, typical of Crossref/REST APIs)
+         or a base letter + combining mark (NFD, typical of macOS-originated file paths) --
+         without this, two byte-for-byte-different encodings of the same visual name would
+         already disagree before any of the rest of this pipeline ever runs.
+      2. Strip invisible zero-width control characters (_ZERO_WIDTH_STRIP) -- must happen before
+         NFKC, which does not remove these itself.
+      3. NFKC compatibility folding -- decomposes typographic ligatures (ﬁ -> f+i), roman
+         numerals, sub/superscripts, and (as a side effect, confirmed safe) non-breaking and
+         other typographic space variants down to a plain ASCII space. Confirmed NOT to disturb
+         any of this module's own special-cased precomposed diacritics (ü/ö/ä/ß/ø/å/ł/œ/æ/ð/þ) --
+         none of them carry a Unicode compatibility-decomposition mapping, only (for some) a
+         canonical one, which NFKC's own canonical-recomposition step round-trips back to the
+         identical character.
+      4. Quote/apostrophe and hyphen/dash substitution (existing logic, now running on an
+         already NFC+NFKC+zero-width-clean string).
+    """
     if not s:
         return s
+    s = unicodedata.normalize("NFC", s)
+    s = _ZERO_WIDTH_STRIP.sub("", s)
+    s = unicodedata.normalize("NFKC", s)
     s = _QUOTE_VARIANTS.sub("'", s)
     s = _EXOTIC_HYPHENS.sub("-", s)
     return s
@@ -161,6 +197,17 @@ def diacritic_variants(s: str) -> list[str]:
     bug (a genuinely matching pair silently unreachable by Splink blocking because the two sides'
     "longest" picks disagreed; see CLAUDE.md 2026-08-25). Callers needing every plausible
     spelling (e.g. Splink blocking/comparison) should use the full list.
+
+    2026-09-02: a casefold()-based extra candidate pass was considered here (Python's casefold()
+    folds some characters .lower() does not, e.g. Greek final sigma) and explicitly NOT added --
+    traced through every case it could matter for and found it provably inert given this
+    function's own final ASCII-reduction step: ligatures are already handled earlier by NFKC
+    (canonicalize_name_punctuation()), "ß" is already handled by the explicit digraph table
+    above, and every OTHER casefold-vs-lower difference (Greek, Cherokee, ...) targets non-Latin
+    characters that get stripped by the ASCII-reduction step regardless of which case-folding
+    path produced them (confirmed directly: diacritic_variants('Παπαδόπουλος') == [] either way).
+    Casefold's real value for those cases lives in HumanNameParser's separate non-ASCII "raw" key
+    (names.py) instead, which does NOT ASCII-reduce and so doesn't neutralize the distinction.
     """
     if not s:
         return []

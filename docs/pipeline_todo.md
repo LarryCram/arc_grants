@@ -520,7 +520,7 @@ leading `.{0,5}` catches garbled footnote-marker prefixes like the "K"), or cont
 / a bare email-address pattern with little other text, or "To whom correspondence should be
 addressed."
 
-### 19 — Consolidate pre-linking ORCID processing into `00b_enrich_orcid.py`; clean out the scattered local-ORCID-source mess
+### 19 — CLOSED 2026-09-02 — Consolidate pre-linking ORCID processing into `00b_enrich_orcid.py`; clean out the scattered local-ORCID-source mess
 Found 2026-09-01 investigating the NO_ORCID population (4,895 ACIFs) via `orcid.db` — the
 investigation itself surfaced a real code-organization problem, not just a data finding.
 User's framing, taken as the design brief for this item: `00b_enrich_orcid.py` is *the* point
@@ -598,10 +598,100 @@ in the middle and is reasonably a util either way — the user was explicit that
 distinction (SQL-against-already-local-data) wasn't the confusing part; the conversion step
 was.
 
-Not yet started — this is a design/cleanup item, no code changes made toward it yet beyond
-the (now-to-be-reconciled) mid-session `_search_bulk_db()`/`find_candidates_by_institution()`
-additions and the `fetch_record()` None-key guard (both still sitting in the working tree,
-uncommitted).
+**2026-09-02 update — `OrcidProcessor` built as the consolidation target; `00b_enrich_orcid.py`
+itself not yet rewired onto it (that's the remaining piece of this item).** The plan above
+(step 1: convert `orcid.db` to parquet too, keep it alongside the HQ parquet) was superseded by
+a better option found by actually checking the data first: `records.jsonl.gz` (the Zenodo
+release's FULL population, 17.15M records) turns out to carry the exact same rich per-record
+schema (aliases, dated employments/educations/memberships, works) that only the narrower ~4.8M
+"HQ" subset used to have — confirmed via a direct full pass, not assumed. So there's no real
+broad-vs-rich tradeoff to manage across two sources any more: `orcid.db` (shallow, 17.15M) and
+`orcid_persons.parquet`/`orcid_affiliations.parquet` (rich, 4.8M) are BOTH superseded by one
+new artifact, `/home/lc/s/orcid/orcid_bulk.parquet` (rich AND full-population, built via
+`src/utils/orcid_processor.py::convert_bulk_dump()`) — `orcid.db` was deleted outright, and
+`orcid_bulk_lookup.py`'s old HQ-only parquet pair is now dead code (not yet removed, see below).
+
+Built, tested, verified against real cases (Simon Kelly UQ/Macquarie disambiguation, bare-initial
+"W Cope" fallback — both reproduce this session's own by-hand findings exactly):
+- `src/utils/orcid_processor.py` — `OrcidProcessor.discover()` (pre-link name matching against
+  `orcid_bulk.parquet`, returns every candidate with full career `institution_names` attached,
+  deliberately does NOT reduce to a winner itself) + `collapse_candidates()` (post-link
+  `oax_candidates` pruning once an ACIF is already ORCID-resolved) + `OrcidRecord`/
+  `AffiliationEntry` dataclasses + `get_or_fetch()` (cache-first live-record retrieval, `cache`/
+  `fetcher` both injected so this module stays free of `requests`/`diskcache`/`config.settings`
+  imports — the standalone-module constraint from this file's own "File-placement principle").
+- `src/utils/orcid_processor_arc_adapter.py` — the project-specific glue: `arc_name_normalizer()`
+  (injects `names.py`'s `HumanNameParser` as `OrcidProcessor`'s pluggable name_normalizer),
+  `resolve_institution_overlap()` (the set-to-set institution reduction `discover()` deliberately
+  leaves to the caller — this project's own version, against its HEP vocabulary), `get_record()`
+  (wires `get_or_fetch()`'s `cache`/`fetcher` hooks to `orcid_client.py`'s existing
+  `default_cache()`/`fetch_orcid_record()` — reuses that module's OAuth/HTTP/retry logic rather
+  than a second copy of it, same one cache, `DISKCACHE_DIR/orcid_records_authenticated`, as
+  every other ORCID consumer in this project).
+- `tests/test_orcid_processor.py` (38 tests) + `tests/test_orcid_processor_arc_adapter.py`
+  (9 tests), all against small synthetic fixtures — never the real 17.15M-row table or a live
+  API call. 527/527 full suite passing.
+
+Along the way, a real Unicode-normalization hardening pass landed in `names.py`/
+`name_diacritic_variants.py` first (NFC/NFKC ingestion hygiene, zero-width character stripping,
+a soft-hyphen substitution bug, a new `HumanNameParser` class as the sole real implementation of
+this project's whole name-parsing chain, with both an ASCII-reduced key for genuine
+spelling-convention bridging and a non-ASCII "raw" key so non-Latin-script/uncatalogued-diacritic
+names aren't silently dropped) — triggered directly by `orcid_bulk.parquet`'s far greater
+linguistic diversity than ARC/OAX's own more curated inputs. Fixed a real pre-existing given-name-
+widening asymmetry bug in `00c_prepare_oax.py::_parse_name()` (only the family name was
+diacritic-widened, not the given name) as part of the same pass, since every name-parsing call
+site was being audited anyway. Full `00c`→`01`→`03`→`04` rerun (user's own hands) confirmed
+zero regression against documented baselines throughout.
+
+**2026-09-02 update — callers rewired, legacy source retired. Item 19 closed.**
+`00b_enrich_orcid.py::_search_bulk_db()` now calls `OrcidProcessor.discover()` (a lazy
+module-level singleton, `_get_orcid_proc()`, built with `arc_name_normalizer` so ORCID-side
+matching keys get the same hardened parse as every other ARC-side comparison) instead of
+`orcid_bulk_lookup.find_candidates()` — institution corroboration now goes through
+`orcid_processor_arc_adapter.institution_matched_candidates()` (a new function, factored out of
+`resolve_institution_overlap()` so both a caller wanting the raw matched list, to distinguish
+"0 matches" from "2+, a real ambiguity," and a caller wanting the collapsed single winner share
+one definition of "matched"). `awards_cif.py::widen_names_with_orcid_bulk_db()` now calls
+`OrcidProcessor.lookup_by_orcid()` (new method — the keyed-lookup equivalent of the old
+`orcid_bulk_lookup.fetch_by_orcid()`) instead of reading the old HQ parquet pair directly. Both
+call sites' own function signatures are unchanged, so neither's existing tests needed
+restructuring — only the monkeypatch target/shape in `tests/test_awards_cif.py`'s
+`TestWidenNamesWithOrcidBulkDb` changed (dict return instead of a DataFrame, matching the new
+method's shape); `tests/test_00b_enrich_orcid.py`'s `TestSearchOrcid` suite needed zero changes
+and still passes unmodified against the real, larger `orcid_bulk.parquet` (confirmed: common
+names like "John Smith" still correctly return 2+ ambiguous local candidates and fall through to
+the mocked live-API path, exactly as before — the population only got bigger, the logic's
+behavior didn't change). New tests: `OrcidProcessor.lookup_by_orcid()`
+(`tests/test_orcid_processor.py`) and `institution_matched_candidates()`
+(`tests/test_orcid_processor_arc_adapter.py`). Full suite: 535/535 passing.
+
+`src/utils/orcid_bulk_lookup.py` deleted outright (`git rm`) — every caller confirmed migrated
+first, zero remaining live imports (only historical docstring mentions of the old module name
+remain, left as-is as project history). Its two data files
+(`/home/lc/s/orcid/orcid_persons.parquet`, `/home/lc/s/orcid/orcid_affiliations.parquet`, the
+~4.8M-record "HQ" subset) deleted as redundant with `orcid_bulk.parquet` (17.15M records, full
+population, same rich per-record schema). Also deleted as fully superseded, upstream of that
+pair: `/home/lc/s/orcid/convert_to_parquet.py` (the one-time conversion script whose only output
+was the now-deleted parquet pair, and whose own input format — a single-JSON-object
+`records_hq.json.gz` — had already been superseded by the JSON-Lines `records_hq.jsonl.gz`
+earlier the same session) and `records_hq.jsonl.gz` itself (632MB — a strict subset of
+`records.jsonl.gz`'s population with the identical schema, confirmed via direct inspection
+before deleting). `schema.json` (the Zenodo dataset's own published record schema — reference
+documentation, not tied to the dead conversion script) kept. The unrelated, much older
+`ORCID_2023_10_activities`/`ORCID_2023_10_summaries`/`orcid-conversion-lib-*.jar` (a 146GB+ raw
+ORCID XML dump from a separate, earlier investigation, dated 2023-10 — predates this project's
+2026 sessions) were left untouched — out of scope for this cleanup, not something this
+session's work made redundant.
+
+Real coverage-scale consequence of the rewiring, not yet measured at full population scale:
+`00b_enrich_orcid.py`'s no-ORCID search population (several thousand ACIFs/name-pairs) now
+matches against 17.15M people instead of 4.8M, with hardened ARC-parity name keys instead of a
+bare parse — a real re-run against the current NO_ORCID population (to see how many previously
+`not_found`/`too_common`/`live_api`-sourced rows now resolve via the richer local source before
+ever reaching the live API) has not been done this session; `search_cache`'s existing entries
+are keyed on `(first_name, family_name)` only, so a full re-run needs `--update-name` per pair or
+a fresh cache to actually re-attempt anything already cached under the old source.
 
 ---
 

@@ -32,15 +32,13 @@ from pathlib import Path
 import diskcache
 import duckdb
 import pandas as pd
-from nameparser import HumanName
 from splink import DuckDBAPI, Linker, SettingsCreator, block_on
 import splink.comparison_library as cl
 import splink.comparison_level_library as cll
 
 from config.settings import PROCESSED_DATA, ADMIN_ORGS_CSV, GRANT_SUMMARIES_CSV, ARC_GRANTS_CSV, DISKCACHE_DIR, OAX_AUTHORS, TOP_CUT, DUCKDB_TMP_DIR
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
-from src.utils.names import make_expanded_for_tokens, name_part_tokens, strip_postnominals, for_name_tokens
-from src.utils.name_diacritic_variants import canonicalize_name_punctuation, diacritic_variants
+from src.utils.names import make_expanded_for_tokens, for_name_tokens, HumanNameParser
 from src.utils.for_resolve import (
     upgrade_for_code, upgrade_for_name, resolve_arc_for_entry, for2020_group_name,
 )
@@ -327,53 +325,26 @@ class AwardsCIF:
 
 # ── construction: load_award_cif_items ──────────────────────────────────────────
 
+_name_parser = HumanNameParser()
+
+
 def _name_forms(first_name: str, family_name: str) -> tuple[list[str], list[str]]:
     """Mirrors 01_prepare_arc.py's arc_name_arrays(): given-name tokens (+ their initials)
     and normalized family-name form(s), from ARC's raw first_name/family_name fields.
 
-    family_names/given-name tokens are widened to their bare/digraph pair whenever the raw ARC
-    string itself carries a literal diacritic character (diacritic_variants(), safe and local --
-    see that function's own docstring) -- ARC data is NOT "always ASCII" (confirmed 189 real
-    investigator records carry a genuine diacritic character), so this does real work on the ARC
-    side too, not just on OpenAlex's. A former version of this also consulted a corpus-wide
-    equivalence table keyed on the bare-folded string regardless of whether the ARC name itself
-    had a diacritic -- removed 2026-08-26, a real bug (see name_diacritic_variants.py's module
-    docstring): it let one unrelated OpenAlex person's own diacritic name inject a spurious
-    spelling into every ARC/OAX record sharing that name's common bare-folded root."""
+    2026-09-02: pure delegation to HumanNameParser (names.py) -- the full chain (canonicalize,
+    postnominal-strip, HumanName parse, single-token fallback, diacritic-widen, tokenize,
+    order-preserving dedup, the last-name-only fallback) now lives in exactly one place; this
+    function just adapts ParsedName's shape to this call site's existing (list, list) contract
+    so every caller here keeps working unchanged. See HumanNameParser/ParsedName's own
+    docstrings (names.py) for the full history this used to carry inline: family_names/given-name
+    tokens are widened to their bare/digraph pair whenever the raw ARC string itself carries a
+    literal diacritic character -- ARC data is NOT "always ASCII" (confirmed 189 real investigator
+    records carry a genuine diacritic character); the corpus-wide equivalence table this used to
+    also consult was removed 2026-08-26 as a real bug (see name_diacritic_variants.py)."""
     full = f"{first_name or ''} {family_name or ''}".strip()
-    hn = HumanName(strip_postnominals(canonicalize_name_punctuation(full)))
-    if not hn.last and hn.first:
-        hn.last = hn.first
-
-    # Widen BEFORE tokenizing, not after -- name_part_tokens() does its own diacritic stripping
-    # internally, so by the time it returns, the original literal character is already gone and
-    # there is nothing left for diacritic_variants() to widen (a real bug caught by testing:
-    # widening the already-tokenized "bjorn" instead of the raw "Björn" silently did nothing).
-    def _widened_tokens(raw: str) -> list[str]:
-        if not raw:
-            return []
-        return [tok for variant in diacritic_variants(raw) for tok in name_part_tokens(variant)]
-
-    f_toks = _widened_tokens(hn.first) + _widened_tokens(hn.middle)
-    family_names = diacritic_variants(hn.last) if hn.last else []
-    fam_norm = family_names[0] if family_names else ""
-
-    # dict.fromkeys(), not set() -- set() iteration order is randomized per-process
-    # (PYTHONHASHSEED), and _first_name_canonical()'s max(key=len) breaks length-ties by
-    # iteration order, so a set() here made which given-name token "wins" a tie
-    # non-deterministic across separate pipeline runs (found live 2026-08-23: "Xiao Dong
-    # Chen"/"Son Lam Phung"-style equal-length compound given names flipped full_name_key,
-    # which flipped is_suspicious_for2020()'s verdict, between two back-to-back reruns with
-    # zero other changes). dict.fromkeys() preserves first-occurrence order, so the
-    # first-listed given-name token deterministically wins any length tie -- also the more
-    # correct semantic (the first-listed given name is usually the person's primary one).
-    given_toks = list(dict.fromkeys(f_toks))
-    first_names = list(dict.fromkeys(given_toks + [t[0] for t in given_toks if t]))
-
-    if not f_toks and fam_norm:
-        first_names.append(fam_norm[0])
-
-    return list(dict.fromkeys(first_names)), family_names
+    parsed = _name_parser.parse(full)
+    return list(parsed.given_tokens), list(parsed.family_names)
 
 
 def _first_initial(first_names: list[str]) -> str | None:
@@ -2069,8 +2040,10 @@ def compute_orcid_for(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
 
 def widen_names_with_orcid_bulk_db(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     """Additive name-form widening from the local ORCID bulk snapshot
-    (orcid_bulk_lookup.py's orcid_persons.parquet -- ~4.8M ORCID records, no rate limit,
-    ~0.6s for this project's whole HAS_ORCID population). For every cluster with >=1 resolved
+    (src/utils/orcid_processor.py's orcid_bulk.parquet -- 17.15M ORCID records, the full Zenodo
+    population, no rate limit, ~0.6s for this project's whole HAS_ORCID population; 2026-09-02:
+    supersedes the older orcid_bulk_lookup.py/orcid_persons.parquet ~4.8M HQ-only snapshot,
+    retired the same day -- see docs/pipeline_todo.md #19). For every cluster with >=1 resolved
     ORCID, fetches that ORCID's own self-reported `name` + `aliases` and unions their parsed
     tokens into full_names/first_names/family_names -- never removes or overrides anything
     already there, matching this project's established "more evidence, never fewer" pattern
@@ -2094,17 +2067,17 @@ def widen_names_with_orcid_bulk_db(clusters: list[AwardsCIF]) -> list[AwardsCIF]
     completed by the time this step runs -- widening here can't retroactively change
     ARC-internal cluster membership, by design (confirmed acceptable, not a gap: 2026-08-25).
     """
-    from src.utils.orcid_bulk_lookup import fetch_by_orcid
+    from src.utils.orcid_processor import OrcidProcessor
 
     all_orcids = sorted({oid for c in clusters for oid in c.orcids if oid})
     if not all_orcids:
         return clusters
-    bulk = fetch_by_orcid(all_orcids)
+    with OrcidProcessor() as proc:
+        bulk = proc.lookup_by_orcid(all_orcids)
     bulk_names_by_orcid: dict[str, list[str]] = {}
-    for _, row in bulk.iterrows():
-        names = ([row["name"]] if row["name"] else [])
-        names += list(row["aliases"]) if row["aliases"] is not None else []
-        bulk_names_by_orcid[row["orcid"]] = [n for n in names if n]
+    for orcid, rec in bulk.items():
+        names = ([rec["name"]] if rec["name"] else []) + list(rec["aliases"])
+        bulk_names_by_orcid[orcid] = [n for n in names if n]
 
     n_widened = 0
     for c in clusters:

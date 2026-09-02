@@ -24,15 +24,11 @@ from pathlib import Path
 
 import duckdb
 import pandas as pd
-from nameparser import HumanName
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import OAX_AUTHORS, PROCESSED_DATA
-from src.utils.names import max_by_len, name_part_tokens, parse_given, strip_postnominals
-from src.utils.name_diacritic_variants import (
-    DIACRITIC_CHARS, canonicalize_name_punctuation, expand_diacritic_variants,
-    strip_diacriticals,
-)
+from src.utils.names import max_by_len, parse_given, HumanNameParser
+from src.utils.name_diacritic_variants import DIACRITIC_CHARS
 
 PROC = PROCESSED_DATA
 _DATA_PERSISTED = Path(__file__).resolve().parents[1] / "data_persisted"
@@ -148,6 +144,9 @@ def scan_for_new_diacritics(force: bool = False) -> set[str]:
     return found
 
 
+_name_parser = HumanNameParser()
+
+
 def oax_name_arrays(display_name: str, alts: list[str]) -> dict:
     # Use dicts (insertion-ordered) instead of sets so first_names preserves
     # left-to-right token order (first before middle, display_name before alts).
@@ -162,6 +161,19 @@ def oax_name_arrays(display_name: str, alts: list[str]) -> dict:
     # boolean "flag" column would do the same job less legibly) lets a consumer validate
     # display_name-derived candidates first (e.g. against ORCID) before trusting
     # alternatives-derived ones -- the two are different kinds of evidence, not one.
+    #
+    # 2026-09-02: _parse_name() now delegates to HumanNameParser (names.py) instead of its own
+    # separate inline implementation -- found while auditing every name-module call site after
+    # the Unicode-hardening pass. This is a deliberate BEHAVIOR CHANGE, not just a refactor: the
+    # old inline version only diacritic-widened the FAMILY name (expand_diacritic_variants on
+    # hn.last), tokenizing the GIVEN name directly with no widening step first -- a real,
+    # pre-existing asymmetry with the ARC-side convention (awards_cif.py::_name_forms(), which
+    # widens both), never previously noticed. Given-name diacritic-widening is now applied here
+    # too (e.g. "Björn" -> both "bjorn" and "bjoern" tokens, not just "bjorn"), matching ARC-side
+    # exactly. A real, population-wide effect on Splink candidate generation is expected (more
+    # given-name token variants -> more candidate pairs for anyone with a given-name diacritic) --
+    # 00c_prepare_oax.py needs a full rerun (and 03_link_arc_oax.py after it) to measure the
+    # actual impact before this is trusted at scale, not assumed zero-impact.
     first_toks: dict[str, None] = {}
     family_from_display: dict[str, None] = {}
     family_from_alts: dict[str, None] = {}
@@ -169,17 +181,13 @@ def oax_name_arrays(display_name: str, alts: list[str]) -> dict:
     def _parse_name(n: str, family_target: dict[str, None]) -> None:
         if not n:
             return
-        hn = HumanName(strip_postnominals(canonicalize_name_punctuation(n)))
-        if not hn.last and hn.first:
-            hn.last = hn.first
-        for ft in name_part_tokens(hn.first) + name_part_tokens(hn.middle):
+        parsed = _name_parser.parse(n)
+        for ft in parsed.given_tokens:
             first_toks[ft] = None
-            first_toks[ft[0]] = None
-        if hn.last:
-            # Both bare (ü→u) and digraph (ü→ue) forms -- real conventions, not one "correct"
-            # one; see expand_diacritic_variants()'s docstring for why both are kept.
-            for variant in expand_diacritic_variants(hn.last):
-                family_target[variant] = None
+        # Both bare (ü→u) and digraph (ü→ue) forms -- real conventions, not one "correct" one;
+        # see expand_diacritic_variants()'s docstring for why both are kept.
+        for variant in parsed.family_names:
+            family_target[variant] = None
 
     _parse_name(display_name, family_from_display)
     # Always parsed now, not fallback-only (2026-08-18, user-directed) -- alternatives are a

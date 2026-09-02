@@ -12,9 +12,12 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import unicodedata
+
 import pytest
 from src.utils.name_diacritic_variants import (
     diacritic_variants, expand_diacritic_variants, strip_diacriticals,
+    canonicalize_name_punctuation,
 )
 
 
@@ -132,6 +135,54 @@ class TestNoCrossNameLeakage:
         # table exists).
         with pytest.raises(TypeError):
             diacritic_variants("Baker", {"baker": ["baeker"]})
+
+
+class TestCanonicalizeUnicodeHardening:
+    """2026-09-02: canonicalize_name_punctuation() hardened per a detailed Unicode-normalization
+    review (NFC/NFKC ingestion hygiene, zero-width character stripping, a real soft-hyphen bug).
+    See the function's own docstring for the full audit of what was already handled vs. genuinely
+    missing before this session."""
+
+    def test_nfc_nfd_equivalence(self):
+        # The same visual name, encoded two different (both legal) ways -- a precomposed
+        # code point (NFC, typical of Crossref/REST APIs) vs. base letter + combining mark
+        # (NFD, typical of macOS-originated file paths). Must compare equal after canonicalizing.
+        nfc = "Müller"
+        nfd = unicodedata.normalize("NFD", nfc)
+        assert nfc != nfd  # sanity: genuinely different byte sequences to start with
+        assert canonicalize_name_punctuation(nfc) == canonicalize_name_punctuation(nfd)
+
+    def test_ligature_decomposed(self):
+        # U+FB01 LATIN SMALL LIGATURE FI -- a real artifact from legacy PDF/typesetting
+        # extraction, not merely a display glyph; must decompose to plain "f"+"i" or a plain
+        # substring search for "first" would silently miss it.
+        assert canonicalize_name_punctuation("ﬁrst") == "first"
+
+    def test_zero_width_space_stripped(self):
+        assert canonicalize_name_punctuation("Wil​liam") == "William"
+
+    def test_zero_width_joiner_and_bom_stripped(self):
+        assert canonicalize_name_punctuation("A‌‍﻿B") == "AB"
+
+    def test_soft_hyphen_stripped_not_substituted(self):
+        # Real bug fix: a soft hyphen (U+00AD) is normally invisible and must be REMOVED, not
+        # turned into a visible "-" -- substituting it would wrongly read as a hyphenated
+        # compound name (two tokens) instead of one continuous word.
+        assert canonicalize_name_punctuation("Wil­liam") == "William"
+
+    def test_real_en_dash_still_becomes_visible_hyphen(self):
+        # Contrast with the soft hyphen above: a genuine en-dash/em-dash/minus-sign IS a real,
+        # intended hyphen in a hyphenated surname, and must still become a visible ASCII "-".
+        assert canonicalize_name_punctuation("Smith–Jones") == "Smith-Jones"
+        assert canonicalize_name_punctuation("Smith—Jones") == "Smith-Jones"
+
+    def test_nfkc_does_not_disturb_existing_special_cased_diacritics(self):
+        # Confirms the reasoning in canonicalize_name_punctuation()'s own docstring: NFKC must
+        # be a no-op on every character this module already special-cases (none of them carry a
+        # Unicode *compatibility* decomposition, only -- for some -- a canonical one, which NFKC
+        # round-trips back to the identical character).
+        for ch in "üöäßøåłœæðþ":
+            assert canonicalize_name_punctuation(ch) == ch
 
 
 class TestExpandDiacriticVariants:
