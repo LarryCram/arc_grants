@@ -35,7 +35,7 @@ for _pn in ("AC", "AO", "AM", "OAM"):
 # FREng wasn't in the list and (b) the comma before it didn't match the old whitespace-only
 # separator. Separator widened from `\s+` to `[\s,]+` to handle comma-separated stacking too.
 _POSTNOMINALS = re.compile(
-    r"(?:[\s,]+(?:AO|AM|OAM|AC|AK|OL|FAA|FAHMS|FTSE|FASSA|FAHA|FRS|FREng|CBE|OBE|MBE|KBE|DBE))+\s*$",
+    r"(?:[\s,]+(?:AO|AM|OAM|AC|AK|OL|FAA|FAHMS|FTSE|FASSA|FAHA|FRS|FREng|CBE|OBE|MBE|KBE|DBE|Pharmacist))+\s*$",
     re.IGNORECASE,
 )
 
@@ -169,8 +169,17 @@ class ParsedName:
     already blocks/compares on) and fall back to the raw key when the ASCII one is empty/None --
     not the reverse -- since the raw key alone would fail to bridge known, real spelling
     differences the ASCII path exists specifically to catch.
+
+    middle_tokens (2026-09-05): the middle-name-derived subset of given_tokens, kept as its own
+    field so a caller can require a middle-name/middle-initial match as EXTRA selectivity on top
+    of family+first (e.g. narrowing a common-surname/bare-first-initial ORCID search) without
+    conflating "any given-name token matched" (given_tokens, deliberately loose -- first and
+    middle are interchangeable alternatives there) with "the middle name specifically matched"
+    (a stricter, AND-style signal). given_tokens/first_name_canonical are otherwise unaffected --
+    middle_tokens is additive, not a replacement for anything existing.
     """
     given_tokens: tuple[str, ...]
+    middle_tokens: tuple[str, ...]
     family_names: tuple[str, ...]
     family_name_main: str | None
     first_name_canonical: str | None
@@ -216,15 +225,26 @@ class HumanNameParser:
         """Full chain -> ParsedName, both the ASCII-reduced and non-ASCII raw representations."""
         hn = self._structural(raw_name)
         if hn is None:
-            return ParsedName((), (), None, None, None, (), None, None)
+            return ParsedName((), (), (), None, None, None, (), None, None)
 
         # ASCII-reduced (existing convention: diacritic-widen each of first/middle, tokenize,
         # add bare initials, order-preserving dedup -- dict.fromkeys(), never a raw set(), per
-        # this project's own already-fixed non-determinism bug)
-        given_ascii = [
-            tok for raw in (hn.first, hn.middle) if raw
-            for variant in self.diacritic_variants(raw) for tok in name_part_tokens(variant)
-        ]
+        # this project's own already-fixed non-determinism bug). first_tokens/middle_tokens are
+        # kept separate (not immediately flattened) so first_name_canonical below can prefer the
+        # actual first name -- confirmed a real bug otherwise: max(..., key=len) over the
+        # flattened first+middle pool picks whichever STRING is longer with no regard for
+        # position, so e.g. "George Stewart Walker" canonicalized to "stewart" and "Ben Martin
+        # Tsamenyi" to "martin" -- 310 of 851 real ARC multi-token first_name values (36.4%,
+        # checked directly 2026-09-05) hit this, each one a wrong first_initial fed straight into
+        # Splink's primary blocking key (family_name_main + first_initial, per this file's own
+        # documented convention below).
+        first_tokens = [
+            tok for variant in self.diacritic_variants(hn.first) for tok in name_part_tokens(variant)
+        ] if hn.first else []
+        middle_tokens = [
+            tok for variant in self.diacritic_variants(hn.middle) for tok in name_part_tokens(variant)
+        ] if hn.middle else []
+        given_ascii = first_tokens + middle_tokens
         family_names = self.diacritic_variants(hn.last) if hn.last else ()
         family_name_main = max(family_names, key=len) if family_names else None
         # Fallback for a last-name-only input (HumanName found no first/middle at all): use the
@@ -233,11 +253,23 @@ class HumanNameParser:
         # existing, tested convention exactly.
         extra = [family_name_main[0]] if not given_ascii and family_name_main else []
         given_tokens = tuple(dict.fromkeys(given_ascii + [t[0] for t in given_ascii if t] + extra))
-        full_toks = [t for t in given_tokens if len(t) > 1]
-        first_name_canonical = (max(full_toks, key=len) if full_toks
-                                 else (given_tokens[0] if given_tokens else None))
+        # Prefer the first name's own longest widened form; only fall back to the middle name
+        # when the first name is itself degenerate (a bare initial, or absent) -- e.g. "C. David
+        # Thomas" correctly canonicalizes to "david", since "c" has no substantive (>1-char) form
+        # of its own to prefer.
+        first_full_toks = [t for t in first_tokens if len(t) > 1]
+        middle_full_toks = [t for t in middle_tokens if len(t) > 1]
+        if first_full_toks:
+            first_name_canonical = max(first_full_toks, key=len)
+        elif middle_full_toks:
+            first_name_canonical = max(middle_full_toks, key=len)
+        else:
+            first_name_canonical = given_tokens[0] if given_tokens else None
         full_name_key = (f"{first_name_canonical}_{family_name_main}"
                           if first_name_canonical and family_name_main else None)
+        # Same tokens+initials shape as given_tokens, restricted to the middle-name-derived
+        # subset only -- see ParsedName's own docstring for why this is kept separate.
+        middle_tokens_out = tuple(dict.fromkeys(middle_tokens + [t[0] for t in middle_tokens if t]))
 
         # Non-ASCII raw (NFC + casefold only -- no ASCII reduction, no bare-initial splitting,
         # since that heuristic is Latin-alpha-specific and doesn't generalize to other scripts)
@@ -251,7 +283,7 @@ class HumanNameParser:
                               if given_tokens_raw and family_name_raw else None)
 
         return ParsedName(
-            given_tokens=given_tokens, family_names=family_names,
+            given_tokens=given_tokens, middle_tokens=middle_tokens_out, family_names=family_names,
             family_name_main=family_name_main, first_name_canonical=first_name_canonical,
             full_name_key=full_name_key,
             given_tokens_raw=given_tokens_raw, family_name_raw=family_name_raw,

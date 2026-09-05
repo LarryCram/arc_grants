@@ -26,7 +26,7 @@ import csv
 import json
 import re
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 import diskcache
@@ -38,7 +38,7 @@ import splink.comparison_level_library as cll
 
 from config.settings import PROCESSED_DATA, ADMIN_ORGS_CSV, GRANT_SUMMARIES_CSV, ARC_GRANTS_CSV, DISKCACHE_DIR, OAX_AUTHORS, TOP_CUT, DUCKDB_TMP_DIR
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
-from src.utils.names import make_expanded_for_tokens, for_name_tokens, HumanNameParser
+from src.utils.names import make_expanded_for_tokens, for_name_tokens, HumanNameParser, ParsedName
 from src.utils.for_resolve import (
     upgrade_for_code, upgrade_for_name, resolve_arc_for_entry, for2020_group_name,
 )
@@ -165,6 +165,14 @@ class AwardCIFItem:
     full_name_key: str | None = None
     for_name_tokens: list[str] = field(default_factory=list)
 
+    # The standard parser's own output for this item's raw name, carried whole (2026-09-04) --
+    # first_names/family_names/family_name_main/first_name_canonical/full_name_key above are
+    # kept as-is for every existing reader (Splink comparisons, 01a_diagnose.py) but are now
+    # populated FROM this object, ASCII-reduced-with-raw-fallback per ParsedName's own
+    # documented convention, instead of being re-derived a second time with no fallback (the
+    # bug this fixes -- see _prep_arc-adjacent construction site below).
+    parsed: ParsedName | None = None
+
     # Full per-grant FOR2020 code list (2026-08-12) -- every field-of-research entry ARC
     # recorded for this grant (raw_json.csv, not just grant_summaries.csv's single primary),
     # each resolved to a FOR2020 4-digit group via for_resolve.resolve_arc_for_entry() +
@@ -280,6 +288,17 @@ class AwardsCIF:
 
     grant_ids: list[str] = field(default_factory=list)  # = [item.unique_id for item in items]
     n_grants: int = 0
+
+    # Every OTHER investigator appearing on any grant this ACIF holds (2026-09-04) -- not
+    # co-authorship, co-awardee-ship: known with certainty from the grant record itself, unlike
+    # anything from OpenAlex. One entry per distinct co-awardee ParsedName (full parser output,
+    # not a shortcut key), plus `count` = how many of this ACIF's own grants they co-appear on.
+    # Deliberately NOT filtered against this ACIF's own name(s) -- a co-awardee entry that
+    # collides with the ACIF's own name is itself a useful signal (a candidate same-person
+    # under-merge across two ACIFs sharing a grant), not an error to hide. See
+    # compute_coawardees() for construction and docs/pipeline_todo.md for the standing check
+    # this motivates.
+    coawardees: list[dict] = field(default_factory=list)
 
     orcid_status: str = "NO_ORCID"  # HAS_ORCID | NO_ORCID | MULTI_ORCID
     orcid_for_codes: list[dict] = field(default_factory=list)  # ERA FOR codes via for_cache
@@ -680,15 +699,35 @@ def load_award_cif_items(
         for_name = upgrade_for_name(r["for2008_code"], r["primary_for_name"])
         for_code = upgrade_for_code(r["for2008_code"]) or r["for2008_code"]
 
-        first_names, family_names = _name_forms(first_name, r["family_name"])
-        family_name_main = max(family_names, key=len) if family_names else None
+        # Direct call, not _name_forms()'s narrowed (list, list) adapter -- that adapter exists
+        # to keep OTHER call sites' old contract stable, but was also (wrongly) feeding this
+        # site, discarding full_name_key/full_name_key_raw/family_name_main/first_name_canonical
+        # entirely; this site then re-derived them a second time with no raw-script fallback at
+        # all -- a non-Latin-script name got full_name_key=None here even though ParsedName had
+        # already computed a usable one. Fixed 2026-09-04: every field below prefers the
+        # ASCII-reduced form and falls back to the raw one, per ParsedName's own documented
+        # calling convention, and the full parsed object is kept (item.parsed) rather than
+        # thrown away.
+        #
+        # 2026-09-05 correction: first_names/family_names are LISTS -- for a list, the raw
+        # NFC/casefold form is not a fallback to use INSTEAD of the ASCII-reduced one (that's
+        # only correct for the scalars below, which can hold exactly one value); it's a
+        # genuinely separate, additional matchable form that must be UNIONED in. The original
+        # `or` here was a short-circuit: since the ASCII-reduced list is non-empty for nearly
+        # every real name, the raw form -- built specifically to catch non-Latin-script/
+        # uncatalogued-diacritic names the ASCII path drops -- was silently discarded in
+        # virtually every case, defeating the reason it exists.
+        parsed = _name_parser.parse(f"{first_name or ''} {r['family_name'] or ''}".strip())
+        first_names = list(dict.fromkeys(parsed.given_tokens + parsed.given_tokens_raw))
+        family_names = list(dict.fromkeys(
+            parsed.family_names + ((parsed.family_name_raw,) if parsed.family_name_raw else ())
+        ))
+        family_name_main = parsed.family_name_main or parsed.family_name_raw
         first_initial = _first_initial(first_names)
-        first_name_canonical = _first_name_canonical(first_names)
-        full_name_key = (
-            f"{first_name_canonical}_{family_name_main}"
-            if first_name_canonical and family_name_main
-            else None
+        first_name_canonical = parsed.first_name_canonical or (
+            parsed.given_tokens_raw[0] if parsed.given_tokens_raw else None
         )
+        full_name_key = parsed.full_name_key or parsed.full_name_key_raw
 
         # Union eligible_orgs (announcement-time organisations-at-announcement list) with
         # admin_org itself (2026-08-16 fix): these can genuinely disagree -- 12.13% of all
@@ -744,6 +783,7 @@ def load_award_cif_items(
             first_name_canonical=first_name_canonical,
             full_name_key=full_name_key,
             for_name_tokens=expanded_for_tokens(for_name),
+            parsed=parsed,
         ))
 
     print(f"  Dropped {n_dropped_non_hep_admin:,} investigator record(s) with a non-HEP admin_org")
@@ -2038,6 +2078,52 @@ def compute_orcid_for(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     return clusters
 
 
+def compute_coawardees(clusters: list[AwardsCIF], items: list[AwardCIFItem]) -> list[AwardsCIF]:
+    """Populate coawardees -- every OTHER investigator appearing on any grant this ACIF holds,
+    keyed by their own full parsed name (full_name_key, falling back to full_name_key_raw, same
+    convention as everywhere else), with a count of how many of this ACIF's own grants they
+    co-appear on. Reuses `items` already loaded by load_award_cif_items() -- no second read of
+    investigators_raw.parquet.
+
+    Deliberately NOT filtered against this cluster's own name(s) -- per direct user direction,
+    a co-awardee key colliding with the ACIF's own is a useful signal (found via exactly this
+    check: DP0665337_JocelynCraig / DP0665337_JocelynLynCraig, a real candidate same-person
+    split later confirmed via each side's own ORCID record -- see docs/pipeline_todo.md), not
+    an error to hide by construction.
+    """
+    grant_investigators: dict[str, list[tuple[str, ParsedName]]] = defaultdict(list)
+    for it in items:
+        if it.parsed is not None:
+            grant_investigators[it.grant_code].append((it.unique_id, it.parsed))
+
+    for c in clusters:
+        own_ids = {it.unique_id for it in c.items}
+        grant_codes = {it.grant_code for it in c.items}
+        tally: dict[str, dict] = {}
+        for gc in grant_codes:
+            for uid, parsed in grant_investigators.get(gc, []):
+                if uid in own_ids:
+                    continue
+                key = parsed.full_name_key or parsed.full_name_key_raw
+                if not key:
+                    continue
+                if key not in tally:
+                    d = asdict(parsed)
+                    d["given_tokens"] = list(d["given_tokens"])
+                    d["middle_tokens"] = list(d["middle_tokens"])
+                    d["family_names"] = list(d["family_names"])
+                    d["given_tokens_raw"] = list(d["given_tokens_raw"])
+                    tally[key] = {**d, "count": 0}
+                tally[key]["count"] += 1
+        c.coawardees = sorted(
+            tally.values(), key=lambda x: (-x["count"], x.get("full_name_key") or "")
+        )
+
+    n_with_coaw = sum(1 for c in clusters if c.coawardees)
+    print(f"  coawardees: {n_with_coaw} clusters with >=1 co-awardee")
+    return clusters
+
+
 def widen_names_with_orcid_bulk_db(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     """Additive name-form widening from the local ORCID bulk snapshot
     (src/utils/orcid_processor.py's orcid_bulk.parquet -- 17.15M ORCID records, the full Zenodo
@@ -2530,8 +2616,8 @@ def build_arc_only_population(
     the circularity that motivated this split).
 
     load_award_cif_items -> cluster_items -> refine_clusters -> set_aside_indigenous_research
-    -> compute_orcid_for -> widen_names_with_orcid_bulk_db -> compute_gap_candidates
-    -> compute_reliability
+    -> compute_orcid_for -> compute_coawardees -> widen_names_with_orcid_bulk_db
+    -> compute_gap_candidates -> compute_reliability
 
     compute_orcid_for() reads only the local ORCID diskcache (00b_enrich_orcid.py's own output,
     not OAX); widen_names_with_orcid_bulk_db() reads a separate local ORCID bulk snapshot (see
@@ -2555,6 +2641,7 @@ def build_arc_only_population(
         clusters = refine_clusters(clusters)
         clusters = set_aside_indigenous_research(clusters)
         clusters = compute_orcid_for(clusters)
+        clusters = compute_coawardees(clusters, items)
         clusters = widen_names_with_orcid_bulk_db(clusters)
         clusters = compute_gap_candidates(clusters)
         clusters = compute_reliability(clusters)
@@ -2606,6 +2693,7 @@ def persist_awards_cif(clusters: list[AwardsCIF], path: Path = AWARDS_CIF_PARQUE
         "for2020_codes": c.for2020_codes,
         "grant_ids": c.grant_ids,
         "n_grants": c.n_grants,
+        "coawardees": c.coawardees,
         "full_name_key": c.full_name_key,
         "orcid_status": c.orcid_status,
         "orcid_for_codes": c.orcid_for_codes,
@@ -2672,6 +2760,7 @@ def load_awards_cif(path: Path = AWARDS_CIF_PARQUET) -> list[AwardsCIF]:
             for2020_codes=[dict(x) for x in row["for2020_codes"]],
             grant_ids=list(row["grant_ids"]),
             n_grants=row["n_grants"],
+            coawardees=[dict(x) for x in row["coawardees"]],
             full_name_key=row["full_name_key"],
             orcid_status=row["orcid_status"],
             orcid_for_codes=[dict(x) for x in row["orcid_for_codes"]],

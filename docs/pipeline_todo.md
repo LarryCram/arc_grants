@@ -106,6 +106,10 @@ continuation, then the larger/optional items last.
 17. **HEP-affiliation-history candidate-pool pruning for common-name mega-pools** — real, partial win, not built (see its own entry below)
 18. **Extract `raw_affiliation_string` on the next OpenAlex snapshot conversion, then filter junk-matched authorship institutions** — a real, confirmed OpenAlex-side data-quality bug found via two dossier examples (see its own entry below); needs new data before it's actionable, so opportunistic like the existing `author_position` item, not urgent standalone
 19. **Consolidate pre-linking ORCID processing into `00b_enrich_orcid.py`; clean out the scattered/duplicated local-ORCID-source code this session's exploration left behind** — high priority, blocks trusting any further ORCID enrichment work until done
+20. **Audit `AwardsCIF.coawardees` for a co-awardee key colliding with the ACIF's own name** — deliberately not filtered out at construction (a collision is itself a useful merge-candidate signal, not an error); needs a standing check to actually surface and review these, not just leave them sitting unexamined in the data
+21. **`compute_gap_candidates()`'s `orcid_incompat` is an unconditional veto — loosen it, and add a deterministic announcement/current-snapshot auto-merge** — two confirmed real cases (Restubog, Craig) currently invisible to review because of this; see its own entry below
+22. **Build a non-circular ARC+OAX_AU vs ORCID-bulk name-frequency reference, matched on every normalized name-form on both sides** — high priority, near the top: the current name-rarity/TF-adjustment basis is incomplete (791/4,891 NO_ORCID names have no rarity value at all) and the obvious-looking fix (folding ARC's own names into the reference population) is circular; see its own entry below
+23. **Rerun the `FetchOrcid` NO_ORCID scan (stale) and run the HAS_ORCID audit for the first time at full population scale** — the tooling (`src/utils/fetch_orcid.py`) is built and fixed; the actual population-scale numbers are either stale (NO_ORCID) or never computed (HAS_ORCID). See its own entry below.
 
 ---
 
@@ -692,6 +696,245 @@ bare parse — a real re-run against the current NO_ORCID population (to see how
 ever reaching the live API) has not been done this session; `search_cache`'s existing entries
 are keyed on `(first_name, family_name)` only, so a full re-run needs `--update-name` per pair or
 a fresh cache to actually re-attempt anything already cached under the old source.
+
+### 20 — Audit `AwardsCIF.coawardees` for self-collisions (candidate merge signal)
+
+Built 2026-09-04 (`compute_coawardees()`, `src/utils/awards_cif.py`): every ACIF now carries
+`coawardees` — every other investigator on any grant it holds, keyed by their own parsed
+`full_name_key`/`full_name_key_raw`, with a count of how many shared grants. Found by hand while
+building this: `DP0665337_JocelynCraig`/`DP0665337_JocelynLynCraig` and
+`DP0984209_SimonRestubog`/`DP130104138_SimonLloydRestubog` — pairs where one ACIF's own name
+collides with a co-awardee entry on the *other* ACIF's grants. Checked individually (not assumed):
+Craig looks like a real same-person split (Craig's 4 grants are a strict subset of Lyn Craig's 10;
+Lyn Craig's own ORCID self-reports as "Lyn Craig", already present in that cluster's own
+`full_names`). **Restubog update, 2026-09-05 — corrected, this entry was itself stale for a few
+turns**: the "no subset relationship, ORCIDs equally plausible" verdict above was wrong, caught by
+direct user challenge rather than by rechecking on my own initiative. Checked
+`investigators_raw.parquet` for the shared grant, `DP130104138`: one row `inv_source='announcement'`
+("Simon Lloyd Restubog"), one row `inv_source='current'` ("Simon Restubog"), same `role_code`.
+That's the same structural pattern already named elsewhere in this file for `LP0211723_DTNguyen`
+— one real investigator slot, name changed between ARC's own snapshots, not two co-investigators.
+So Restubog is now also a likely same-person split, by a *different*, more mechanical signature
+than Craig's (a literal shared-grant snapshot pair, not a subset-of-grants pattern) — see item #21.
+
+This was found by one manual pass over four clusters. Needed: a real, standing check across the
+whole population — for every ACIF, does any `coawardees` entry's key match that ACIF's own
+`full_name_key`/`full_name_key_raw`? — surfaced as a reviewable list (same treatment as
+`gap_candidates`), not auto-resolved. Each hit needs the same individual check as Craig/Restubog
+(subset-of-grants shape, shared-grant announcement/current snapshot pairs, each side's own ORCID
+record if present) before treating it as anything more than a candidate.
+
+**Craig case strengthened, 2026-09-05** — the "Jocelyn Craig" side's own enrichment ORCID
+(`0000-0002-8288-3307`) was checked directly against a live OpenAlex author record
+(user-supplied): it resolves to **"Jocelyn E. Craig," Southern Cross University, affiliated
+2013–2015, works_count=2** — zero institutional or temporal overlap with `DP0665337_JocelynCraig`'s
+actual grants (UNSW/ANU, 2006–2010). Confirms this ORCID is a wrong, coincidental-name-match
+enrichment hit (same failure class as the already-documented `LP0347702_JMcDonald` case), not
+evidence of a second real person — strengthening, not just repeating, the original "looks like a
+real same-person split" verdict. `0000-0001-9723-7255` ("Lyn Craig," University of Melbourne,
+matching the other cluster's own later grants exactly) is the real ORCID for the merged person.
+Not yet applied to `manual_merges.csv`/`enrichment_blocklist.csv` — still pending the item #21 fix
+(or a direct manual entry, if that's applied first).
+
+### 21 — `orcid_incompat` unconditional veto in `compute_gap_candidates()`; deterministic
+announcement/current-snapshot auto-merge
+
+Found 2026-09-05, directly motivated by the Restubog/Craig cases in item #20 above.
+`compute_gap_candidates()`'s incompatibility test (`src/utils/awards_cif.py`, `orcid_incompat`)
+is an unconditional veto joined by `or` with the other checks:
+
+```python
+orcid_incompat = (
+    len(c1.orcids) > 0 and len(c2.orcids) > 0
+    and not set(c1.orcids) & set(c2.orcids)
+)
+if name_incompat or div_incompat or orcid_incompat or scheme_incompat:
+    n_incompat += 1   # pair is dropped, never enters gap_candidates
+```
+
+If both sides have a non-overlapping ORCID, the pair is excluded regardless of name compatibility
+or any corroborating evidence — structurally invisible to review, not merely low-priority. Both
+Restubog and Craig are real, confirmed instances of exactly this: name-compatible pairs, each with
+its own (enrichment-derived, not raw-ARC) ORCID, that this check silently drops before a human
+ever sees them.
+
+**Two-part fix, not yet built:**
+
+1. **Deterministic auto-merge for the strong, mechanical signal** (mirrors `merge_by_orcid()`'s
+   own unconditional-merge pattern, not a review-and-decide one): two clusters holding items that
+   share a `grant_code`, where one item has `inv_source='announcement'` and the other
+   `'current'` — the exact Restubog/DTNguyen shape. This is close enough to certain (the
+   alternative — two different real people, one an announcement-only ghost and one a
+   current-only ghost, on the identical single grant — is implausible) that it doesn't need human
+   review the way every other merge type in this file does. Should log its own `record_event()`
+   (e.g. `"announcement_current_pair"`, naming the shared `grant_code`) for auditability. The
+   merge itself should go through the standard `_merge_awards_cifs()` item-union path, not a
+   custom one — that machinery already re-aggregates `full_names`/`first_names`/`family_names`
+   from the union of items, so both name-forms (e.g. "Simon Restubog" and "Simon Lloyd Restubog")
+   are preserved automatically, and `n_grants` already counts distinct `grant_code`, not items, so
+   the shared grant doesn't get double-counted. Nothing new needed there — confirmed by tracing
+   both mechanisms directly, not assumed.
+2. **Loosen `orcid_incompat` for the weaker, corroboration-dependent signal** (Craig's shape —
+   no shared-grant snapshot pair, but a subset-of-grants relationship plus the target ACIF's real
+   name already sitting in the *other* cluster's `full_names`): let a name-compatible,
+   ORCID-conflicting pair through to `gap_candidates` for human review — never auto-merge — when
+   corroborated by `coawardees` overlap, institution overlap, or a subset-of-grants relationship.
+   **Explicit caution, from evidence generated in this project's own session history**: this
+   corroboration combination (name-compatible + shared/overlapping grants) gave *opposite* correct
+   answers on Restubog and Craig when first tested — Restubog turned out to need the sharper,
+   mechanical announcement/current test above, not this one. So this path is for surfacing a
+   candidate for review, exactly like every other `gap_candidates` entry, not for resolving one.
+
+**2026-09-05 update**: Craig's own external evidence got stronger (see item #20's update — the
+"Jocelyn Craig" side's enrichment ORCID is now confirmed, via a live OpenAlex lookup, to belong to
+an unrelated real person), but neither part of the two-part fix above has been built yet. What
+*was* built this session is general-purpose supporting tooling (`FetchOrcid`, item #23) that makes
+part 2's corroboration-gathering (name-search, AU/HEP signal, middle-name signal) cheap to run —
+it doesn't implement the fix itself, and is deliberately not wired into `compute_gap_candidates()`
+or any other pre-Splink stage (same "apply only as a post-clustering promotion" principle as
+`apply_enriched_orcids()`).
+
+### 22 — Non-circular ARC+OAX_AU vs ORCID-bulk name-frequency reference, matched on every
+normalized form on both sides
+
+Found 2026-09-05, investigating why 791/4,891 NO_ORCID ACIFs have no name-rarity value at all
+(their `full_name_key` is simply absent from `oax_tf_full_name.parquet`, built only from OAX's
+2.78M AU-context population).
+
+**A first fix attempt was caught mid-session as circular, before being built — recorded here so
+it isn't tried again.** The obvious-looking patch was to union ARC's own ACIF names into the same
+reference population used to judge how rare *those same ACIF names* are — but that makes a name's
+own presence in the population under study part of the evidence for how common that population's
+names are. Worst case: a name existing in exactly one ACIF and nowhere in OAX would get its
+rarity computed using itself as the only supporting evidence — not a measurement of real-world
+rarity, a tautology. Rejected on direct user correction before any code was written.
+
+**The accepted design, specified directly by the user:**
+
+1. Build one deduplicated list of every *distinct normalized name* from the union of ARC's own
+   names and OAX's AU-context population ("ARC+OAX_UA") — this defines the full set of names of
+   interest at this stage.
+2. Normalize that list, and separately normalize `orcid_bulk.parquet`'s population (17.15M
+   records — external to and independent of both ARC and OAX, so no circularity risk), using the
+   *same* normalizer on both sides.
+3. Attempt matches using *every* normalized/canonical variant form on both sides, not one scalar
+   canonical pick per name before matching — the same "set overlap, not scalar collapse"
+   principle already fixed once this project (the `family_name_main`/`max_by_len()` history) —
+   applied here to name-frequency matching specifically, not just blocking.
+
+**Normalizer-agnosticism, checked directly, not assumed — no fix needed:**
+`src/utils/orcid_processor_arc_adapter.py::arc_name_normalizer()` is confirmed a pure pass-through
+wrapper: `p = _parser.parse(raw_name); return NameForms(p.given_tokens, p.family_name_main,
+p.first_name_canonical, p.full_name_key)`, with `_parser = HumanNameParser()` — a bare,
+unconfigured instance, no ARC-specific tables or parameters anywhere in the adapter. The `arc_`
+prefix names *whose* pluggable-normalizer instance this is, not a claim about ARC-biased
+behaviour — the module's own docstring states the design goal directly: "keeps the core module
+free of project-specific imports/opinions." One nuance worth recording plainly rather than
+glossing over: `HumanNameParser`'s own calibration choices (e.g. the bare-initial vowel-detection
+rule's inclusion of "y") were validated against real samples from *both* ARC and OAX data, not
+ARC alone (per this project's own 2026-08-19/20 session notes) — so it's genuinely general in
+mechanism, even though its tuning drew on this project's own populations for examples.
+
+**Supersedes, once built**: the `orcid_enrichment.parquet`-based quartile analysis from this
+session (rare ARC names show markedly *worse*, not better, live-search success — dominated by
+`not_found`, not ambiguity) should be re-run against this new reference once it exists, since the
+underlying rarity measure it was stratified on will change for a meaningful share of the
+population.
+
+### 23 — `FetchOrcid` built (`src/utils/fetch_orcid.py`); NO_ORCID scan is now stale, HAS_ORCID
+audit never run at scale
+
+Built 2026-09-05 on direct instruction ("code FetchOrcid as a class without planning"). A
+standalone class composed on top of `OrcidProcessor`/`orcid_client` (reuses, doesn't duplicate):
+`search_orcid(parsed: ParsedName)` — multi-form name search against `orcid_bulk.parquet` (every
+given×family combination, ASCII-reduced and raw forms unioned, not either/or), `orcid_fetch_short()`
+— local bulk-table row lookup, `orcid_fetch_long()` — cache-or-live-API full `/record`
+(`orcid_processor_arc_adapter.get_record()`, no new cache). Deliberately not wired into anything
+upstream of Splink, same "apply after clustering" principle as `apply_enriched_orcids()`.
+
+**Performance**: `_ensure_table()` materializes `orcid_bulk.parquet` into an in-memory DuckDB temp
+table once per instance instead of a fresh `read_parquet()` scan per call — measured 640ms/cluster
+(52 min for the full 4,891-cluster NO_ORCID population) down to ~90-107ms/cluster (~9 min).
+
+**Selectivity added, both real, both partial**:
+- `au_signal` — ORCID's self-reported `countries` field (13% filled population-wide) OR an exact
+  match against one of ARC's 42 HEP institution names (`admin_orgs.csv`). Real payoff: "L. Craig"
+  (44 same-initial candidates worldwide) → 2 with `au_only=True`.
+- `middle_match`/`require_middle_match` — a second, independent narrowing dimension for exactly
+  what `au_signal` can't help with (two same-surname, same-first-initial, both-Australian
+  candidates). Real payoff: "David Craig" (17 candidates) → 1 (`David L. Craig`) once a middle
+  initial is known and required. Semantics matter here, and were wrong on first build: excludes
+  only a genuine CONTRADICTION (both sides have a middle name and they differ), not mere absence
+  (a candidate whose own record never had a middle name entered is kept, not discarded) — fixed
+  2026-09-05 by re-parsing each candidate's own name for its own `middle_tokens` rather than
+  testing against the flat, undifferentiated `given_tokens` bag.
+
+**Two real bugs found and fixed via testing this session, both in `search_orcid()`**:
+1. **Short-circuit**: used to run the broader `family_name_main`+initial fallback only when the
+   exact `full_name_key` match found nothing — so one spurious exact match (e.g. someone's own
+   canonical name really does reduce to a bare "d_craig") could silently hide every candidate the
+   fallback would have found. Fixed: both passes always run, results unioned (deduped by orcid) —
+   confirmed neither pass is a strict subset of the other (an alias match can hit where the
+   initial-fallback misses, keyed off the PRIMARY name's own initials, and vice versa), so this is
+   a real completeness fix, not just a safety margin.
+2. **`require_middle_match` semantics** (see above).
+
+**A real, separate bug found and fixed in `HumanNameParser.parse()`** (`src/utils/names.py`),
+surfaced while building `middle_tokens`: `first_name_canonical` picked whichever given-name token
+was *longest*, with no regard for first-vs-middle position — so "George Stewart Walker"
+canonicalized to `stewart`, "Ben Martin Tsamenyi" to `martin`. Checked directly against real ARC
+data: **310 of 851 (36.4%)** distinct multi-token `first_name` values were affected, each one
+feeding a wrong `first_initial` straight into Splink's primary ARC-internal blocking key
+(`family_name_main + first_initial`) — a real, previously-undetected under-merge risk. Fixed to
+prefer the true first name, falling back to the middle name only when the first is itself a bare
+initial (e.g. "C. David Thomas" still correctly canonicalizes to `david`). Verified: mismatches
+dropped to 64, and every remaining one is the correct fallback firing (a genuine bare-initial
+first name). New `ParsedName.middle_tokens` field added (additive, no existing field changed).
+535/535 tests passing throughout every step above. `_POSTNOMINALS` also gained "Pharmacist"
+(same stacking/comma-separator handling as the existing list).
+
+**Investigation findings using `FetchOrcid`, real numbers**:
+- **NO_ORCID population** (4,891 non-excluded ACIFs, `au_only=True`): **0 candidates: 3,179
+  (65.0%) / 1: 981 (20.1%) / 2+: 731 (14.9%)**. Latest-grant-year distribution for the
+  zero-candidate bucket is heavily pre-2014 (median 2008, 77.6% before 2014) — matches this
+  project's own already-documented "post-2014 admin-inserted ORCID" pattern. But dropping
+  `au_only` on just that zero-candidate bucket found **2,602 of 3,179 (81.9%) actually do have at
+  least one name-matched candidate** — the "zero" result was mostly `au_signal`'s own sparsity, not
+  genuine absence. Only **577 (18.1%)** have nothing under name-matching at all, with or without
+  the filter — that's the population where "no ORCID reachable from ARC data as it stands" is
+  actually well-supported. **This whole NO_ORCID scan predates today's short-circuit fix and is
+  now stale** — the 981/1-candidate bucket in particular may understate true ambiguity, since some
+  of those cases would union in more candidates from the fallback under the fixed code. Needs
+  rerunning.
+- **HAS_ORCID audit** (`load_cluster_rows()`/`audit_clusters()`/`summarize_audit()`, same file) —
+  compares each ACIF's recorded orcid(s) against a fresh `search_orcid()` over its own name-forms,
+  reporting `recorded_missing_from_search` (a recorded orcid the fresh search never found) and
+  `extra_candidates` (other plausible people found alongside it) — exactly the signal that would
+  have flagged the Jocelyn Craig case (see item #20) automatically. Verified correct on a 20-cluster
+  sample only (e.g. `DE120100110_JeeHyunKim`, 6 candidates found) — **never run at full population
+  scale (~18K clusters)**, two launch attempts were interrupted before completing.
+- **ARC's own `orcid` field is confirmed retroactively backfilled**, same pattern as OAX's
+  author_idx back-propagation but a different, much lower risk category: 19,951 of 63,713 (31.3%)
+  pre-2013 investigator rows have a non-null `orcid`, including grants from 2001–2011 — years
+  before ORCID existed (launched October 2012) — proving the field reflects whatever ARC's system
+  has on file NOW, not a point-in-time capture. **User correction, recorded because it changes how
+  much this should worry us**: ARC's backfill is self-asserted (the applicant typing their own
+  ORCID into their profile), a human-mistake error mode, not an inferred/algorithmic match across
+  ambiguous evidence like OAX's — tier 1a still deserves the trust it already gets.
+- **ORCID `/history` schema** (checked directly against 33,820 real cached `/record` responses):
+  `submission-date`/`last-modified-date` always present; `completion-date` rare (7.5%);
+  `deactivation-date` never seen in this cache (0%). Not in the local bulk snapshot at all (only
+  in the live `/record`) — confirmed by inspecting a raw `records.jsonl.gz` row directly (top-level
+  keys: `orcid, name, locale, employments, educations, memberships` — no `history` section at all).
+  `claimed`/`verified-email`/`verified-primary-email` exist as real, cheap trust signals (59
+  unclaimed, ~2,200-2,500 unverified-email of ~33,820) — not yet added to `OrcidRecord`, which
+  currently only carries person/affiliation/work-year fields ported from the older
+  `orcid_client.py` accessors.
+
+**Needed next**: rerun the NO_ORCID scan under the fixed code; run the HAS_ORCID audit for the
+first time at full scale (~30 min estimated at current per-cluster cost); decide whether to record
+the confirmed Jocelyn Craig merge (`manual_merges.csv` + `enrichment_blocklist.csv` for the wrong
+ORCID) now or wait for item #21's fix to handle it structurally.
 
 ---
 
