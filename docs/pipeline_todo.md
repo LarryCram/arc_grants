@@ -110,6 +110,7 @@ continuation, then the larger/optional items last.
 21. **`compute_gap_candidates()`'s `orcid_incompat` is an unconditional veto — loosen it, and add a deterministic announcement/current-snapshot auto-merge** — two confirmed real cases (Restubog, Craig) currently invisible to review because of this; see its own entry below
 22. **Build a non-circular ARC+OAX_AU vs ORCID-bulk name-frequency reference, matched on every normalized name-form on both sides** — high priority, near the top: the current name-rarity/TF-adjustment basis is incomplete (791/4,891 NO_ORCID names have no rarity value at all) and the obvious-looking fix (folding ARC's own names into the reference population) is circular; see its own entry below
 23. **Rerun the `FetchOrcid` NO_ORCID scan (stale) and run the HAS_ORCID audit for the first time at full population scale** — the tooling (`src/utils/fetch_orcid.py`) is built and fixed; the actual population-scale numbers are either stale (NO_ORCID) or never computed (HAS_ORCID). See its own entry below.
+24. **Diagnose why a recorded/matched orcid doesn't resolve to the correct OAX `author_idx`** — two of four candidate causes closed empirically this session; the real remaining work reframes into exactly two post-link questions (single-candidate-link reliability; multi-candidate disambiguation, which is substantially already built but short-circuits around ORCID). See its own entry below.
 
 ---
 
@@ -935,6 +936,85 @@ first name). New `ParsedName.middle_tokens` field added (additive, no existing f
 first time at full scale (~30 min estimated at current per-cluster cost); decide whether to record
 the confirmed Jocelyn Craig merge (`manual_merges.csv` + `enrichment_blocklist.csv` for the wrong
 ORCID) now or wait for item #21's fix to handle it structurally.
+
+### 24 — Diagnosing why a recorded/matched orcid doesn't resolve to the correct OAX `author_idx`
+— two closed causes, and a reframing of what's actually still open
+
+Found 2026-09-06, starting from a direct, Splink-free SQL orcid-equality join over the 17,898
+HAS_ORCID ACIFs (`orcid` exploded from `awards_cif_arc_only.parquet`, joined directly against
+OpenAlex `authors.orcid` — no Splink involved at all): **1,376 (7.7%)** ARC-recorded orcids not
+found anywhere in OpenAlex's `authors` table at all; **14,491 (81.0%)** exactly one clean OAX
+author match; **2,031 (11.3%)** orcid shared across 2+ `author_idx`.
+
+**Four initial candidate causes, and what's settled about each:**
+
+- **ARC-side orcid inconsistency — CLOSED, empirically 0.** Two direct checks against
+  `awards_cif_arc_only.parquet` (22,789 non-excluded ACIFs, script: `scratch/
+  check_orcid_consistency.py`, not committed — project scratch is gitignored): 0 ACIFs with 2+
+  distinct orcid within one ACIF; 0 orcid values shared across 2+ ACIFs. Confirms
+  `split_orcid_conflicts()`/`MULTI_ORCID` already enforces this by construction, with no residual
+  gap from any later `refine_clusters()` step.
+- **OAX-side "orcid inconsistency," reframed.** A single `author_idx` never carries 2+ orcids —
+  confirmed 3 independent ways directly against `authors/*.parquet` (119,129,660 rows): zero
+  duplicate `author_idx` rows at all; the flat `orcid` column and the nested `ids.orcid` struct
+  field agree on every non-null pair; no multi-value string encodings found in the orcid field
+  itself (only 3 non-standard-length values population-wide, all truncated single orcids, not
+  concatenations). The real, common phenomenon is the *opposite* direction — many `author_idx`
+  sharing one real orcid, often small, recently-created fragments that OpenAlex's own
+  author-clustering never merged into the established record — exactly the 2,031-bucket above,
+  confirmed directly by the user to be a common, not rare, pattern ("There are a lot of small
+  recent author_idx for the same orcid"). This is OAX's own author-clustering under-merging
+  (fragmentation), the mirror image of the contamination case below, not an internal data
+  contradiction.
+- **Orcid match misses the true "adopted" `author_idx`** — a known, accepted, real category (the
+  Jocelyn Craig case, item #20/#21). Publication-count-based diagnostics don't work here: a low
+  count can mean either a genuine OpenAlex coverage gap (correct bucket) or a genuinely wrong/thin
+  fragment; a high count can mean either a genuinely correct bucket or contamination — count alone
+  can't tell the two apart in either direction, so neither a pre-Splink productivity prefilter nor
+  a post-link works_count tie-break can serve as this diagnostic. ORCID-record-dependent
+  diagnostics (forward-tracing the person's own `/works` DOIs into OpenAlex's `authorships`;
+  cross-checking self-reported employment timeline against candidate `author_idx` affiliations)
+  were also considered and set aside as impractical at scale — most ORCID records are too sparse
+  in exactly this data (few/no listed works, no employment history) for either to apply broadly.
+- **Matched `author_idx` contaminated by other people's work** (over-merge; the known Luxin Chen
+  pattern, documented elsewhere in CLAUDE.md) — the mirror image of the fragmentation case above.
+
+**The reframing reached with the user**: these four causes collapse into exactly two real
+post-link questions, not four separate things to chase.
+
+- **(a) Reliability of "exactly one candidate" links.** The largest population in the whole
+  pipeline (the 14,491 clean single-orcid-equality matches above, every Splink `unique_hc`
+  resolution, and `04_resolve_links.py`'s own Step 1b within-group orcid match) currently gets
+  zero scrutiny by construction, since nothing else is present in that resolution path to compare
+  against. Needs a mechanism analogous to `AwardsCIF.reliability_tier` on the ARC-internal side: a
+  confidence grade for a *single* OAX candidate, built from institution/field/timeline
+  plausibility checked against the ACIF's own known facts (grant institution(s), FOR-declared
+  field, grant years) — deliberately NOT dependent on the ORCID record's own self-reported data,
+  confirmed too sparse to rely on for most records.
+- **(b) Disambiguation of ACIFs with 2+ linked candidates** (common, expected, given the
+  fragmentation pattern above) — substantially already built in `04_resolve_links.py` (institution
+  overlap Step 2/line 312-319, field score Step 2b/line 321-330, works_count dominance Step
+  4/line 344-356 — verified by direct read this session, not from memory or the CLAUDE.md
+  summary). Two confirmed real gaps: (i) Step 1b's ORCID match (line 282-291) short-circuits
+  *before* institution/field are ever checked — a better-fitting non-orcid candidate in the same
+  ambiguous group is never compared against an orcid winner; (ii) the whole cascade only ever
+  operates over whatever candidate set Splink's own high-confidence (≥0.9) scoring already
+  produced (`per_arc >= 2`, line 195) — no reach into a true candidate Splink never surfaced at
+  all, exactly the population the direct SQL orcid-equality join reaches instead.
+
+**Also still open, unresolved, from the same investigation**: a person-relative implausible-year
+check (ARC grant's earliest `funding_commence_year` vs. the OAX candidate's earliest OpenAlex
+publication year, over the 22,573 currently-resolved links in `arc_oax_resolved.parquet`) found
+only 322/22,570 (1.4%) implausible — far short of the user's own claim that "well over 20%" of
+current matches are not possible on the basis of ARC/OAX info alone. Not yet explained by any
+signal tested so far; `arc_oax_resolved.parquet` itself is this pipeline's own unverified output,
+not ground truth, so any such check only measures "how much would the pipeline's own answer
+change," never a real accuracy rate.
+
+**Needed next**: (i) design/build the (a)-reliability signal from ARC-side + OAX-native data only,
+no ORCID self-report dependency; (ii) fix the two (b)-cascade gaps identified above; (iii) keep
+investigating what signal(s) would actually substantiate the ">20%" claim — pub-count/productivity
+thresholds and grant-year-vs-earliest-pub-year have both now been tried and don't explain it.
 
 ---
 
