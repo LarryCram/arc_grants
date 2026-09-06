@@ -2124,6 +2124,45 @@ def compute_coawardees(clusters: list[AwardsCIF], items: list[AwardCIFItem]) -> 
     return clusters
 
 
+def find_coawardee_self_collisions(clusters: list[AwardsCIF]) -> list[dict]:
+    """The standing population-wide check docs/pipeline_todo.md #20 asks for: does any ACIF's
+    own `coawardees` entry share a full_name_key/full_name_key_raw with that SAME ACIF's own
+    name? Found by hand on 4 clusters (Craig, Restubog) before this existed -- both confirmed
+    real same-person splits, one externally confirmed via a live OpenAlex lookup showing the
+    "loser" side's own ORCID belongs to a different, unrelated person entirely.
+
+    Checks every one of the ACIF's own ITEMS' full_name_key/full_name_key_raw (not just the
+    cluster-level modal `full_name_key` scalar) against the same on the coawardee side -- a
+    cluster with 2+ genuinely different recorded name-forms (the whole point of the Craig case)
+    would otherwise only ever get checked against whichever form happened to be modal, silently
+    missing a collision on its other own name-form. Surfaced as a reviewable list, same
+    discipline as gap_candidates -- never auto-resolved."""
+    results = []
+    for c in clusters:
+        if c.excluded:
+            continue
+        own_keys: set[str] = set()
+        for it in c.items:
+            if it.full_name_key:
+                own_keys.add(it.full_name_key)
+            if it.parsed is not None and it.parsed.full_name_key_raw:
+                own_keys.add(it.parsed.full_name_key_raw)
+        if not own_keys:
+            continue
+        for co in c.coawardees:
+            co_key = co.get("full_name_key") or co.get("full_name_key_raw")
+            if co_key and co_key in own_keys:
+                results.append({
+                    "cluster_id": c.cluster_id,
+                    "full_names": list(c.full_names),
+                    "orcids": list(c.orcids),
+                    "grant_ids": list(c.grant_ids),
+                    "coawardee_key": co_key,
+                    "coawardee_count": co["count"],
+                })
+    return results
+
+
 def widen_names_with_orcid_bulk_db(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     """Additive name-form widening from the local ORCID bulk snapshot
     (src/utils/orcid_processor.py's orcid_bulk.parquet -- 17.15M ORCID records, the full Zenodo

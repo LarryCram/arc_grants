@@ -211,6 +211,10 @@ __marimo__/
 .venv
 output/
 
+# Project-local scratch: throwaway driver/one-off scripts and their output, persisted on disk
+# (unlike /tmp session scratchpads, which get wiped between sessions) but not real project code.
+scratch/
+
 # LaTeX
 docs/*.aux
 docs/*.log

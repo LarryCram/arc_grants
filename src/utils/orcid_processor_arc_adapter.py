@@ -40,9 +40,15 @@ _parser = HumanNameParser()
 
 def arc_name_normalizer(raw_name: str) -> NameForms:
     """This project's exact name-comparison convention, injected into OrcidProcessor as its
-    name_normalizer rather than imported directly into the core module."""
+    name_normalizer rather than imported directly into the core module. Passes through
+    p.family_names (the full diacritic-widened variant set, e.g. {"gruen","grun"}) -- not just
+    family_name_main -- so NameForms.family_names/all_full_name_keys() carry the real set
+    instead of silently narrowing back to one scalar at this adapter boundary (the actual root
+    cause of a 2026-09-06 "why are you picking one" finding: the richer parse already computed
+    the full set, this adapter was just never forwarding it)."""
     p = _parser.parse(raw_name)
-    return NameForms(p.given_tokens, p.family_name_main, p.first_name_canonical, p.full_name_key)
+    return NameForms(p.given_tokens, p.family_name_main, p.first_name_canonical, p.full_name_key,
+                      family_names=p.family_names)
 
 
 def institution_matched_candidates(candidates: list[dict], own_institution_names: list[str] | set[str]) -> list[dict]:

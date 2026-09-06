@@ -55,10 +55,28 @@ class FetchOrcid:
         1.2GB parquet file from cold via read_parquet() -- measured directly: ~640ms/cluster
         (a full column scan + LIST<VARCHAR> decode of alias_full_name_keys, repeated per
         name-form, per fallback) against a real 4,891-cluster NO_ORCID batch, ~52 minutes total
-        for one run. One in-memory load pays this cost exactly once per FetchOrcid instance."""
+        for one run. One in-memory load pays this cost exactly once per FetchOrcid instance.
+
+        Also flattens all_full_name_keys (2026-09-06: orcid_bulk.parquet's own precomputed SET
+        of every given x family combination the primary name AND every alias could produce --
+        see orcid_processor.all_full_name_keys() -- not full_name_key's single "longest wins"
+        pick) into its own one-row-per-key index table (orcid_key_index_tbl). Necessary for two
+        reasons found building batch_search_orcids(): (1) `full_name_key = k.key OR
+        list_contains(alias_full_name_keys, k.key)` can't be hash-joined -- the OR'd
+        list_contains side has no equi-join DuckDB can plan against, so it falls back to a
+        near-full-table scan per batch of keys (confirmed directly: 21s for a 5,030-key batch
+        returning only 67K rows, versus 0.9s for a comparable equi-joinable query returning 1.2M
+        rows); (2) matching should use the SAME full-set-vs-full-set principle on both sides, not
+        a single scalar on the orcid side and a full set on the ACIF side -- flattening once here
+        turns every key (primary or alias) into a plain equi-join target."""
         if not self._table_ready:
             self.con.execute(
                 f"CREATE OR REPLACE TEMP TABLE orcid_bulk_tbl AS SELECT * FROM read_parquet('{self.bulk_parquet}')"
+            )
+            self.con.execute(
+                "CREATE OR REPLACE TEMP TABLE orcid_key_index_tbl AS "
+                "SELECT orcid, unnest(all_full_name_keys) AS key FROM orcid_bulk_tbl "
+                "WHERE len(all_full_name_keys) > 0"
             )
             self._table_ready = True
 
@@ -122,11 +140,13 @@ class FetchOrcid:
         if keys:
             rows = self.con.execute(
                 """
-                SELECT orcid, name, countries, given_tokens, employments, educations, memberships
-                FROM orcid_bulk_tbl
-                WHERE full_name_key = ANY(?) OR list_has_any(alias_full_name_keys, ?)
+                SELECT o.orcid, o.name, o.countries, o.given_tokens,
+                       o.employments, o.educations, o.memberships
+                FROM (SELECT DISTINCT unnest(?) AS key) k
+                JOIN orcid_key_index_tbl i ON i.key = k.key
+                JOIN orcid_bulk_tbl o ON o.orcid = i.orcid
                 """,
-                [keys, keys],
+                [keys],
             ).fetchall()
             for r in rows:
                 c = self._to_candidate(r, parsed.middle_tokens)
@@ -139,6 +159,109 @@ class FetchOrcid:
         if require_middle_match and parsed.middle_tokens:
             candidates = [c for c in candidates if c["middle_match"] is not False]
         return candidates
+
+    def batch_search_orcids(self, cluster_names: dict[str, list[str]],
+                             au_only: bool = False) -> dict[str, list[dict]]:
+        """The batched equivalent of calling search_orcid() once per cluster per name-form --
+        joins against orcid_bulk_tbl on the DISTINCT key vocabulary only, then fans results out
+        to clusters in Python, rather than one query per cluster. Per direct instruction
+        (2026-09-04, this project's own session history): "make an sql to query all the names in
+        [the whole population], and capture the joins against the orcid [table]... in one
+        query" -- search_orcid() was built as a single-name convenience method and this
+        project's own population-scale audit tools then called it in a Python loop across
+        ~18,000 clusters, exactly the per-row pattern that instruction was given to avoid.
+
+        Joining on (cluster_id, key) pairs directly -- the first attempt at this -- is NOT
+        the fix: a common surname (`family_name_main='wang'` alone matches 239,315 rows in
+        orcid_bulk.parquet, confirmed directly) shared across many ARC clusters would fan out
+        combinatorially (matching rows x how many clusters share that key), producing a WORSE
+        result than the per-cluster loop, not a better one -- confirmed by that exact version
+        hanging on a 2,000-cluster sample. The fix: join on the distinct (family, initial) /
+        exact-key vocabulary alone (bounded by how many distinct forms exist, independent of how
+        many clusters share one), then look up each cluster's own keys in the resulting
+        dict -- pure Python dict access, no further DB work.
+
+        `middle_match` is not computed here (it needs a per-candidate reparse keyed to each
+        specific ACIF's own middle_tokens, which doesn't batch the same way) -- callers needing
+        it should use search_orcid() directly on the small number of candidates this returns,
+        not re-derive it from this method's output.
+        """
+        self._ensure_table()
+        parser = HumanNameParser()
+
+        cluster_exact_keys: dict[str, set[str]] = {}
+        cluster_fb_keys: dict[str, set[tuple[str, str]]] = {}
+        all_exact_keys: set[str] = set()
+        all_fb_keys: set[tuple[str, str]] = set()
+
+        for cluster_id, full_names in cluster_names.items():
+            ek: set[str] = set()
+            fbk: set[tuple[str, str]] = set()
+            for fn in full_names:
+                p = parser.parse(fn)
+                ek.update(self._candidate_full_name_keys(p))
+                family_all = list(dict.fromkeys(
+                    list(p.family_names) + ([p.family_name_raw] if p.family_name_raw else [])
+                ))
+                initials = list(dict.fromkeys(t[:1] for t in p.given_tokens if t))
+                fbk.update((fam, init) for fam in family_all for init in initials)
+            cluster_exact_keys[cluster_id] = ek
+            cluster_fb_keys[cluster_id] = fbk
+            all_exact_keys.update(ek)
+            all_fb_keys.update(fbk)
+
+        key_to_candidates: dict[str, dict[str, dict]] = {}
+        if all_exact_keys:
+            keys_list = list(all_exact_keys)
+            # One equi-join against the flattened all_full_name_keys index -- not an OR'd
+            # list_contains() (can't be hash-joined, see _ensure_table()'s docstring) and not
+            # two separate queries against full_name_key/alias_full_name_keys either, now that
+            # orcid_key_index_tbl already carries every key (primary AND alias) that matters.
+            rows = self.con.execute(
+                """
+                SELECT k.key, o.orcid, o.name, o.countries, o.given_tokens,
+                       o.employments, o.educations, o.memberships
+                FROM (SELECT unnest(?) AS key) k
+                JOIN orcid_key_index_tbl i ON i.key = k.key
+                JOIN orcid_bulk_tbl o ON o.orcid = i.orcid
+                """,
+                [keys_list],
+            ).fetchall()
+            for key, *row in rows:
+                c = self._to_candidate(tuple(row))
+                key_to_candidates.setdefault(key, {})[c["orcid"]] = c
+
+        fb_to_candidates: dict[tuple[str, str], dict[str, dict]] = {}
+        if all_fb_keys:
+            fams = [k[0] for k in all_fb_keys]
+            inits = [k[1] for k in all_fb_keys]
+            rows = self.con.execute(
+                """
+                SELECT f.family, f.initial, o.orcid, o.name, o.countries, o.given_tokens,
+                       o.employments, o.educations, o.memberships
+                FROM (SELECT unnest(?) AS family, unnest(?) AS initial) f
+                JOIN orcid_bulk_tbl o
+                  ON o.family_name_main = f.family AND list_contains(o.given_tokens, f.initial)
+                """,
+                [fams, inits],
+            ).fetchall()
+            for fam, init, *row in rows:
+                c = self._to_candidate(tuple(row))
+                fb_to_candidates.setdefault((fam, init), {})[c["orcid"]] = c
+
+        out: dict[str, list[dict]] = {}
+        for cluster_id in cluster_names:
+            merged: dict[str, dict] = {}
+            for k in cluster_exact_keys[cluster_id]:
+                merged.update(key_to_candidates.get(k, {}))
+            for fbk in cluster_fb_keys[cluster_id]:
+                for orcid, c in fb_to_candidates.get(fbk, {}).items():
+                    merged.setdefault(orcid, c)
+            candidates = list(merged.values())
+            if au_only:
+                candidates = [c for c in candidates if c["au_signal"]]
+            out[cluster_id] = candidates
+        return out
 
     @staticmethod
     def _candidate_full_name_keys(parsed: ParsedName) -> list[str]:
@@ -333,6 +456,137 @@ def audit_clusters(fo: "FetchOrcid", rows: list[tuple[str, list[str], list[str]]
     return results
 
 
+def reverse_lookup_orcid_name(fo: "FetchOrcid", orcid: str) -> dict:
+    """Given an orcid already recorded on an ACIF, look it up the OTHER way -- by orcid, not by
+    name -- and return its own name-object, so it can be compared against the ACIF's own name
+    forms directly. Local bulk snapshot first (orcid_fetch_short(); already normalized the
+    identical way as the ACIF side, via arc_name_normalizer, so full_name_key/
+    alias_full_name_keys are directly comparable); a live /record fetch (cache-or-API) only on a
+    local miss -- distinguishes "not in our 17.15M-record snapshot" from "genuinely unreachable"
+    rather than conflating them, since a live-record hit there means the orcid is real and
+    current, just newer than (or otherwise missing from) the local crawl."""
+    short = fo.orcid_fetch_short(orcid)
+    if short is not None:
+        return {
+            "source": "bulk",
+            "name": short["name"],
+            "full_name_key": short["full_name_key"],
+            "alias_full_name_keys": list(short["alias_full_name_keys"] or []),
+            "family_name_main": short["family_name_main"],
+        }
+    rec = fo.orcid_fetch_long(orcid)
+    if rec.error:
+        return {"source": "unreachable", "error": rec.error, "name": None,
+                "full_name_key": None, "alias_full_name_keys": [], "family_name_main": None}
+    forms = [n for n in (
+        [f"{rec.given_names or ''} {rec.family_name or ''}".strip()]
+        + ([rec.credit_name] if rec.credit_name else [])
+        + list(rec.other_names)
+    ) if n and n.strip()]
+    keys: list[str] = []
+    family_mains: set[str] = set()
+    for f in forms:
+        p = fo._parser.parse(f)
+        keys.extend(k for k in (p.full_name_key, p.full_name_key_raw) if k)
+        if p.family_name_main:
+            family_mains.add(p.family_name_main)
+    keys = list(dict.fromkeys(keys))
+    return {
+        "source": "live",
+        "name": f"{rec.given_names or ''} {rec.family_name or ''}".strip() or None,
+        "full_name_key": keys[0] if keys else None,
+        "alias_full_name_keys": keys[1:],
+        "family_name_main": sorted(family_mains) or None,
+    }
+
+
+def au_signal_for_recorded_orcid(fo: "FetchOrcid", orcid: str) -> tuple[str, bool | None]:
+    """Checks AU/HEP signal for an already-recorded orcid DIRECTLY by ID (bulk row, then a live
+    /record fetch) -- not via name search. Built 2026-09-06 after confirming, case by case
+    (Yong Wang, Jie Wang, Rahul Sharma, Pengtang Wang), that ORCID's own search/crawl coverage
+    has real gaps even for fully legitimate, richly-documented accounts -- "not found by name
+    search" is not evidence against a recorded orcid, so triaging the 384-case
+    recorded-orcid-not-found population needs a check that doesn't depend on name search at
+    all. Reuses the exact same au_signal logic search_orcid() already applies to candidates,
+    against the one specific known ID instead of a candidate pool.
+
+    Returns (source, au_signal): source is "bulk" (in orcid_bulk.parquet), "live" (fetched via
+    cache-or-API), or "unreachable" (neither -- au_signal is None in that case, not False, since
+    there's nothing to check)."""
+    short = fo.orcid_fetch_short(orcid)
+    if short is not None:
+        countries = list(short["countries"] or [])
+        institution_names = list(dict.fromkeys(
+            e["name"] for group in (short["employments"], short["educations"], short["memberships"])
+            for e in (group or []) if e.get("name")
+        ))
+        return "bulk", fo._au_signal(countries, institution_names)
+    rec = fo.orcid_fetch_long(orcid)
+    if rec.error:
+        return "unreachable", None
+    countries = [a.country for a in rec.all_affiliations if a.country]
+    return "live", fo._au_signal(countries, list(rec.institution_names))
+
+
+def classify_name_compatibility(acif_own_keys: set[str], orcid_obj: dict) -> str:
+    """Closes the loop a raw "not found" row can't answer on its own: is a recorded-but-
+    unmatched orcid a real wrong-orcid signal, a matching-tool gap, or just a coverage/staleness
+    gap in the local snapshot?
+      - "orcid_unreachable": no bulk row, no live record either (deactivated, never existed, or
+        a transient fetch error) -- can't classify further.
+      - "name_compatible_key_match": the orcid's own full_name_key or an alias key exactly
+        matches one of the ACIF's own keys -- the forward search SHOULD have found this; a hit
+        here on the *bulk* source is a real search-logic bug worth chasing, while a hit on the
+        *live* source just means the bulk snapshot itself doesn't carry this alias/form.
+      - "family_compatible_given_mismatch": same surname, different given name -- plausibly a
+        genuine name-form gap (a nickname/married-name our matching doesn't bridge), not
+        necessarily a wrong orcid.
+      - "name_incompatible": different surname entirely -- the strongest available red flag that
+        the recorded orcid does not belong to this ACIF (the Jocelyn Craig signature).
+    """
+    if orcid_obj.get("source") == "unreachable":
+        return "orcid_unreachable"
+    orcid_keys = {k for k in ([orcid_obj.get("full_name_key")] + list(orcid_obj.get("alias_full_name_keys") or [])) if k}
+    if orcid_keys & acif_own_keys:
+        return "name_compatible_key_match"
+    acif_families = {k.rsplit("_", 1)[-1] for k in acif_own_keys if "_" in k}
+    fam = orcid_obj.get("family_name_main")
+    orcid_families = set(fam) if isinstance(fam, (list, set)) else ({fam} if fam else set())
+    if acif_families & orcid_families:
+        return "family_compatible_given_mismatch"
+    return "name_incompatible"
+
+
+def audit_with_reverse_lookup(fo: "FetchOrcid", rows: list[tuple[str, list[str], list[str]]],
+                               au_only: bool = False) -> list[dict]:
+    """audit_clusters() plus, for every recorded orcid the forward search misses, the reverse
+    lookup + classification above -- one pass, so the expensive forward search never has to run
+    twice. Returns one row per (cluster_id, missing_orcid) pair -- clusters with nothing missing
+    contribute no rows."""
+    parser = HumanNameParser()
+    out = []
+    for cluster_id, full_names, recorded_orcids in rows:
+        found: set[str] = set()
+        own_keys: set[str] = set()
+        for fn in full_names:
+            parsed = parser.parse(fn)
+            own_keys.update(k for k in (parsed.full_name_key, parsed.full_name_key_raw) if k)
+            for c in fo.search_orcid(parsed, au_only=au_only):
+                found.add(c["orcid"])
+        for orcid in sorted(set(recorded_orcids or []) - found):
+            obj = reverse_lookup_orcid_name(fo, orcid)
+            out.append({
+                "cluster_id": cluster_id,
+                "full_names": list(full_names),
+                "recorded_orcid": orcid,
+                "orcid_source": obj["source"],
+                "orcid_name": obj.get("name"),
+                "orcid_full_name_key": obj.get("full_name_key"),
+                "classification": classify_name_compatibility(own_keys, obj),
+            })
+    return out
+
+
 def summarize_audit(results: list[dict], has_recorded: bool) -> dict:
     """n_candidates 0/1/2+ counts always; for a HAS_ORCID-style population also counts how many
     clusters have a recorded orcid the fresh search never found (`recorded_missing_from_search`)
@@ -365,14 +619,21 @@ if __name__ == "__main__":
 
     status = sys.argv[1] if len(sys.argv) > 1 else "NO_ORCID"
     out_csv = sys.argv[2] if len(sys.argv) > 2 else f"/tmp/fetch_orcid_audit_{status}.csv"
+    # au_only defaults True (candidate-narrowing use case) -- pass "0"/"false" as a 3rd arg for
+    # the existence-check use case (does a RECORDED orcid turn up at all), where au_only=True
+    # systematically inflates "not found" whenever the recorded orcid's own record simply lacks
+    # AU signal (sparse `countries`, no exact HEP-name employment match) even though the
+    # unfiltered search does find it -- confirmed 2026-09-05 on the NO_ORCID population (81.9% of
+    # "0 candidates" cases actually had one once au_only was dropped).
+    au_only = len(sys.argv) <= 3 or sys.argv[3].lower() not in ("0", "false", "no")
 
     rows = load_cluster_rows(orcid_status=None if status == "ALL" else status)
-    print(f"{len(rows)} {status} non-excluded ACIFs to audit", flush=True)
+    print(f"{len(rows)} {status} non-excluded ACIFs to audit (au_only={au_only})", flush=True)
 
     t0 = time.time()
     with FetchOrcid() as fo:
         fo._ensure_table()
-        results = audit_clusters(fo, rows, au_only=True)
+        results = audit_clusters(fo, rows, au_only=au_only)
     print(f"done in {time.time()-t0:.0f}s")
 
     print("SUMMARY:", summarize_audit(results, has_recorded=(status != "NO_ORCID")))

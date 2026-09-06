@@ -87,6 +87,28 @@ class NameForms:
     family_name_main: str | None
     first_name_canonical: str | None
     full_name_key: str | None
+    # The full family-name variant set (e.g. diacritic-widened forms: {"gruen","grun"}), not
+    # just family_name_main's own single "longest wins" pick -- added 2026-09-06 because
+    # collapsing this to one scalar at conversion time (the original design) threw away
+    # information no downstream consumer could ever recover, the same "pick one from an
+    # equally-plausible set" mistake this project has repeatedly found and fixed elsewhere
+    # (family_name_main/max_by_len() contamination, first_name_canonical). Defaults to a
+    # single-element tuple of family_name_main for normalizers that don't compute variants.
+    family_names: tuple[str, ...] = field(default_factory=tuple)
+
+    def __post_init__(self):
+        if not self.family_names and self.family_name_main:
+            object.__setattr__(self, "family_names", (self.family_name_main,))
+
+
+def all_full_name_keys(nf: NameForms) -> list[str]:
+    """Every given x family combination this NameForms could produce, order-preserving
+    deduped -- the SET of all possible full names, not one collapsed representative. Mirrors
+    FetchOrcid._candidate_full_name_keys()'s ACIF-side logic exactly, so both sides of a match
+    are built the same way."""
+    combos = [f"{g}_{f}" for g in nf.given_tokens for f in nf.family_names if g and f]
+    extra = [nf.full_name_key] if nf.full_name_key else []
+    return list(dict.fromkeys(combos + extra))
 
 
 def default_name_normalizer(raw_name: str) -> NameForms:
@@ -140,10 +162,23 @@ def _affil_list(entries: list[dict] | None) -> list[dict]:
 def parse_bulk_record(rec: dict, normalizer: Callable[[str], NameForms] = default_name_normalizer) -> dict:
     """One records.jsonl.gz row -> one flat dict ready for pyarrow, nested-column employments/
     educations/memberships/works, plus HumanName-derived matching columns for the primary name
-    AND every alias (so any known name form is equally matchable, not just the primary one)."""
+    AND every alias (so any known name form is equally matchable, not just the primary one).
+
+    all_full_name_keys is the SET of every given x family combination the primary name and every
+    alias could produce (all_full_name_keys(), same combinatorial logic as
+    FetchOrcid._candidate_full_name_keys() uses on the ACIF side) -- not full_name_key's single
+    "longest wins" pick. Both are kept: full_name_key/family_name_main stay as convenient single
+    scalars for display and TF-style weighting; all_full_name_keys is what matching should
+    actually join against, precomputed once here rather than re-derived (or worse, silently
+    collapsed to one value) at query time."""
     name = rec.get("name")
     aliases = list(rec.get("aliases") or [])
     primary = normalizer(name) if name else NameForms((), None, None, None)
+    all_keys: list[str] = list(all_full_name_keys(primary))
+    for a in aliases:
+        if a:
+            all_keys.extend(all_full_name_keys(normalizer(a)))
+    all_keys = list(dict.fromkeys(all_keys))
     alias_keys = list(dict.fromkeys(
         nf.full_name_key for a in aliases if a and (nf := normalizer(a)).full_name_key
     ))
@@ -168,6 +203,7 @@ def parse_bulk_record(rec: dict, normalizer: Callable[[str], NameForms] = defaul
         "first_name_canonical": primary.first_name_canonical,
         "full_name_key": primary.full_name_key,
         "alias_full_name_keys": alias_keys,
+        "all_full_name_keys": all_keys,
     }
 
 
@@ -195,6 +231,7 @@ BULK_SCHEMA = pa.schema([
     ("first_name_canonical", pa.string()),
     ("full_name_key", pa.string()),
     ("alias_full_name_keys", pa.list_(pa.string())),
+    ("all_full_name_keys", pa.list_(pa.string())),
 ])
 
 
