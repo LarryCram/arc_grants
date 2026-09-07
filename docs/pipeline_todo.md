@@ -100,7 +100,7 @@ continuation, then the larger/optional items last.
 11. **Roadmap step 3**: drop zero-work `author_idx` from `oax_candidates`
 12. **Roadmap step 4**: definitive-evidence gate / `Dossier()` construction by selection
 13. **Plan Part B**: `Dossier()` ARC-story header, `dossier_build_arc.py`/`dossier_build_oax.py` split
-14. (optional/low-value) **Frequency-plurality fallback for `family_name_main`** — set-overlap fix already shipped, this is a residual refinement only
+14. **Excise `family_name_main` as a scalar, replace with a genuine set-overlap representation in Splink's own scoring/TF-adjustment** (rescoped 2026-09-07, no longer low-priority — the set-overlap fix already shipped only touched blocking, not scoring)
 15. **Extract `author_position`** — purely opportunistic, do only when the OpenAlex snapshot is next re-converted for an unrelated reason
 16. **Work through the `accuracy_checks.md` checklist** (largest, most multi-part, least urgent — a standing backlog, not a single task)
 17. **HEP-affiliation-history candidate-pool pruning for common-name mega-pools** — real, partial win, not built (see its own entry below)
@@ -108,7 +108,11 @@ continuation, then the larger/optional items last.
 19. **Consolidate pre-linking ORCID processing into `00b_enrich_orcid.py`; clean out the scattered/duplicated local-ORCID-source code this session's exploration left behind** — high priority, blocks trusting any further ORCID enrichment work until done
 20. **Audit `AwardsCIF.coawardees` for a co-awardee key colliding with the ACIF's own name** — deliberately not filtered out at construction (a collision is itself a useful merge-candidate signal, not an error); needs a standing check to actually surface and review these, not just leave them sitting unexamined in the data
 21. **`compute_gap_candidates()`'s `orcid_incompat` is an unconditional veto — loosen it, and add a deterministic announcement/current-snapshot auto-merge** — two confirmed real cases (Restubog, Craig) currently invisible to review because of this; see its own entry below
-22. **Build a non-circular ARC+OAX_AU vs ORCID-bulk name-frequency reference, matched on every normalized name-form on both sides** — high priority, near the top: the current name-rarity/TF-adjustment basis is incomplete (791/4,891 NO_ORCID names have no rarity value at all) and the obvious-looking fix (folding ARC's own names into the reference population) is circular; see its own entry below
+22. ~~Non-circular ARC+OAX_AU vs ORCID-bulk name-frequency reference~~ — **DEMOTED 2026-09-07,
+    not a real todo.** User's own correction: this was a design discussed in passing while
+    investigating a different finding, never actually committed to as a task — recorded here
+    with more weight than it ever had. Kept below only as a shrunk historical note (what was
+    discussed, why it was set aside), not as a live, sequenced item.
 23. **Rerun the `FetchOrcid` NO_ORCID scan (stale) and run the HAS_ORCID audit for the first time at full population scale** — the tooling (`src/utils/fetch_orcid.py`) is built and fixed; the actual population-scale numbers are either stale (NO_ORCID) or never computed (HAS_ORCID). See its own entry below.
 24. **Diagnose why a recorded/matched orcid doesn't resolve to the correct OAX `author_idx`** — two of four candidate causes closed empirically this session; the real remaining work reframes into exactly two post-link questions (single-candidate-link reliability; multi-candidate disambiguation, which is substantially already built but short-circuits around ORCID). See its own entry below.
 
@@ -347,6 +351,22 @@ for manual review (safe direction) rather than under-flags. The original derivat
 was never persisted, so there's no way to diff against it directly. Needs a slower pass
 grounded in real, named-case validation from the start, not aggregate statistics alone.
 
+**What `is_suspicious_for2020()`/`resolution_status` actually affects, checked directly
+(2026-09-07)**: grepped every read site of `resolution_status` in `src/`/`analysis/`/`tests/`.
+It is written in exactly one place (`compute_reliability()`, `awards_cif.py`) and read in
+exactly one place downstream of that: `01a_diagnose.py`'s own console report and its A2/A3
+cross-check count. Nothing in `03_link_arc_oax.py`, `04_resolve_links.py`,
+`oeuvre_build.py`, `dossier.py`/`dossier_build.py`, or any `analysis/*.py` script reads it at
+all. So this flag has **no downstream computational effect** on linking, oeuvre-building, or
+analysis output — its only real consequence is whether a human gets prompted to review a
+cluster (via `01a_diagnose.py`'s report, feeding `manual_splits.csv`/
+`manual_confirmed_not_suspicious.csv`). Getting `ACCEPTABLE_DIVISION_PAIRS` wrong therefore
+costs *review burden* (too many or too few clusters surfaced for a human to look at), not a
+silently wrong pipeline output by itself — a false negative (a real wrongful merge that stays
+`RESOLVED`) only becomes a real problem if it's also never caught by any of this project's
+other checks (B1 ORCID-collision, `4u` under-merge review, manual case-by-case review), and a
+false positive just means one more cluster a human has to glance at and confirm fine.
+
 ### 9 — Group-level ACIF-membership gate: two remaining real gaps
 Design done, channeling + persistence + `Dossier()` wiring done (2026-08-18). Two
 confirmed, unresolved gaps:
@@ -400,12 +420,68 @@ just Part B's own scope (the arc/oax split + ARC-story header), this likely also
 pipeline rather than anything the candidate/work cleaning work produces (see the oeuvre-QA
 plan's item 10, `write-out-the-full-floofy-starfish.md`) — not scoped further than that yet.
 
-### 14 — `family_name_main` frequency/plurality fallback (residual, optional)
-The set-overlap blocking fix (option 2) already shipped 2026-08-25 and is confirmed
-working. Option 1 — picking `family_name_main` itself by frequency/plurality rather than
-raw string length — was never built. Same class of bug already independently fixed in the
-two ARC-internal Python grouping functions. Low priority: the core over-merge/under-merge
-risk this was protecting against is already addressed by the shipped fix.
+### 14 — Excise `family_name_main` as a scalar; replace with a genuine set representation
+everywhere it's used for matching, not just blocking — RESCOPED 2026-09-07, no longer
+low-priority
+
+**Corrected framing.** This item used to describe a small residual refinement (picking
+`family_name_main` by frequency/plurality instead of raw string length). Direct user
+correction: that's not the fix — `family_name_main` itself (the scalar collapse of a
+name's family_names SET down to one representative string) should be eliminated from
+matching logic throughout the codebase, not tuned. `family_name_main` is confirmed the
+*only* `_main`-suffixed field anywhere in this codebase (checked directly, 2026-09-07 —
+`oax_family_name_main`/`arc_family_name_main` are the same field under a join-disambiguating
+alias, not a second independent field); it appears **128 times across 14 files**
+(`names.py`, `orcid_processor.py`, `orcid_processor_arc_adapter.py`, `awards_cif.py`,
+`00c_prepare_oax.py`, `03_link_arc_oax.py` — 34 occurrences, the heaviest single user —
+`04_resolve_links.py`, `01a_diagnose.py`, `fetch_orcid.py`, `cluster_checks.py`,
+`verify_family_name_blocking.py`, plus tests). `first_name_canonical` is a genuinely
+different concept (a deliberately-chosen canonical form, not a length-based "pick one"
+collapse of a set) and is out of scope here unless a separate check finds the same failure
+shape in it.
+
+**Where it's still load-bearing beyond blocking, checked directly in `03_link_arc_oax.py`**
+(the 2026-08-25 set-overlap fix only widened *blocking* — which pairs get scored — it left
+every one of these untouched):
+- The Splink **scoring** comparison itself: `cll.ExactMatchLevel("family_name_main")
+  .configure(tf_adjustment_column="family_name_main")` — a pair that only shares a family
+  name via the set-overlap blocking rule (not via the two `family_name_main` scalars
+  happening to agree) gets zero credit from this comparison, ever, no matter how the pair
+  was found.
+- The name-order-swap comparison (`first_name_l = family_name_main_r AND
+  family_name_main_l = first_name_r`).
+- `estimate_probability_two_random_records_match([block_on("family_name_main")],
+  recall=0.8)` — the u-probability estimate itself is anchored on this one scalar.
+- `oax_tf_family_name.parquet`, the TF-adjustment lookup table, is built and keyed on
+  `family_name_main`.
+
+**What "replace with a set, excise `_main`" actually requires — real open design questions,
+not a rename:**
+1. A genuine set-overlap **scoring** level (a `CustomComparison`, same idiom already used
+   for the set-overlap *blocking* rule) to replace `ExactMatchLevel("family_name_main")` —
+   scores a match whenever any member of one side's `family_names` overlaps any member of
+   the other's, not just when two picked scalars agree.
+2. TF-adjustment has no natural set analogue in Splink's built-in `tf_adjustment_column`
+   mechanism — it expects one scalar value per record, looked up in a one-column frequency
+   table. A set of family-name forms doesn't have one natural frequency value. Needs a
+   purpose-built aggregate (candidate: the frequency of the *rarest* member of the set — a
+   common+rare pair should get credit for the rare form) computed and stored as its own
+   numeric column, not a "pick one representative name" column — this sidesteps the
+   original bug entirely since it's an aggregate number, not a chosen string.
+3. Every one of the ~34+ call sites in `03_link_arc_oax.py`, plus the ARC-internal mirror in
+   `awards_cif.py`/`cluster_items()`, `01a_diagnose.py`, `04_resolve_links.py`'s
+   disambiguation cascade, and `fetch_orcid.py`, needs updating in the *same* pass — leaving
+   some call sites on the scalar and others on the set is exactly the kind of drift this
+   project has repeatedly found and had to fix elsewhere (03b/04 disagreement,
+   `is_suspicious_for2020`'s scope-derivation drift).
+4. Decide whether `family_name_main` survives purely as a *display* convenience (a
+   human-readable single value for reports/dossiers) under a name that makes clear it's
+   display-only and never fed into a comparison, or is dropped entirely in favour of
+   deriving a display string on demand from the set.
+
+No longer optional/low-value — this touches the core Splink comparison/scoring layer in
+both Splink runs (`cluster_items()` and `03_link_arc_oax.py`), not a residual cleanup.
+Sequencing left to the user, but it belongs well above where it currently sits.
 
 ### 15 — Extract `author_position` on next OpenAlex snapshot conversion
 Check the raw native snapshot carries the field, re-extract as an explicit persisted
@@ -700,6 +776,22 @@ a fresh cache to actually re-attempt anything already cached under the old sourc
 
 ### 20 — Audit `AwardsCIF.coawardees` for self-collisions (candidate merge signal)
 
+**Which pipeline phase this is** (clarifying an ambiguity — this project has TWO Splink runs,
+`cluster_items()`'s ARC-internal dedupe and `03_link_arc_oax.py`'s ARC↔OAX link, and calling
+either "pre-Splink" without saying which is genuinely unclear): this operates on `AwardsCIF`
+objects already produced by `01_prepare_arc.py`'s `build_arc_only_population()` chain — i.e.
+*after* the ARC-internal Splink dedupe has already run and been refined, but *before*
+`03_link_arc_oax.py`'s ARC↔OAX Splink link step ever sees the population. It's an ARC-internal
+candidate-merge signal, not something that touches OAX data or the link step at all.
+
+**Update, 2026-09-06**: the standing check this item asked for now exists —
+`find_coawardee_self_collisions(clusters)` (`src/utils/awards_cif.py`, committed `ddcc19d`)
+does exactly what's described below (every ACIF's own item-level `full_name_key`/
+`full_name_key_raw` checked against every `coawardees` entry's key). **Not yet run at
+population scale or reviewed** — what remains of this item is running it across the full
+non-excluded population and reviewing whatever it surfaces, the same discipline as
+`gap_candidates`.
+
 Built 2026-09-04 (`compute_coawardees()`, `src/utils/awards_cif.py`): every ACIF now carries
 `coawardees` — every other investigator on any grant it holds, keyed by their own parsed
 `full_name_key`/`full_name_key_raw`, with a count of how many shared grants. Found by hand while
@@ -739,6 +831,12 @@ Not yet applied to `manual_merges.csv`/`enrichment_blocklist.csv` — still pend
 
 ### 21 — `orcid_incompat` unconditional veto in `compute_gap_candidates()`; deterministic
 announcement/current-snapshot auto-merge
+
+**Which pipeline phase**: same as item #20 — `compute_gap_candidates()` is one of the
+ARC-only steps in `01_prepare_arc.py`'s `build_arc_only_population()` chain, so this runs
+after the ARC-internal Splink dedupe has already produced and refined the ACIF population,
+and before `03_link_arc_oax.py`'s ARC↔OAX Splink link step. Purely an ARC-internal
+under-merge-detection mechanism; it never touches OAX data.
 
 Found 2026-09-05, directly motivated by the Restubog/Craig cases in item #20 above.
 `compute_gap_candidates()`'s incompatibility test (`src/utils/awards_cif.py`, `orcid_incompat`)
@@ -795,52 +893,27 @@ it doesn't implement the fix itself, and is deliberately not wired into `compute
 or any other pre-Splink stage (same "apply only as a post-clustering promotion" principle as
 `apply_enriched_orcids()`).
 
-### 22 — Non-circular ARC+OAX_AU vs ORCID-bulk name-frequency reference, matched on every
-normalized form on both sides
+### 22 — [DEMOTED, background only] Non-circular ARC+OAX_AU vs ORCID-bulk name-frequency
+reference — a discussion, not a committed task
 
-Found 2026-09-05, investigating why 791/4,891 NO_ORCID ACIFs have no name-rarity value at all
-(their `full_name_key` is simply absent from `oax_tf_full_name.parquet`, built only from OAX's
-2.78M AU-context population).
+**Demoted 2026-09-07**: per direct user correction, this was never actually agreed to as a
+task — it surfaced while investigating why 791/4,891 NO_ORCID ACIFs have no name-rarity value
+at all (`full_name_key` absent from `oax_tf_full_name.parquet`), and the design below was
+sketched out loud in that moment, not committed to. Kept here only as a shrunk note in case the
+underlying gap (no rarity value for those 791 names) gets picked up again later — not as a live
+item, and not sequenced.
 
-**A first fix attempt was caught mid-session as circular, before being built — recorded here so
-it isn't tried again.** The obvious-looking patch was to union ARC's own ACIF names into the same
-reference population used to judge how rare *those same ACIF names* are — but that makes a name's
-own presence in the population under study part of the evidence for how common that population's
-names are. Worst case: a name existing in exactly one ACIF and nowhere in OAX would get its
-rarity computed using itself as the only supporting evidence — not a measurement of real-world
-rarity, a tautology. Rejected on direct user correction before any code was written.
+The gist of what was discussed: don't fix the gap by folding ARC's own names into the same
+population used to judge how rare those names are (circular — a name existing in exactly one
+ACIF and nowhere else would get its rarity computed from itself). Instead, build the reference
+from ARC+OAX names matched against `orcid_bulk.parquet` (external to both, no circularity),
+using every normalized name-form on both sides, not one scalar pick per name.
 
-**The accepted design, specified directly by the user:**
-
-1. Build one deduplicated list of every *distinct normalized name* from the union of ARC's own
-   names and OAX's AU-context population ("ARC+OAX_UA") — this defines the full set of names of
-   interest at this stage.
-2. Normalize that list, and separately normalize `orcid_bulk.parquet`'s population (17.15M
-   records — external to and independent of both ARC and OAX, so no circularity risk), using the
-   *same* normalizer on both sides.
-3. Attempt matches using *every* normalized/canonical variant form on both sides, not one scalar
-   canonical pick per name before matching — the same "set overlap, not scalar collapse"
-   principle already fixed once this project (the `family_name_main`/`max_by_len()` history) —
-   applied here to name-frequency matching specifically, not just blocking.
-
-**Normalizer-agnosticism, checked directly, not assumed — no fix needed:**
-`src/utils/orcid_processor_arc_adapter.py::arc_name_normalizer()` is confirmed a pure pass-through
-wrapper: `p = _parser.parse(raw_name); return NameForms(p.given_tokens, p.family_name_main,
-p.first_name_canonical, p.full_name_key)`, with `_parser = HumanNameParser()` — a bare,
-unconfigured instance, no ARC-specific tables or parameters anywhere in the adapter. The `arc_`
-prefix names *whose* pluggable-normalizer instance this is, not a claim about ARC-biased
-behaviour — the module's own docstring states the design goal directly: "keeps the core module
-free of project-specific imports/opinions." One nuance worth recording plainly rather than
-glossing over: `HumanNameParser`'s own calibration choices (e.g. the bare-initial vowel-detection
-rule's inclusion of "y") were validated against real samples from *both* ARC and OAX data, not
-ARC alone (per this project's own 2026-08-19/20 session notes) — so it's genuinely general in
-mechanism, even though its tuning drew on this project's own populations for examples.
-
-**Supersedes, once built**: the `orcid_enrichment.parquet`-based quartile analysis from this
-session (rare ARC names show markedly *worse*, not better, live-search success — dominated by
-`not_found`, not ambiguity) should be re-run against this new reference once it exists, since the
-underlying rarity measure it was stratified on will change for a meaningful share of the
-population.
+**One factual correction to the record while demoting this**: this note used to quote
+`arc_name_normalizer()` as `NameForms(p.given_tokens, p.family_name_main,
+p.first_name_canonical, p.full_name_key)` with no `family_names` — that quote is now stale.
+The 2026-09-06 fix (commit `ddcc19d`) changed it to pass `family_names=p.family_names` through
+too, exactly the "set, not scalar" principle this discussion was gesturing at.
 
 ### 23 — `FetchOrcid` built (`src/utils/fetch_orcid.py`); NO_ORCID scan is now stale, HAS_ORCID
 audit never run at scale
