@@ -100,7 +100,7 @@ continuation, then the larger/optional items last.
 11. **Roadmap step 3**: drop zero-work `author_idx` from `oax_candidates`
 12. **Roadmap step 4**: definitive-evidence gate / `Dossier()` construction by selection
 13. **Plan Part B**: `Dossier()` ARC-story header, `dossier_build_arc.py`/`dossier_build_oax.py` split
-14. **Excise `family_name_main` as a scalar, replace with a genuine set-overlap representation in Splink's own scoring/TF-adjustment** (rescoped 2026-09-07, no longer low-priority — the set-overlap fix already shipped only touched blocking, not scoring)
+14. **Locate and fix every instance of collapsing a name-form set to one scalar before matching** — narrowed to `03_link_arc_oax.py`/`00c_prepare_oax.py`'s own `full_name_key`/`family_name_main` re-derivation (which ignores the already-correct, modal-based `AwardsCIF.full_name_key`) plus `dossier_build.py`'s display-only `preferred_name`; no longer low-priority, but smaller in scope than first thought — see its own entry for the full inventory and two self-corrections
 15. **Extract `author_position`** — purely opportunistic, do only when the OpenAlex snapshot is next re-converted for an unrelated reason
 16. **Work through the `accuracy_checks.md` checklist** (largest, most multi-part, least urgent — a standing backlog, not a single task)
 17. **HEP-affiliation-history candidate-pool pruning for common-name mega-pools** — real, partial win, not built (see its own entry below)
@@ -420,68 +420,113 @@ just Part B's own scope (the arc/oax split + ARC-story header), this likely also
 pipeline rather than anything the candidate/work cleaning work produces (see the oeuvre-QA
 plan's item 10, `write-out-the-full-floofy-starfish.md`) — not scoped further than that yet.
 
-### 14 — Excise `family_name_main` as a scalar; replace with a genuine set representation
-everywhere it's used for matching, not just blocking — RESCOPED 2026-09-07, no longer
-low-priority
+### 14 — Locate and fix every instance of collapsing a name-form SET to one scalar before
+matching — RESCOPED 2026-09-07 (twice), scope corrected and narrowed both times
 
-**Corrected framing.** This item used to describe a small residual refinement (picking
-`family_name_main` by frequency/plurality instead of raw string length). Direct user
-correction: that's not the fix — `family_name_main` itself (the scalar collapse of a
-name's family_names SET down to one representative string) should be eliminated from
-matching logic throughout the codebase, not tuned. `family_name_main` is confirmed the
-*only* `_main`-suffixed field anywhere in this codebase (checked directly, 2026-09-07 —
-`oax_family_name_main`/`arc_family_name_main` are the same field under a join-disambiguating
-alias, not a second independent field); it appears **128 times across 14 files**
-(`names.py`, `orcid_processor.py`, `orcid_processor_arc_adapter.py`, `awards_cif.py`,
-`00c_prepare_oax.py`, `03_link_arc_oax.py` — 34 occurrences, the heaviest single user —
-`04_resolve_links.py`, `01a_diagnose.py`, `fetch_orcid.py`, `cluster_checks.py`,
-`verify_family_name_blocking.py`, plus tests). `first_name_canonical` is a genuinely
-different concept (a deliberately-chosen canonical form, not a length-based "pick one"
-collapse of a set) and is out of scope here unless a separate check finds the same failure
-shape in it.
+**User's own framing, verbatim, is the actual task**: "everything you found that is an
+example of selecting one item from an object that is a set must be located and fixed."
+Everything below is the located inventory, confirmed by direct code reading (not grepped-and-
+assumed), with two self-corrections along the way recorded plainly rather than smoothed over.
 
-**Where it's still load-bearing beyond blocking, checked directly in `03_link_arc_oax.py`**
-(the 2026-08-25 set-overlap fix only widened *blocking* — which pairs get scored — it left
-every one of these untouched):
-- The Splink **scoring** comparison itself: `cll.ExactMatchLevel("family_name_main")
-  .configure(tf_adjustment_column="family_name_main")` — a pair that only shares a family
-  name via the set-overlap blocking rule (not via the two `family_name_main` scalars
-  happening to agree) gets zero credit from this comparison, ever, no matter how the pair
-  was found.
-- The name-order-swap comparison (`first_name_l = family_name_main_r AND
-  family_name_main_l = first_name_r`).
-- `estimate_probability_two_random_records_match([block_on("family_name_main")],
-  recall=0.8)` — the u-probability estimate itself is anchored on this one scalar.
-- `oax_tf_family_name.parquet`, the TF-adjustment lookup table, is built and keyed on
-  `family_name_main`.
+**Search method, so a future pass can extend it rather than repeat it from scratch**: the
+naive first search (grep for the literal `_main` name suffix) was too narrow — it only finds
+things *named* like the bug, not things that *inherit* it. Broadened twice: (1) grep the root
+operation (`max_by_len`/`max(..., key=len)`) instead of a naming convention; (2) grep every
+*other* mechanism that can collapse a set to one element — `sorted(...)[0/-1]`, bare
+`name[0]`/`[-1]` indexing, `.iloc[0]`/`.head(1)`, `next(iter(...))`, `min(key=len)`,
+`.drop_duplicates()`/`.groupby().first()`, and SQL-side `MAX()`/`ANY_VALUE()`/`arg_max()`/
+`FIRST_VALUE()` — across the *whole* `src/`+`analysis/` tree, not just a curated file list.
 
-**What "replace with a set, excise `_main`" actually requires — real open design questions,
-not a rename:**
-1. A genuine set-overlap **scoring** level (a `CustomComparison`, same idiom already used
-   for the set-overlap *blocking* rule) to replace `ExactMatchLevel("family_name_main")` —
-   scores a match whenever any member of one side's `family_names` overlaps any member of
-   the other's, not just when two picked scalars agree.
-2. TF-adjustment has no natural set analogue in Splink's built-in `tf_adjustment_column`
-   mechanism — it expects one scalar value per record, looked up in a one-column frequency
-   table. A set of family-name forms doesn't have one natural frequency value. Needs a
-   purpose-built aggregate (candidate: the frequency of the *rarest* member of the set — a
-   common+rare pair should get credit for the rare form) computed and stored as its own
-   numeric column, not a "pick one representative name" column — this sidesteps the
-   original bug entirely since it's an aggregate number, not a chosen string.
-3. Every one of the ~34+ call sites in `03_link_arc_oax.py`, plus the ARC-internal mirror in
-   `awards_cif.py`/`cluster_items()`, `01a_diagnose.py`, `04_resolve_links.py`'s
-   disambiguation cascade, and `fetch_orcid.py`, needs updating in the *same* pass — leaving
-   some call sites on the scalar and others on the set is exactly the kind of drift this
-   project has repeatedly found and had to fix elsewhere (03b/04 disagreement,
-   `is_suspicious_for2020`'s scope-derivation drift).
-4. Decide whether `family_name_main` survives purely as a *display* convenience (a
-   human-readable single value for reports/dossiers) under a name that makes clear it's
-   display-only and never fed into a comparison, or is dropped entirely in favour of
-   deriving a display string on demand from the set.
+**Confirmed real, needs fixing:**
+1. **`family_name_main = max(family_names, key=len)`** — three independent sites:
+   `names.py:249` (inside `HumanNameParser.parse()`), `03_link_arc_oax.py:151` (ARC-side
+   Splink prep), `00c_prepare_oax.py:364` (OAX-side Splink prep).
+2. **`full_name_key`'s construction — the deepest instance, and the one with the biggest
+   blast radius.** `03_link_arc_oax.py:153`, ARC side: `df["full_names"].apply(max_by_len)
+   .apply(parse_given)` — picks the single longest *raw full-name string* from an ACIF's
+   whole recorded set, and *only that one string* ever gets parsed into
+   `first_name`/`middle_name`/`first_compound`/`first_initial`/`middle_initial`. Every other
+   recorded full-name variant is discarded before the given-name side of the ARC↔OAX link
+   even starts — this feeds the entire given-name comparison cascade and both middle-initial
+   cross-blocking rules in that script, not just one field. `00c_prepare_oax.py:354-361`,
+   OAX side: a different flavour of the same anti-pattern — `_canonical()` picks the single
+   longest *token* from an already-exploded given-name-token array, with no first/middle
+   distinction.
+3. **`dossier_build.py:320`**: `preferred_name = full_names[0]` — display-only (a Dossier's
+   header line), no matching-logic consequence, but the same pattern: `full_names` has no
+   documented or enforced ordering, so "preferred" really means "whichever form happened to
+   be listed first."
 
-No longer optional/low-value — this touches the core Splink comparison/scoring layer in
-both Splink runs (`cluster_items()` and `03_link_arc_oax.py`), not a residual cleanup.
-Sequencing left to the user, but it belongs well above where it currently sits.
+**Checked and confirmed FALSE ALARMS — real code was read, not assumed, before ruling these
+out** (kept here so they aren't re-flagged and re-investigated next time):
+- `awards_cif.py:1495` (`next(iter(found))`) — guarded by `if len(found) != 1: continue`
+  immediately above; `found` is always a singleton set when this runs.
+- Every `.iloc[0]` in `04_resolve_links.py`, and `awards_cif.py:2268-2271`
+  (`grow.iloc[0][...]` in `cluster_detail_data()`) — all either guarded by a prior
+  `len(...) == 1` check, or a genuine single-row-per-key lookup (grant-level facts have one
+  row per `grant_code` in `grants_flat.parquet`; not the same ambiguity as the `inst_arr`
+  announcement/current split, which is two *columns* on one row, not two rows).
+- `names.py:254,267,282` and `awards_cif.py:728` — position-based (first-listed, deliberately
+  ordered token) or explicit fallback reads of the *already-fixed* `HumanNameParser` output,
+  not new arbitrary collapses.
+- `awards_cif.py:1938` (`_oax_names_compat`'s `full_firsts[0][:3]`) — a uniformity check ("do
+  all candidates share the same 3-char prefix as each other"); which element serves as the
+  reference point doesn't change the result.
+- `01a_diagnose.py:313-314` (`.mode().iloc[0]`) — a defensible "most common value" choice for
+  a diagnostic report column only, not matching logic.
+- Every SQL `MAX()`/`drop_duplicates()` hit in `analysis/*.py` — legitimate aggregate
+  statistics (h_index, year ranges, a diagnostic dedup count), not identity collapses.
+
+**Two self-corrections, made directly rather than left standing — both matter for scoping
+the actual fix:**
+
+1. **`_first_name_canonical()` (`awards_cif.py:376-383`) is dead code, not a live bug.**
+   Grepped every call site: it's defined but never invoked anywhere. It was wrongly flagged
+   in an earlier pass of this same item as "the ARC-internal cluster-level sibling that never
+   got the first-vs-middle fix, feeding `cluster_items()`'s own blocking key" — that claim was
+   never actually verified before being written down. `AwardCIFItem.first_name_canonical`
+   (the per-*item* field that's actually used) is built at `awards_cif.py:727` directly from
+   `parsed.first_name_canonical` — the already-fixed `HumanNameParser` output — so this path
+   was never broken.
+2. **`AwardsCIF.full_name_key` (the cluster-level field) is not built via `max_by_len()`
+   either, and its design is already correct.** Read `_build_awards_cif()` directly
+   (`awards_cif.py:802-858`): `full_names`/`first_names`/`family_names` are all
+   `sorted({...})` — genuine full sets already, matching exactly what this item is asking
+   for, no scalar collapse at the `AwardsCIF` level at all. `full_name_key` itself is
+   `fnk_counts.most_common(1)[0][0]` — the **modal** (most-common) form among the cluster's
+   own items, tie-broken deterministically by `unique_id` order — a meaningfully more robust
+   choice than "longest string wins" (a contaminant would need to appear *more often* than
+   the real name to win a mode, not just be longer once).
+
+**So the real, confirmed bug in #2 above is narrower and more specific than "family_name_main
+is broken": `03_link_arc_oax.py::_prep_arc()` (and its OAX-side counterpart) don't use
+`awards_cif_arc_only.parquet`'s own good, already-computed, already-persisted `full_name_key`
+at all — they re-derive a worse one from scratch, via `max_by_len()`, straight from the raw
+`family_names`/`full_names` set columns, discarding a better computation that's sitting right
+there unused.** This also shrinks the earlier "128 occurrences across 14 files, touches
+everything" framing — most of those 128 occurrences are either the already-fine `AwardsCIF`
+set fields being read, or dead/false-alarm code; the real fix is localized to the Splink
+prep/comparison layer in `03_link_arc_oax.py` and `00c_prepare_oax.py`, not a sweeping
+14-file rewrite.
+
+**Not yet resolved — open before implementation starts:**
+- Whether `00c_prepare_oax.py`'s OAX-side prep has an equivalent "good value already computed
+  but ignored" situation to reuse, or whether OAX authors (individual OpenAlex records, not
+  built from multiple items the way an ACIF is) have no such prior modal computation to draw
+  on at all — not yet checked.
+- Given `family_names`/`full_names` (the real sets) already flow into `03_link_arc_oax.py` as
+  columns (used for the 2026-08-25 set-overlap *blocking* rule already), building the
+  matching set-overlap **scoring** comparison is more tractable than first feared — the data
+  is already there; symmetric overlap (`list_has_any`) vs. subset containment, and a graded
+  differ-count cascade vs. one boolean level, are the two design choices still needing a
+  decision (see the reasoning preserved from the prior pass of this item, still valid).
+- TF-adjustment redesign: for a genuine set-*intersection* match, the frequency of the actual
+  overlapping value can be looked up directly via a SQL join at scoring time (both sides share
+  the identical string when they truly overlap, so its frequency is unambiguous) — better than
+  a precomputed per-record "rarest of my own set" approximation, which is still the fallback
+  needed for TF outside an exact intersection.
+- Full pipeline rerun (`01`→`03`→`04` at minimum) and the test suite are required to verify no
+  regression once a fix lands — not attempted yet, no code has been changed for this item.
 
 ### 15 — Extract `author_position` on next OpenAlex snapshot conversion
 Check the raw native snapshot carries the field, re-extract as an explicit persisted
