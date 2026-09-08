@@ -9,40 +9,56 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 from src.utils.names import (
-    norm_alpha, strip_parens, strip_postnominals, tokens, parse_given,
+    norm_alpha, strip_parens, tokens, parse_given,
     HumanNameParser, ParsedName,
 )
 
 
-class TestStripPostnominals:
-    def test_single(self):
-        assert strip_postnominals("Finch AO") == "Finch"
+class TestPostnominalHandling:
+    """Postnominal suffixes are handled entirely by HumanName's own native suffix_acronyms
+    registration (names.py's _POSTNOMINAL_ACRONYMS) -- the old custom strip_postnominals()
+    pre-stripping regex was removed 2026-09-08. See names.py's own comment for the incident: an
+    early test of this native mechanism registered only 4 of the ~19 needed acronyms, concluded
+    native handling didn't work, and built a parallel custom regex instead of just registering
+    the rest. Tested here through the real parse() pipeline (family_name_main), not a standalone
+    stripping function that no longer exists."""
 
-    def test_double(self):
-        assert strip_postnominals("Raston AO FAA") == "Raston"
+    def setup_method(self):
+        self.p = HumanNameParser()
+
+    def test_single_postnominal(self):
+        assert self.p.parse("John Finch AO").family_name_main == "finch"
+
+    def test_stacked_space_separated(self):
+        assert self.p.parse("Anthony Thomas AC FAA").family_name_main == "thomas"
+
+    def test_stacked_comma_separated(self):
+        assert self.p.parse("Anthony Kinloch FRS, FREng").family_name_main == "kinloch"
 
     def test_oam(self):
-        assert strip_postnominals("Heine OAM") == "Heine"
+        assert self.p.parse("Peter Heine OAM").family_name_main == "heine"
 
-    def test_am(self):
-        assert strip_postnominals("Blackmore AM") == "Blackmore"
+    def test_ol_and_oam_combined(self):
+        # Real case: Glenn Summerhayes OL OAM (PNG archaeology honour + Australian honour).
+        assert self.p.parse("Glenn Summerhayes OL OAM").family_name_main == "summerhayes"
 
-    def test_ac(self):
-        assert strip_postnominals("Thomas AC") == "Thomas"
+    def test_pharmacist(self):
+        assert self.p.parse("John Smith, Pharmacist").family_name_main == "smith"
 
-    def test_no_postnominal(self):
-        assert strip_postnominals("Smith") == "Smith"
+    def test_no_postnominal_unaffected(self):
+        assert self.p.parse("David Wang").family_name_main == "wang"
+        assert self.p.parse("Van Nguyen").family_name_main == "nguyen"
 
-    def test_compound_no_postnominal(self):
-        assert strip_postnominals("Sen Gupta") == "Sen Gupta"
-
-    def test_all_caps_name_untouched(self):
-        # all-caps single-word family names are NOT post-nominals
-        assert strip_postnominals("WANG") == "WANG"
-        assert strip_postnominals("NGUYEN") == "NGUYEN"
-
-    def test_empty(self):
-        assert strip_postnominals("") == ""
+    def test_known_residual_gap_bare_surname_plus_suffix(self):
+        # Accepted, documented limitation (names.py's own comment): with NO given name at all,
+        # HumanName's grammar has too few tokens to tell there's no first name, and misparses --
+        # confirmed to not occur in real ARC data (only 2 rows have an empty first_name, neither
+        # with a postnominal) and, on the OAX side, indistinguishable from OpenAlex's own
+        # unresolved PDF-extraction/disambiguation noise (checked directly 2026-09-08 -- e.g.
+        # 'Kevin AM' carries OpenAlex's own alternate spelling 'Kevin Am', i.e. even OpenAlex
+        # hasn't resolved whether this is a name or an acronym). Not fixed; asserted here so a
+        # future change to this behaviour is a deliberate choice, not a silent regression.
+        assert self.p.parse("Raston AO FAA").family_name_main == "ao"
 
 
 class TestStripParens:
@@ -166,3 +182,97 @@ class TestHumanNameParser:
 
     def test_diacritic_variants_exposed_standalone(self):
         assert self.p.diacritic_variants("Müller") == ("muller", "mueller")
+
+
+class TestNicknameTokens:
+    """nickname_tokens (2026-09-08): a quoted/parenthesized nickname, kept as its own field --
+    deliberately NOT folded into given_tokens (see ParsedName's own docstring for why: it's a
+    different kind of relationship to the family name, its own combinatorial axis, not one more
+    interchangeable given-name candidate)."""
+
+    def setup_method(self):
+        self.p = HumanNameParser()
+
+    def test_parenthesized_nickname_extracted(self):
+        r = self.p.parse("William (Bill) Harley")
+        assert "bill" in r.nickname_tokens
+
+    def test_quoted_nickname_extracted(self):
+        r = self.p.parse('John "Johnny" Smith')
+        assert "johnny" in r.nickname_tokens
+
+    def test_nickname_does_not_affect_given_tokens_or_canonical(self):
+        # The corrected design (2026-09-08): a real case, Yingzi (Jenny) Wang -- the nickname
+        # must never override the structural first name for canonical/blocking-key purposes.
+        r = self.p.parse("Yingzi (Jenny) Wang")
+        assert "jenny" not in r.given_tokens
+        assert r.first_name_canonical == "yingzi"
+        assert r.full_name_key == "yingzi_wang"
+        assert "jenny" in r.nickname_tokens
+
+    def test_multiword_nickname_splits_into_separate_tokens(self):
+        # Real ARC case -- a compound nickname splits the same way a compound given name does
+        # ("Jean-Baptiste" -> ["jean","baptiste"]), not kept as one joined string.
+        r = self.p.parse("Jafar (Seyed Ruhollah) Shojaii")
+        assert "seyed" in r.nickname_tokens
+        assert "ruhollah" in r.nickname_tokens
+
+    def test_two_existing_given_tokens_nickname_stays_independent(self):
+        # Real ARC case that disproved the originally-specified "fuse onto the second token"
+        # rule: Carys is not "Wen Carys". given_tokens is completely unaffected either way.
+        r = self.p.parse("Xi Wen (Carys) Chan")
+        assert "carys" in r.nickname_tokens
+        assert "carys" not in r.given_tokens
+        assert set(r.given_tokens) >= {"xi", "wen"}
+
+    def test_numeric_content_rejected(self):
+        # OpenAlex display_name noise: an author-disambiguation numeric suffix, not a nickname.
+        r = self.p.parse("Ying Zhang (40767)")
+        assert r.nickname_tokens == ()
+
+    def test_year_annotation_rejected(self):
+        r = self.p.parse("John Hart (1946-)")
+        assert r.nickname_tokens == ()
+
+    def test_overlong_content_rejected(self):
+        r = self.p.parse("Jane Smith (" + "x" * 31 + ")")
+        assert r.nickname_tokens == ()
+
+    def test_no_nickname_present(self):
+        r = self.p.parse("Robert Smith")
+        assert r.nickname_tokens == ()
+
+    def test_nickname_tokens_is_a_tuple(self):
+        r = self.p.parse("William (Bill) Harley")
+        assert isinstance(r.nickname_tokens, tuple)
+
+
+class TestMaidenNameHandling:
+    """A '(nee X)'/'(née X)' marker lands in HumanName's .nickname field structurally
+    identically to a genuine given-name nickname -- distinguished here (2026-09-08) since it's
+    semantically a FORMER FAMILY name, not a given-name alternative. Real case: 'Leesa Costello
+    (nee Bonniface)', see CLAUDE.md's 4u-review history."""
+
+    def setup_method(self):
+        self.p = HumanNameParser()
+
+    def test_nee_widens_family_names_not_nickname_tokens(self):
+        r = self.p.parse("Judy Brown (nee Field)")
+        assert "field" in r.family_names
+        assert r.nickname_tokens == ()
+
+    def test_nee_with_accent(self):
+        r = self.p.parse("Murphy (née Paton-Walsh)")
+        assert "paton-walsh" in r.family_names
+
+    def test_nee_does_not_override_family_name_main(self):
+        # The primary/current surname stays the representative scalar -- the maiden name only
+        # widens the matching set, same "additive, never overriding" treatment as nickname_tokens.
+        r = self.p.parse("Judy Brown (nee Field)")
+        assert r.family_name_main == "brown"
+        assert r.full_name_key == "judy_brown"
+
+    def test_genuine_nickname_not_treated_as_maiden_name(self):
+        r = self.p.parse("William (Bill) Harley")
+        assert "bill" not in r.family_names
+        assert "bill" in r.nickname_tokens

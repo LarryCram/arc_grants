@@ -51,85 +51,49 @@ own item list for what's still outstanding.
 to carry the same rich per-record schema (aliases, dated employments/educations/memberships,
 works) at the FULL population scale that only the narrower ~4.8M "HQ" subset used to have.
 `orcid_bulk.parquet` (this module's own `convert_bulk_dump()` output) is built from it, using
-this project's own `HumanNameParser`-based normalizer (injected via
-orcid_processor_arc_adapter.py, not imported directly here) for its matching-key columns, so
-the ORCID-side keys are computed with the exact same NFC/NFKC/zero-width/postnominal-strip/
-diacritic-widening hardening as the ARC and OAX sides, not the bare fallback default.
+`names.py`'s `HumanNameParser` directly for its matching-key columns, so the ORCID-side keys are
+computed with the exact same NFC/NFKC/zero-width/postnominal-strip/diacritic-widening/nickname
+hardening as the ARC and OAX sides.
+
+2026-09-08: refactored onto `ParsedName`/`HumanNameParser` directly, dropping the separate
+`NameForms` type and `default_name_normalizer()` this module used to define, plus
+`orcid_processor_arc_adapter.py`'s `arc_name_normalizer()` conversion step between them
+(docs/pipeline_todo.md item #26). That split was built on the premise that this module
+shouldn't depend on this project's own `names.py` to stay standalone/extractable -- checked
+directly and found not to hold: `names.py`'s own import chain is `re`, `dataclasses`, the
+external `nameparser` package, and `name_diacritic_variants.py` (itself only `itertools`/`re`/
+`unicodedata`) -- zero project-specific coupling, so depending on it doesn't compromise this
+module's portability at all. The practical cost of the old split was concrete, not theoretical:
+`all_full_name_keys()` (the given x family combinatorial generator) was written against
+`NameForms`, so a later addition to the richer `ParsedName` -- `nickname_tokens`, and the
+`full_name_keys` field that actually consumes it (2026-09-08, `names.py`) -- was structurally
+unreachable from this module until this refactor, even though ORCID-side matching is exactly
+where a real nickname ("Yingzi (Jenny) Wang") most needs to be found. `NameForms`/
+`all_full_name_keys()`/`default_name_normalizer()` are gone outright, not deprecated in place --
+grepped every call site across `src`/`tests`/`analysis` first to confirm nothing else
+constructed or depended on them.
 """
 import gzip
 import json
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable
 
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from nameparser import HumanName
+from src.utils.names import HumanNameParser, ParsedName
 
 BULK_DUMP_DEFAULT = "/home/lc/s/orcid/records.jsonl.gz"
 BULK_PARQUET_DEFAULT = "/home/lc/s/orcid/orcid_bulk.parquet"
 
-
-# ---------------------------------------------------------------------------
-# Name normalization -- pluggable. The default here is a bare, project-agnostic
-# HumanName parse (genuinely reusable out of the box for a standalone ORCID library).
-# A caller wanting exact parity with a specific project's own name-comparison convention
-# (postnominal stripping, diacritic widening, etc.) injects its own normalizer instead --
-# see src/utils/orcid_processor_arc_adapter.py for this project's own exact chain.
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class NameForms:
-    given_tokens: tuple[str, ...]
-    family_name_main: str | None
-    first_name_canonical: str | None
-    full_name_key: str | None
-    # The full family-name variant set (e.g. diacritic-widened forms: {"gruen","grun"}), not
-    # just family_name_main's own single "longest wins" pick -- added 2026-09-06 because
-    # collapsing this to one scalar at conversion time (the original design) threw away
-    # information no downstream consumer could ever recover, the same "pick one from an
-    # equally-plausible set" mistake this project has repeatedly found and fixed elsewhere
-    # (family_name_main/max_by_len() contamination, first_name_canonical). Defaults to a
-    # single-element tuple of family_name_main for normalizers that don't compute variants.
-    family_names: tuple[str, ...] = field(default_factory=tuple)
-
-    def __post_init__(self):
-        if not self.family_names and self.family_name_main:
-            object.__setattr__(self, "family_names", (self.family_name_main,))
-
-
-def all_full_name_keys(nf: NameForms) -> list[str]:
-    """Every given x family combination this NameForms could produce, order-preserving
-    deduped -- the SET of all possible full names, not one collapsed representative. Mirrors
-    FetchOrcid._candidate_full_name_keys()'s ACIF-side logic exactly, so both sides of a match
-    are built the same way."""
-    combos = [f"{g}_{f}" for g in nf.given_tokens for f in nf.family_names if g and f]
-    extra = [nf.full_name_key] if nf.full_name_key else []
-    return list(dict.fromkeys(combos + extra))
-
-
-def default_name_normalizer(raw_name: str) -> NameForms:
-    """Bare nameparser.HumanName parse, no project-specific customization. Order-preserving
-    dedup throughout (dict.fromkeys(), never a raw set()) -- this project already found and
-    fixed a real non-determinism bug from set()-based dedup flipping results between runs."""
-    if not raw_name:
-        return NameForms((), None, None, None)
-    hn = HumanName(raw_name)
-    if not hn.last and hn.first:
-        hn.last = hn.first
-    given_raw = [t for t in (hn.first.lower().split() if hn.first else []) +
-                 (hn.middle.lower().split() if hn.middle else [])]
-    given_tokens = tuple(dict.fromkeys(given_raw + [t[0] for t in given_raw if t]))
-    family_name_main = hn.last.lower() if hn.last else None
-    full_toks = [t for t in given_tokens if len(t) > 1]
-    first_name_canonical = (max(full_toks, key=len) if full_toks
-                             else (given_tokens[0] if given_tokens else None))
-    full_name_key = (f"{first_name_canonical}_{family_name_main}"
-                      if first_name_canonical and family_name_main else None)
-    return NameForms(given_tokens, family_name_main, first_name_canonical, full_name_key)
+# The one parser instance this module needs -- names.py is genuinely standalone (see this
+# module's own docstring above), so using it directly as the default normalizer costs nothing
+# in portability and gains the full ASCII/raw/nickname/full_name_keys parse for free. Still
+# pluggable (Callable[[str], ParsedName]) for a caller wanting a genuinely different parser --
+# but there's no longer a "bare" vs "hardened" pair to choose between, just one real one.
+_default_parser = HumanNameParser()
 
 
 # ---------------------------------------------------------------------------
@@ -159,28 +123,31 @@ def _affil_list(entries: list[dict] | None) -> list[dict]:
     return out
 
 
-def parse_bulk_record(rec: dict, normalizer: Callable[[str], NameForms] = default_name_normalizer) -> dict:
+def parse_bulk_record(rec: dict, normalizer: Callable[[str], ParsedName] = _default_parser.parse) -> dict:
     """One records.jsonl.gz row -> one flat dict ready for pyarrow, nested-column employments/
-    educations/memberships/works, plus HumanName-derived matching columns for the primary name
-    AND every alias (so any known name form is equally matchable, not just the primary one).
+    educations/memberships/works, plus HumanNameParser-derived matching columns for the primary
+    name AND every alias (so any known name form is equally matchable, not just the primary one).
 
-    all_full_name_keys is the SET of every given x family combination the primary name and every
-    alias could produce (all_full_name_keys(), same combinatorial logic as
-    FetchOrcid._candidate_full_name_keys() uses on the ACIF side) -- not full_name_key's single
+    all_full_name_keys is the SET of every given/nickname x family combination the primary name
+    and every alias could produce (ParsedName.full_name_keys, 2026-09-08 -- this project's own
+    canonical combinatorial generator, not a second implementation) -- not full_name_key's single
     "longest wins" pick. Both are kept: full_name_key/family_name_main stay as convenient single
     scalars for display and TF-style weighting; all_full_name_keys is what matching should
     actually join against, precomputed once here rather than re-derived (or worse, silently
-    collapsed to one value) at query time."""
+    collapsed to one value) at query time. given_tokens_raw/family_name_raw/full_name_key_raw
+    (2026-09-08, new columns) carry the same non-ASCII fallback representation ARC/OAX prep
+    already has -- this table never had it before this refactor, a real gap for the many
+    non-Latin-script names a global 17M-person ORCID population genuinely contains."""
     name = rec.get("name")
     aliases = list(rec.get("aliases") or [])
-    primary = normalizer(name) if name else NameForms((), None, None, None)
-    all_keys: list[str] = list(all_full_name_keys(primary))
+    primary = normalizer(name or "")
+    all_keys: list[str] = list(primary.full_name_keys)
     for a in aliases:
         if a:
-            all_keys.extend(all_full_name_keys(normalizer(a)))
+            all_keys.extend(normalizer(a).full_name_keys)
     all_keys = list(dict.fromkeys(all_keys))
     alias_keys = list(dict.fromkeys(
-        nf.full_name_key for a in aliases if a and (nf := normalizer(a)).full_name_key
+        p.full_name_key for a in aliases if a and (p := normalizer(a)).full_name_key
     ))
     xrefs = rec.get("xrefs") or {}
     return {
@@ -199,11 +166,15 @@ def parse_bulk_record(rec: dict, normalizer: Callable[[str], NameForms] = defaul
         "memberships": _affil_list(rec.get("memberships")),
         "works": [{"pubmed": w.get("pubmed")} for w in (rec.get("works") or [])],
         "given_tokens": list(primary.given_tokens),
+        "nickname_tokens": list(primary.nickname_tokens),
         "family_name_main": primary.family_name_main,
         "first_name_canonical": primary.first_name_canonical,
         "full_name_key": primary.full_name_key,
         "alias_full_name_keys": alias_keys,
         "all_full_name_keys": all_keys,
+        "given_tokens_raw": list(primary.given_tokens_raw),
+        "family_name_raw": primary.family_name_raw,
+        "full_name_key_raw": primary.full_name_key_raw,
     }
 
 
@@ -227,16 +198,20 @@ BULK_SCHEMA = pa.schema([
     ("memberships", pa.list_(_AFFIL_STRUCT)),
     ("works", pa.list_(pa.struct([("pubmed", pa.string())]))),
     ("given_tokens", pa.list_(pa.string())),
+    ("nickname_tokens", pa.list_(pa.string())),
     ("family_name_main", pa.string()),
     ("first_name_canonical", pa.string()),
     ("full_name_key", pa.string()),
     ("alias_full_name_keys", pa.list_(pa.string())),
     ("all_full_name_keys", pa.list_(pa.string())),
+    ("given_tokens_raw", pa.list_(pa.string())),
+    ("family_name_raw", pa.string()),
+    ("full_name_key_raw", pa.string()),
 ])
 
 
 def convert_bulk_dump(src: str = BULK_DUMP_DEFAULT, out: str = BULK_PARQUET_DEFAULT,
-                       normalizer: Callable[[str], NameForms] = default_name_normalizer,
+                       normalizer: Callable[[str], ParsedName] = _default_parser.parse,
                        batch_size: int = 200_000, limit: int | None = None,
                        progress: bool = True) -> int:
     """Stream records.jsonl.gz -> one nested-column parquet file (BULK_SCHEMA), batched to
@@ -269,7 +244,7 @@ def convert_bulk_dump(src: str = BULK_DUMP_DEFAULT, out: str = BULK_PARQUET_DEFA
 
 class OrcidProcessor:
     def __init__(self, con: duckdb.DuckDBPyConnection | None = None,
-                 name_normalizer: Callable[[str], NameForms] = default_name_normalizer,
+                 name_normalizer: Callable[[str], ParsedName] = _default_parser.parse,
                  bulk_parquet: str = BULK_PARQUET_DEFAULT):
         self._owns_con = con is None
         self.con = con or duckdb.connect()
@@ -306,30 +281,39 @@ class OrcidProcessor:
         return candidates
 
     def _match_by_full_name_key(self, key: str) -> list[dict]:
+        """Checks all_full_name_keys, not the narrower full_name_key/alias_full_name_keys pair
+        this used before 2026-09-08 -- all_full_name_keys is a strict superset of both (it
+        already unions the primary name's own full_name_keys, which itself includes
+        full_name_key, plus every alias's own full_name_keys), so this is both simpler and
+        strictly more complete. Concretely: the old query could never match a candidate purely
+        via their OWN name's nickname (e.g. a primary name field of "Yingzi (Jenny) Wang"
+        searched as "Jenny Wang") -- nickname-crossed keys only ever landed in
+        all_full_name_keys, which nothing here checked."""
         rows = self.con.execute(
             """
             SELECT orcid, name, employments, educations, memberships
             FROM read_parquet(?)
-            WHERE full_name_key = ? OR list_contains(alias_full_name_keys, ?)
+            WHERE list_contains(all_full_name_keys, ?)
             """,
-            [self.bulk_parquet, key, key],
+            [self.bulk_parquet, key],
         ).fetchall()
         return [self._to_candidate(r) for r in rows]
 
     def _match_by_family_and_initial(self, family_name_main: str, initial: str | None) -> list[dict]:
         """Bare-initial-safe fallback (an ARC record with only "A Ng", not a full given name) --
-        matches on orcid_bulk.parquet's own precomputed given_tokens column, which already
-        includes every given-name token's own initial as a separate entry (see
-        parse_bulk_record()), so no separate string-matching logic is needed here."""
+        matches on orcid_bulk.parquet's own precomputed given_tokens/nickname_tokens columns,
+        which already include every given-name/nickname token's own initial as a separate entry
+        (see parse_bulk_record()), so no separate string-matching logic is needed here."""
         if not initial:
             return []
         rows = self.con.execute(
             """
             SELECT orcid, name, employments, educations, memberships
             FROM read_parquet(?)
-            WHERE family_name_main = ? AND list_contains(given_tokens, ?)
+            WHERE family_name_main = ?
+              AND (list_contains(given_tokens, ?) OR list_contains(nickname_tokens, ?))
             """,
-            [self.bulk_parquet, family_name_main, initial],
+            [self.bulk_parquet, family_name_main, initial, initial],
         ).fetchall()
         return [self._to_candidate(r) for r in rows]
 

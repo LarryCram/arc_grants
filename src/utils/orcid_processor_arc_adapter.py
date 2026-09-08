@@ -2,15 +2,16 @@
 src/utils/orcid_processor_arc_adapter.py
 
 Thin, project-specific glue connecting OrcidProcessor (a standalone, project-agnostic module,
-src/utils/orcid_processor.py) to this project's own conventions -- keeps the core module free
-of project-specific imports/opinions, per its own "standalone, extractable to its own repo"
-design constraint.
+src/utils/orcid_processor.py) to this project's own conventions.
 
-Three responsibilities:
-  arc_name_normalizer()     -- adapts HumanNameParser.parse()'s richer ParsedName (names.py --
-                                this project's own hardened NFC/NFKC/zero-width/postnominal-
-                                strip/diacritic-widen chain) down to OrcidProcessor's minimal
-                                NameForms shape, injected via its pluggable name_normalizer hook.
+2026-09-08: dropped its third responsibility, arc_name_normalizer() -- orcid_processor.py now
+imports and uses names.py's HumanNameParser/ParsedName directly as its own default (item #26,
+see that module's own docstring for the full incident: the "keep the core module free of
+project-specific imports" premise this adapter step was built on didn't actually hold, since
+names.py is itself genuinely standalone). No adapter conversion step is needed for name
+normalization at all now -- this file's remaining two responsibilities are unrelated to naming.
+
+Two responsibilities:
   institution_matched_candidates() / resolve_institution_overlap() -- the set-to-set institution
                                 reduction OrcidProcessor's own discover() deliberately does NOT
                                 perform itself (a candidate's career-long institution history
@@ -32,23 +33,7 @@ Three responsibilities:
                                 (DISKCACHE_DIR/orcid_records_authenticated), not a new one.
 """
 from src.utils import orcid_client
-from src.utils.names import HumanNameParser
-from src.utils.orcid_processor import NameForms, OrcidRecord, get_or_fetch
-
-_parser = HumanNameParser()
-
-
-def arc_name_normalizer(raw_name: str) -> NameForms:
-    """This project's exact name-comparison convention, injected into OrcidProcessor as its
-    name_normalizer rather than imported directly into the core module. Passes through
-    p.family_names (the full diacritic-widened variant set, e.g. {"gruen","grun"}) -- not just
-    family_name_main -- so NameForms.family_names/all_full_name_keys() carry the real set
-    instead of silently narrowing back to one scalar at this adapter boundary (the actual root
-    cause of a 2026-09-06 "why are you picking one" finding: the richer parse already computed
-    the full set, this adapter was just never forwarding it)."""
-    p = _parser.parse(raw_name)
-    return NameForms(p.given_tokens, p.family_name_main, p.first_name_canonical, p.full_name_key,
-                      family_names=p.family_names)
+from src.utils.orcid_processor import OrcidRecord, get_or_fetch
 
 
 def institution_matched_candidates(candidates: list[dict], own_institution_names: list[str] | set[str]) -> list[dict]:

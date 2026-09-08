@@ -902,6 +902,18 @@ def cluster_items(
         "orcid": it.orcid,
         "inst_arr": [it.institution_oax_id] if it.institution_oax_id else [],
         "for_name_tokens": it.for_name_tokens,
+        # given_multichar (2026-09-08): given_tokens + nickname_tokens, single-character
+        # initials filtered out. Feeds the given-name set-overlap blocking rule below --
+        # bare initials must be excluded, or the rule fires on any coincidentally-shared
+        # letter (confirmed directly: unfiltered, "Ying Zhu"/"Huai-Yong Zhu" blocked together
+        # purely because "Huai-Yong" tokenizes to include a bare "y", nothing to do with
+        # either person's actual given name). Anchored on family_name_main (not first_initial)
+        # so it can still catch a genuine given-name mismatch -- first_initial itself is
+        # exactly what a nickname breaks (Yingzi vs Jenny).
+        "given_multichar": (
+            [t for t in (it.parsed.given_tokens + it.parsed.nickname_tokens) if len(t) > 1]
+            if it.parsed else []
+        ),
     } for it in items])
 
     settings = SettingsCreator(
@@ -922,6 +934,15 @@ def cluster_items(
             # this blocking rule nor the matching comparison level below before this fix, unlike
             # its already-fixed 03_link_arc_oax.py sibling.
             "list_has_any(l.family_names, r.family_names) AND l.first_initial = r.first_initial",
+            # Given-name set-overlap (2026-09-08) -- the given-name-side sibling of the rule
+            # above, needed for the case first_initial itself can't survive: a real nickname
+            # (Yingzi/Jenny) changes the initial, not just the spelling. Anchored on exact
+            # family_name_main (not first_initial, which is exactly what's unreliable here) --
+            # measured directly against the real ~64,830-item population: unanchored
+            # (list_has_any(full_name_keys, full_name_keys) alone) cost 241s and produced
+            # noise from bare-initial collisions; this anchored, multichar-filtered version
+            # cost 0.5s and the false positive it was compared against was confirmed excluded.
+            "l.family_name_main = r.family_name_main AND list_has_any(l.given_multichar, r.given_multichar)",
         ],
         comparisons=[
             cl.CustomComparison(
@@ -951,6 +972,19 @@ def cluster_items(
                         ),
                         "label_for_charts": "Initial matches full name",
                     },
+                    # Set overlap (2026-09-08) -- pairs reaching Splink only via the
+                    # given_multichar blocking rule need to score as real evidence here, same
+                    # reasoning as family_name_main's own set-overlap level below -- otherwise
+                    # the blocking rule generates the pair but this comparison scores it as a
+                    # mismatch, defeating the fix. Placed after the exact/initial levels,
+                    # before the mismatch level below, mirroring 03_link_arc_oax.py's own
+                    # 2026-08-25 given-name set-overlap level exactly (same m/u probabilities --
+                    # hand-set, not EM-trained, per this project's one-EM-session rule).
+                    {
+                        "sql_condition": "list_has_any(given_multichar_l, given_multichar_r)",
+                        "label_for_charts": "Set overlap (shared given-name/nickname form)",
+                        "m_probability": 0.5, "u_probability": 0.02,
+                    },
                     {
                         "sql_condition": (
                             "length(first_name_canonical_l) > 1"
@@ -974,6 +1008,16 @@ def cluster_items(
                         tf_adjustment_column="family_name_main",
                         tf_adjustment_weight=1.0,
                     ),
+                    # Set overlap (2026-09-08 fix -- was missing despite the matching blocking
+                    # rule above already existing since 2026-09-07, confirmed by direct
+                    # comparison against 03_link_arc_oax.py's own equivalent level; a pair
+                    # reaching Splink only via the family_names blocking rule was falling
+                    # through to ElseLevel here, defeating that fix). Mirrors
+                    # 03_link_arc_oax.py's "Set overlap (shared spelling variant)" level exactly.
+                    cll.CustomLevel(
+                        "list_has_any(family_names_l, family_names_r)",
+                        label_for_charts="Set overlap (shared spelling variant)",
+                    ).configure(m_probability=0.5, u_probability=0.02),
                     cll.ElseLevel(),
                 ],
             ),
@@ -2140,7 +2184,9 @@ def compute_coawardees(clusters: list[AwardsCIF], items: list[AwardCIFItem]) -> 
                     d = asdict(parsed)
                     d["given_tokens"] = list(d["given_tokens"])
                     d["middle_tokens"] = list(d["middle_tokens"])
+                    d["nickname_tokens"] = list(d["nickname_tokens"])
                     d["family_names"] = list(d["family_names"])
+                    d["full_name_keys"] = list(d["full_name_keys"])
                     d["given_tokens_raw"] = list(d["given_tokens_raw"])
                     tally[key] = {**d, "count": 0}
                 tally[key]["count"] += 1

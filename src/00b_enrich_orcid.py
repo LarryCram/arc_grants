@@ -23,11 +23,14 @@ wasn't in the snapshot at all), not the first thing tried.
 
 2026-09-02: rewired onto src/utils/orcid_processor.py's OrcidProcessor.discover() (backed by
 orcid_bulk.parquet, the FULL 17.15M-person Zenodo population, matching keys computed with this
-project's own HumanNameParser via orcid_processor_arc_adapter.arc_name_normalizer) --
-supersedes the older orcid_bulk_lookup.py/orcid_persons.parquet path, which only covered the
-narrower ~4.8M "HQ" subset with a bare, project-agnostic name parse. See
-docs/pipeline_todo.md #19 for the full before/after account; orcid_bulk_lookup.py itself is
+project's own HumanNameParser) -- supersedes the older orcid_bulk_lookup.py/orcid_persons.parquet
+path, which only covered the narrower ~4.8M "HQ" subset with a bare, project-agnostic name parse.
+See docs/pipeline_todo.md #19 for the full before/after account; orcid_bulk_lookup.py itself is
 retired, not just superseded in this one call site.
+
+2026-09-08: orcid_processor.py now uses HumanNameParser directly as its own default normalizer
+(item #26) -- OrcidProcessor() below no longer needs an explicit name_normalizer= override at
+all, since the default already is the hardened parse this project always wanted here.
 
 Both caches are checked before any API call; re-runs make zero network calls
 unless forced.
@@ -72,7 +75,7 @@ from src.utils.io import setup_stdout_utf8
 from src.utils.orcid_cache import orcid_addresses, orcid_external_ids, orcid_works_count
 from src.utils.era_journals import load_era_lookup, orcid_for_codes
 from src.utils.orcid_processor import OrcidProcessor
-from src.utils.orcid_processor_arc_adapter import arc_name_normalizer, institution_matched_candidates
+from src.utils.orcid_processor_arc_adapter import institution_matched_candidates
 from src.utils.orcid_client import get_access_token, ORCID_CLIENT_ID, default_cache
 
 PROJECT_DATA = Path(__file__).resolve().parents[1] / "data_persisted"
@@ -156,13 +159,14 @@ _ORCID_PROC: OrcidProcessor | None = None
 
 def _get_orcid_proc() -> OrcidProcessor:
     """Lazy module-level singleton -- one OrcidProcessor (one duckdb connection) reused across
-    every name pair a run processes, rather than opening a fresh connection per call. Built with
-    this project's own arc_name_normalizer (HumanNameParser-backed), not OrcidProcessor's bare
-    standalone default, so ORCID-side matching keys use the exact same NFC/NFKC/zero-width/
-    postnominal-strip/diacritic-widening hardening as every other ARC-side name comparison."""
+    every name pair a run processes, rather than opening a fresh connection per call. Uses
+    OrcidProcessor's own default normalizer (names.py's HumanNameParser directly, since
+    2026-09-08's item #26 refactor) -- no explicit override needed, that default already carries
+    the exact same NFC/NFKC/zero-width/postnominal-strip/diacritic-widening/nickname hardening
+    as every other ARC-side name comparison."""
     global _ORCID_PROC
     if _ORCID_PROC is None:
-        _ORCID_PROC = OrcidProcessor(name_normalizer=arc_name_normalizer)
+        _ORCID_PROC = OrcidProcessor()
     return _ORCID_PROC
 
 

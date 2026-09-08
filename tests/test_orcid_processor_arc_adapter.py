@@ -11,28 +11,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.utils.orcid_processor_arc_adapter import (
-    arc_name_normalizer,
     get_record,
     institution_matched_candidates,
     resolve_institution_overlap,
 )
 
-
-class TestArcNameNormalizer:
-    def test_returns_orcid_processor_nameforms_shape(self):
-        nf = arc_name_normalizer("Frank Grützner")
-        assert nf.family_name_main in ("grutzner", "gruetzner")
-        assert nf.first_name_canonical == "frank"
-
-    def test_postnominal_stripped_via_humannameparser(self):
-        # Proves this really delegates to HumanNameParser (postnominal stripping is that
-        # class's own job, not orcid_processor.py's bare default_name_normalizer).
-        nf = arc_name_normalizer("Anthony Thomas AC FAA")
-        assert nf.family_name_main == "thomas"
-
-    def test_empty_string(self):
-        nf = arc_name_normalizer("")
-        assert nf.full_name_key is None
+# arc_name_normalizer() was removed 2026-09-08 (item #26) -- orcid_processor.py now uses
+# names.py's HumanNameParser directly as its own default, so there's no adapter-level name
+# normalization left to test here. Equivalent coverage (postnominal stripping, diacritic
+# widening, nickname handling) lives in tests/test_names.py's own HumanNameParser tests.
 
 
 class TestInstitutionMatchedCandidates:

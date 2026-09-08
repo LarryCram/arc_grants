@@ -203,7 +203,7 @@ class FetchOrcid:
                 family_all = list(dict.fromkeys(
                     list(p.family_names) + ([p.family_name_raw] if p.family_name_raw else [])
                 ))
-                initials = list(dict.fromkeys(t[:1] for t in p.given_tokens if t))
+                initials = list(dict.fromkeys(t[:1] for t in p.given_tokens + p.nickname_tokens if t))
                 fbk.update((fam, init) for fam in family_all for init in initials)
             cluster_exact_keys[cluster_id] = ek
             cluster_fb_keys[cluster_id] = fbk
@@ -241,7 +241,8 @@ class FetchOrcid:
                        o.employments, o.educations, o.memberships
                 FROM (SELECT unnest(?) AS family, unnest(?) AS initial) f
                 JOIN orcid_bulk_tbl o
-                  ON o.family_name_main = f.family AND list_contains(o.given_tokens, f.initial)
+                  ON o.family_name_main = f.family
+                 AND (list_contains(o.given_tokens, f.initial) OR list_contains(o.nickname_tokens, f.initial))
                 """,
                 [fams, inits],
             ).fetchall()
@@ -265,7 +266,14 @@ class FetchOrcid:
 
     @staticmethod
     def _candidate_full_name_keys(parsed: ParsedName) -> list[str]:
-        given_all = list(dict.fromkeys(list(parsed.given_tokens) + list(parsed.given_tokens_raw)))
+        # nickname_tokens included alongside given_tokens (2026-09-08) -- a real nickname
+        # ("Jenny" for "Yingzi") is exactly the kind of alternate form this combinatorial search
+        # exists to catch; no raw-path counterpart exists for nicknames (ParsedName keeps
+        # nickname_tokens ASCII-only), so it's unioned into the ASCII side only, same as
+        # given_tokens itself.
+        given_all = list(dict.fromkeys(
+            list(parsed.given_tokens) + list(parsed.nickname_tokens) + list(parsed.given_tokens_raw)
+        ))
         family_all = list(dict.fromkeys(
             list(parsed.family_names) + ([parsed.family_name_raw] if parsed.family_name_raw else [])
         ))
@@ -277,7 +285,7 @@ class FetchOrcid:
         family_all = list(dict.fromkeys(
             list(parsed.family_names) + ([parsed.family_name_raw] if parsed.family_name_raw else [])
         ))
-        initials = list(dict.fromkeys(t[:1] for t in parsed.given_tokens if t))
+        initials = list(dict.fromkeys(t[:1] for t in parsed.given_tokens + parsed.nickname_tokens if t))
         if not family_all or not initials:
             return []
         self._ensure_table()
@@ -285,9 +293,10 @@ class FetchOrcid:
             """
             SELECT orcid, name, countries, given_tokens, employments, educations, memberships
             FROM orcid_bulk_tbl
-            WHERE family_name_main = ANY(?) AND list_has_any(given_tokens, ?)
+            WHERE family_name_main = ANY(?)
+              AND (list_has_any(given_tokens, ?) OR list_has_any(nickname_tokens, ?))
             """,
-            [family_all, initials],
+            [family_all, initials, initials],
         ).fetchall()
         return [self._to_candidate(r, parsed.middle_tokens) for r in rows]
 

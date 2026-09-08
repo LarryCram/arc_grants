@@ -141,9 +141,15 @@ class TestNameForms:
         assert family_names == ["van der berg"]
 
     def test_empty_first_name_falls_back_to_family_name(self):
+        # Fixed 2026-09-08 (names.py::HumanNameParser._structural()): the full family-name word
+        # used to also leak into first_names as a fake given-name candidate, not just its own
+        # initial -- fabricating a given name with no evidence behind it, the same anti-pattern
+        # already flagged for the initial-only fallback below (see that fallback's own comment;
+        # given=None is the still-not-built, fully-correct fix). Only the initial is a
+        # legitimate stand-in, needed because Splink's blocking key requires one.
         first_names, family_names = _name_forms("", "Smith")
         assert family_names == ["smith"]
-        assert "smith" in first_names
+        assert "smith" not in first_names
         assert "s" in first_names
 
 

@@ -2914,3 +2914,107 @@ bucket (`arc_ambiguous_deferred.parquet`), nothing downstream depends on its out
 optional human-assist tooling (confirmed absent from `run_pipeline.sh`), not a required step --
 same shape as the existing `00b_`/`00c_` letter-suffix convention for helpers attached to a
 specific stage rather than stages themselves.
+
+## Nickname handling built into the canonical parser; `orcid_processor.py` refactored onto it; a real ARC-internal blocking gap closed (2026-09-08)
+
+Full detail in `docs/pipeline_todo.md` items #14 (given-name blocking half), #26, #27 -- this
+section is the narrative summary.
+
+**`names.py`/`HumanNameParser` gained real nickname handling.** `nameparser`'s own `HumanName`
+already extracts a quoted/parenthesized nickname (`"Yingzi (Jenny) Wang"` -> `hn.nickname=
+"Jenny"`) but this project never read it -- confirmed by grep, zero references anywhere.
+Measured real occurrence first, not assumed: 156/46,312 distinct ARC `(first_name, family_name)`
+pairs (0.34%). `ParsedName` gained `nickname_tokens` -- kept deliberately OUT of `given_tokens`
+(a nickname is a different kind of relationship to the family name, its own combinatorial axis,
+not one more interchangeable given-name candidate; folding it in would let it silently influence
+`first_name_canonical`/`full_name_key` selection with no evidence to justify that), guarded
+against real OAX `display_name` noise sharing the same "(...)" shape (author-disambiguation
+numeric suffixes, consortium/group-authorship strings, birth-year annotations -- all confirmed
+real, not hypothetical, via direct inspection). A `"nee"`/`"née"` maiden-name marker
+(`"Judy Brown (nee Field)"`) lands in the identical `hn.nickname` field with nothing to
+distinguish it structurally from a genuine nickname -- caught separately (`_maiden_name()`) and
+routed into `family_names` instead, since it's a former surname, not a given-name alternative.
+
+`nickname_tokens` was initially dead weight -- built, but nothing crossed it against
+`family_names`, so it had zero production consumers (confirmed by grepping every call site: test
+files only). Closed the same session by adding `ParsedName.full_name_keys` -- every given/
+nickname x family combination one occurrence's own tokens produce, built directly into the
+canonical parser instead of a second implementation. This is the actual point of the whole
+addition; `nickname_tokens` alone was never the deliverable.
+
+**Two smaller, unrelated bugs fixed in the same pass, both found while doing this work:**
+- The custom `strip_postnominals()`/`_POSTNOMINALS` regex removed outright, replaced by full
+  native registration into `HumanName`'s own `CONSTANTS.suffix_acronyms` (19 acronyms, up from
+  4). The custom regex existed because an early test of the native mechanism registered only 4
+  of the ~19 needed acronyms, found a stacked-suffix case broken, and concluded native handling
+  didn't work -- never re-tested with the missing acronyms actually added. Verified directly:
+  once fully registered, native handling strips stacked suffixes correctly on its own, and
+  benefits OAX `display_name` parsing for free (same shared `HumanNameParser`). One accepted
+  residual, confirmed not to occur in real ARC data: a bare surname with no given name at all,
+  followed by a suffix (`"Raston AO FAA"`), still misparses -- too few tokens for `nameparser`'s
+  own grammar to tell there's no first name. The real Colin Raston OAX identity (the ARC source
+  of this exact example) is independently confirmed clean and richly corroborated, so this gap
+  doesn't threaten real matching.
+- `_structural()`'s bare-single-word-name fallback (`hn.last = hn.first` for e.g. plain
+  `"Smith"`) copied the value into `.last` but never cleared `.first`, leaking the same word into
+  `given_tokens` as a spurious given-name candidate alongside the family name it actually is.
+  Fixed by also setting `hn.first = ""` (`nameparser`'s own empty-field sentinel, confirmed
+  directly, not `None`). A pre-existing test had explicitly asserted the old, leaking behaviour
+  as correct -- updated after confirming with the user this was pinning down an oversight, not a
+  considered design choice.
+
+**`orcid_processor.py` refactored onto `ParsedName`/`HumanNameParser` directly** (item #26) --
+`NameForms`/`default_name_normalizer()`/`all_full_name_keys()` removed outright, not deprecated
+in place. The `NameForms`/adapter split existed on the premise that `orcid_processor.py`
+shouldn't depend on this project's own `names.py` to stay standalone/extractable -- checked
+directly and found not to hold (`names.py`'s own import chain is `re`/`dataclasses`/the external
+`nameparser` package/stdlib, zero project-specific coupling). The real cost of the old split:
+`all_full_name_keys()` was written against `NameForms`, so `nickname_tokens`/`full_name_keys`
+were structurally unreachable from ORCID-side matching until this refactor, even though that's
+exactly where a real nickname most needs to be found. Two bugs found and fixed along the way:
+the bulk table never carried the ASCII/raw dual representation ARC/OAX prep has had since
+2026-09-02 (now added); `_match_by_full_name_key()` only ever checked the narrow `full_name_key`/
+`alias_full_name_keys` pair, never the richer `all_full_name_keys` column it was already
+persisting (fixed -- now checks that directly, which also subsumes the old check).
+`orcid_bulk.parquet` rebuilt from the raw 17.15M-record snapshot (local-only, no live API calls)
+-- 17,152,673 rows, unchanged count, 9,578 records now carry a detected nickname.
+
+**A real ARC-internal Splink blocking gap closed** (`cluster_items()`, item #14's given-name
+half). The family-name side already had a set-overlap blocking rule (2026-09-07); the given-name
+side had none, so a nickname changing `first_initial` itself (Yingzi/Jenny) was unreachable by
+any existing rule. Two designs measured against the real ~64,830-item population before picking
+one: an unanchored rule testing `full_name_keys` directly measured at 241.2s (not the 25.5s a
+diagnostic tool's fast path first suggested) and produced a confirmed false positive from a
+bare-initial coincidence (`Ying Zhu`/`Huai-Yong Zhu`, sharing only a stray "y"); the shipped
+version -- anchored on exact `family_name_main`, testing only multichar-filtered given/nickname
+tokens -- measured at 0.5s with the false positive confirmed excluded. A separate, pre-existing
+bug found while adding this: the family-name-side comparison level this project's own 2026-09-07
+entry documented adding was never actually there, so that blocking rule had been generating
+candidate pairs since 2026-09-07 that then silently scored as mismatches anyway -- fixed
+alongside the given-name addition.
+
+Verified against real data: full `cluster_items()` run, 64,830 items -> 22,791 clusters, 15.1s,
+real previously-unreachable merges confirmed directly (`Jenny Yingzi Wang`/`Yingzi (Jenny) Wang`
+-- the exact motivating case -- plus `Drew Dawson`/`William (Drew) Dawson`, `Chunhui Yang`/
+`Richard (Chunhui) Yang`, `Alison (Sal) Humphreys`/`Sal (Alison) Humphreys` reciprocally, and
+others). Full test suite 543/543 passing throughout every step.
+
+**Explicitly confirmed, not fixed by any of this, and not fixable by blocking-rule design at
+all**: two name-forms sitting in separate records with no textual connection at all (one grant
+plainly recording "Yingzi Wang", a wholly separate grant plainly recording "Jenny Wang", neither
+ever mentioning the other) is information-theoretically identical to matching two unrelated
+strangers by name alone. Already correctly documented elsewhere in this project as
+manual-review-only, not automatable -- this session's work only closes the case where one
+occurrence's own recorded string already contains both forms.
+
+**Not done this pass, deliberately deferred**: `AwardsCIF.first_names` (feeding
+`03_link_arc_oax.py`'s own given-name set-overlap rule) doesn't yet carry nickname-widened forms
+-- `_name_forms()` was left untouched. Checked directly and found lower-priority than it first
+looked: `03_link_arc_oax.py` already has its own given-name set-overlap rule
+(`first_names_multichar`), so fixing `first_names` at the source needs zero code changes in that
+file at all -- a smaller follow-on, not a new design question. Also not done: re-running
+`00b_enrich_orcid.py`'s actual population-scale ARC search against the rebuilt bulk table (a
+materially bigger, live-API-touching operation needing its own go-ahead), and a full
+`00->01->03->04` pipeline rerun to materialise any of this into `arc_persons.parquet` and
+everything downstream -- today's verification is at the function level, not a fresh
+population-wide pipeline output.

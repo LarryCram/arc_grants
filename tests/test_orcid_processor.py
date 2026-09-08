@@ -4,63 +4,34 @@ the records.jsonl.gz -> orcid_bulk.parquet conversion pipeline, and OrcidRecord/
 (live-record retrieval, cache-first with an injected fetcher).
 
 All fixtures are small, synthetic, and self-contained -- nothing here reads the real
-orcid_bulk.parquet (17.15M rows) or hits the live ORCID API. orcid_processor.py's own
-"standalone, project-agnostic" design is exercised directly: these tests use the bare
-default_name_normalizer, never src/utils/names.py's HumanNameParser (that pairing is
-orcid_processor_arc_adapter.py's own job, not this module's).
+orcid_bulk.parquet (17.15M rows) or hits the live ORCID API.
+
+2026-09-08 (item #26): this module now uses src/utils/names.py's HumanNameParser directly as
+its own default normalizer (NameForms/default_name_normalizer/all_full_name_keys removed
+outright -- see orcid_processor.py's own docstring for the full incident). The bare-parse-only
+coverage that used to live here (TestDefaultNameNormalizer) is superseded by
+tests/test_names.py's own HumanNameParser tests, which exercise the same parser this module now
+uses directly -- not duplicated a second time here.
 """
 import gzip
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 
+from src.utils.names import HumanNameParser
 from src.utils.orcid_processor import (
     AffiliationEntry,
-    NameForms,
     OrcidProcessor,
     OrcidRecord,
     convert_bulk_dump,
-    default_name_normalizer,
     get_or_fetch,
     parse_bulk_record,
 )
-
-
-class TestDefaultNameNormalizer:
-    def test_basic_given_family(self):
-        nf = default_name_normalizer("David Smith")
-        assert nf.given_tokens[0] == "david"
-        assert nf.family_name_main == "smith"
-        assert nf.first_name_canonical == "david"
-        assert nf.full_name_key == "david_smith"
-
-    def test_given_tokens_include_own_initial(self):
-        # discover()'s bare-initial fallback depends on this: every given token's own initial
-        # is itself present in given_tokens, so a family+initial match needs no separate logic.
-        nf = default_name_normalizer("David Smith")
-        assert "d" in nf.given_tokens
-
-    def test_empty_string(self):
-        nf = default_name_normalizer("")
-        assert nf == NameForms((), None, None, None)
-
-    def test_family_name_only_fallback(self):
-        # No given name at all -- HumanName puts the bare word in .last already (not .first),
-        # so no special-case fallback is even needed here (contrast with names.py's
-        # HumanNameParser, which needs one for a title-prefixed "Dr. Smith").
-        nf = default_name_normalizer("Smith")
-        assert nf.family_name_main == "smith"
-
-    def test_deterministic_tuples_not_sets(self):
-        # This project's own already-fixed set()-iteration-order non-determinism bug --
-        # confirm the bare default normalizer was built with the same discipline.
-        results = {default_name_normalizer("Xiao Dong Chen").first_name_canonical for _ in range(20)}
-        assert len(results) == 1
-        assert isinstance(default_name_normalizer("Xiao Dong Chen").given_tokens, tuple)
 
 
 class TestParseBulkRecord:
@@ -114,6 +85,24 @@ class TestParseBulkRecord:
         row = parse_bulk_record(self._rec())
         assert row["employments"][0]["end_year"] is None
 
+    def test_nickname_widens_all_full_name_keys(self):
+        # 2026-09-08: the actual point of this whole refactor -- a nickname in the primary name
+        # field now produces a real matchable key, not just a widened family_names set.
+        row = parse_bulk_record(self._rec(name="Yingzi (Jenny) Wang", aliases=[]))
+        assert "jenny" in row["nickname_tokens"]
+        assert "jenny_wang" in row["all_full_name_keys"]
+        # family_name_main/full_name_key stay anchored to the primary form, unaffected.
+        assert row["family_name_main"] == "wang"
+        assert row["full_name_key"] == "yingzi_wang"
+
+    def test_raw_path_columns_present(self):
+        # New 2026-09-08 -- this table never carried the non-ASCII fallback representation
+        # before this refactor, even though ParsedName has had it since 2026-09-02.
+        row = parse_bulk_record(self._rec(name="Frank Grützner", aliases=[]))
+        assert row["given_tokens_raw"] == ["frank"]
+        assert row["family_name_raw"] == "grützner"
+        assert row["full_name_key_raw"] == "frank_grützner"
+
 
 class TestConvertBulkDump:
     RECORDS = [
@@ -154,13 +143,16 @@ class TestConvertBulkDump:
         assert n == 1
 
     def test_custom_normalizer_used(self, tmp_path):
+        # Demonstrates the pluggable normalizer still works post-2026-09-08 refactor, now typed
+        # Callable[[str], ParsedName] -- dataclasses.replace() for a minimal custom variant,
+        # since ParsedName is frozen.
         src = self._write_gz(tmp_path)
         out = str(tmp_path / "orcid_bulk.parquet")
+        parser = HumanNameParser()
 
         def upper_normalizer(raw_name):
-            nf = default_name_normalizer(raw_name)
-            return NameForms(nf.given_tokens, nf.family_name_main, nf.first_name_canonical,
-                              (nf.full_name_key.upper() if nf.full_name_key else None))
+            p = parser.parse(raw_name)
+            return replace(p, full_name_key=(p.full_name_key.upper() if p.full_name_key else None))
 
         convert_bulk_dump(src=src, out=out, normalizer=upper_normalizer, progress=False)
         import duckdb
@@ -209,11 +201,37 @@ class TestOrcidProcessorDiscover:
         assert by_orcid["0000-0000-0000-0002"]["institution_names"] == ["Macquarie University"]
 
     def test_bare_initial_fallback(self, bulk_parquet):
-        # "W" alone doesn't form a full_name_key match against "William"/"Wendy" -- falls back
-        # to family_name_main + initial, matching both.
+        # "W Cope" -> full_name_key "w_cope", which is now ALSO in both "William Cope"'s and
+        # "Wendy Cope"'s own all_full_name_keys (each includes its own bare-initial combination,
+        # e.g. "william_cope" + "w_cope") -- confirmed 2026-09-08 this now matches via
+        # _match_by_full_name_key() alone, not the family+initial fallback this test was
+        # originally written to exercise. Kept as a same-result regression check either way: a
+        # bare query initial must still resolve to every candidate sharing that initial,
+        # regardless of which internal path gets there.
         with OrcidProcessor(bulk_parquet=bulk_parquet) as proc:
             candidates = proc.discover("W", "Cope")
         assert {c["orcid"] for c in candidates} == {"0000-0000-0000-0003", "0000-0000-0000-0004"}
+
+    def test_fallback_when_candidate_record_only_has_bare_initial(self, tmp_path):
+        # The genuine remaining use for _match_by_family_and_initial(): the QUERY has a full
+        # given name but the CANDIDATE's own ORCID record was only ever entered with a bare
+        # initial -- "w_cope" (query key) isn't in the candidate's own all_full_name_keys
+        # (which only ever had {"w_cope"} to begin with, no "william_cope" to combine from,
+        # since their own given_tokens is just ["w"]), so the exact-key pass finds nothing and
+        # the fallback is what actually finds this candidate.
+        records = [
+            {"orcid": "0000-0000-0000-0005", "name": "W. Cope", "aliases": [],
+             "employments": [], "educations": [], "memberships": [], "works": [], "xrefs": {}},
+        ]
+        src = tmp_path / "records.jsonl.gz"
+        with gzip.open(src, "wt", encoding="utf-8") as f:
+            for rec in records:
+                f.write(json.dumps(rec) + "\n")
+        out = str(tmp_path / "orcid_bulk.parquet")
+        convert_bulk_dump(src=str(src), out=out, progress=False)
+        with OrcidProcessor(bulk_parquet=out) as proc:
+            candidates = proc.discover("William", "Cope")
+        assert {c["orcid"] for c in candidates} == {"0000-0000-0000-0005"}
 
     def test_no_match_returns_empty(self, bulk_parquet):
         with OrcidProcessor(bulk_parquet=bulk_parquet) as proc:
