@@ -116,6 +116,8 @@ continuation, then the larger/optional items last.
 23. **Rerun the `FetchOrcid` NO_ORCID scan (stale) and run the HAS_ORCID audit for the first time at full population scale** — the tooling (`src/utils/fetch_orcid.py`) is built and fixed; the actual population-scale numbers are either stale (NO_ORCID) or never computed (HAS_ORCID). See its own entry below.
 24. **Diagnose why a recorded/matched orcid doesn't resolve to the correct OAX `author_idx`** — two of four candidate causes closed empirically this session; the real remaining work reframes into exactly two post-link questions (single-candidate-link reliability; multi-candidate disambiguation, which is substantially already built but short-circuits around ORCID). See its own entry below.
 25. **Build a generic, name-agnostic set-comparison utility for Splink evidence** (blocking/scoring/TF-adjustment over any `{value: count}` set, not just names) — deliberately deferred, not part of `src/utils/name_set_processing.py`; see its own entry below
+26. **Refactor `orcid_processor.py` to depend on `names.py`/`ParsedName` directly; drop `NameForms` and the adapter layer** — confirmed `names.py`'s own dependency chain is genuinely standalone (only `re`/`dataclasses`/the external `nameparser` package/stdlib), so the separate `NameForms` type and `orcid_processor_arc_adapter.py`'s conversion step were never actually necessary for portability; see its own entry below
+27. **`HumanNameParser.parse()` silently drops a quoted/parenthesized nickname** (`hn.nickname`, e.g. `"Robert (Bob) Smith"`) — `nameparser`'s `HumanName` extracts it, this project's wrapper never reads it, confirmed by grep (zero references anywhere in `names.py`/`awards_cif.py`/`orcid_processor.py`/`02_prepare_oax.py`); see its own entry below for the incorporation rule
 
 ---
 
@@ -1208,6 +1210,71 @@ name strings) and `for_label()`/`for_report()` (name-display/provenance semantic
 Not scoped further than this — no design decisions made yet on the generic class's exact shape,
 and no call sites (`inst_arr`, `for_name_tokens`) identified as *needing* migration onto it
 immediately. This is a real, deferred opportunity, not an active defect.
+
+### 26 — Refactor `orcid_processor.py` to depend on `names.py`/`ParsedName` directly
+
+Found 2026-09-08, following directly from item #25's discovery. `orcid_processor.py` defines its
+own `NameForms` type (a narrower shape than `ParsedName`: `given_tokens`, `family_name_main`,
+`first_name_canonical`, `full_name_key`, `family_names`) rather than using `ParsedName` itself,
+on the reasoning that `orcid_processor.py` is meant to be standalone/extractable to its own repo,
+so it shouldn't depend on this project's own `names.py`. Checked directly rather than assumed:
+`names.py`'s own import chain is `re`, `dataclasses`, the external `nameparser` package, and
+`src.utils.name_diacritic_variants` — which itself imports only `itertools`/`re`/`unicodedata`.
+Zero project-specific coupling anywhere in that chain. So `names.py` is *already* standalone, and
+depending on it would not have compromised `orcid_processor.py`'s own portability at all — the
+`NameForms`/adapter separation was built on a premise that doesn't hold.
+
+**Why this matters, not just as a tidiness concern**: `all_full_name_keys()` (the combinatorial
+given×family cross-product function — see item #14/this session's later discussion) was written
+against `NameForms`, because that's what `orcid_processor.py`'s own pipeline consumes. Because
+`NameForms` and `ParsedName` are different types with no shared code path, that function has
+never been reachable from `ParsedName` directly — which is the specific, concrete reason the ARC
+and OAX prep pipelines (which use `ParsedName` via `HumanNameParser.parse()` and never touch
+`NameForms`) have no access to it at all. This is not a second instance of the original
+"independent reimplementations" bug (item #14) — it's a real, deliberate architectural boundary
+(drawn for a legitimate-sounding reason) that turned out to block a later capability from
+reaching the place that needed it most, once the reason for the boundary was actually checked
+and found not to hold.
+
+**The refactor**: `orcid_processor.py` should import and use `ParsedName`/`HumanNameParser`
+directly, dropping `NameForms` and `orcid_processor_arc_adapter.py`'s conversion step entirely.
+`all_full_name_keys()` (or its replacement) should then operate on `ParsedName` directly, making
+it reachable from `01_prepare_arc.py`/`awards_cif.py`/`02_prepare_oax.py` without any adapter —
+this is the prerequisite for item #14's still-open combinatorial-full-name-key work (see that
+item's later discussion, and the "why doesn't this exist in the ARC/OAX parquets yet" note
+recorded there) to actually land in the pipelines that need it. Not yet scoped in detail
+(exact migration steps, whether `OrcidProcessor.discover()`'s other pluggable-normalizer callers
+outside this project would be affected — there are none today, so low risk).
+
+### 27 — `HumanNameParser.parse()` silently drops a quoted/parenthesized nickname
+
+Found 2026-09-08. Confirmed directly: `nameparser`'s `HumanName` already extracts a nickname
+when the input string has one written inline —
+`HumanName('John "Johnny" Smith')` and `HumanName('John (Johnny) Smith')` both give
+`first=John, last=Smith, nickname=Johnny`. This project's `HumanNameParser.parse()` never reads
+`hn.nickname` at all (grepped every name-parsing call site, zero references) — if any raw ARC
+name or OAX `display_name`/alternative string happens to contain this pattern, the nickname is
+silently discarded at parse time, before anything else in the pipeline ever sees it. Different
+failure shape from the already-known Jenny/Yingzi-style alias problem (a completely different
+chosen name, genuinely no shared string to find) — this one is recoverable, since the nickname
+is sitting right there in the raw string, just never extracted.
+
+**The incorporation rule, specified directly by the user:**
+1. If there are no existing first/middle-derived given-name tokens, the nickname becomes *the*
+   given-name token.
+2. If there is exactly one existing given-name token, the nickname is added as a *second*,
+   additional given-name token (both kept, not one replacing the other) — e.g. "Robert (Bob)
+   Smith" should yield candidate given forms including both "robert" and "bob".
+3. If there are already two given-name tokens (a first and a middle both present), the nickname
+   joins onto the second one with a space, forming one combined token, rather than becoming a
+   third independent token.
+
+**Not yet resolved before building**: which order the join in rule 3 uses (second-token +
+nickname, or nickname + second-token) — needs checking against real examples of this pattern in
+ARC/OAX data before picking one, not assumed. Real occurrence rate in this project's own data
+not yet measured (how many ARC `first_name`/OAX `display_name`/alternative strings actually
+contain a quoted or parenthesized nickname) — should be checked before this is prioritized
+against the other open items above.
 
 ## Verification
 Items 1 and 2: no pipeline rerun was needed since both turned out to already be correctly
