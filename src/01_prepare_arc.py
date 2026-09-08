@@ -43,11 +43,11 @@ from src.utils.awards_cif import (
     GRANT_CLUSTER_MAP_PARQUET,
 )
 
-# 00c_prepare_oax.py's filename starts with a digit, so it can't be imported with a normal
+# 02_prepare_oax.py's filename starts with a digit, so it can't be imported with a normal
 # `import` statement -- load it by path instead (same technique tests/test_01a_diagnose.py
 # already uses for the same reason).
 _spec = importlib.util.spec_from_file_location(
-    "prepare_oax", Path(__file__).resolve().parent / "00c_prepare_oax.py"
+    "prepare_oax", Path(__file__).resolve().parent / "02_prepare_oax.py"
 )
 prepare_oax = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(prepare_oax)

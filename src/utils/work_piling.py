@@ -12,7 +12,7 @@ blocks used by Phase 2's clustering -- coauthor, institution, field, subfield, t
 already sitting on every Stage-3 survivor row, unused, despite being exactly the kind of
 independent evidence that would have caught the Adam Hulme contamination case directly, see
 CLAUDE.md). Same (value, tf=count/n) shape as the existing oax_tf_*.parquet tables in
-00c_prepare_oax.py; year is bucketed (YEAR_BUCKET_WIDTH-year width) rather than treated as one
+02_prepare_oax.py; year is bucketed (YEAR_BUCKET_WIDTH-year width) rather than treated as one
 column per exact year, so two works from one real, continuous career still share a feature.
 
 Source population: Stage 3 survivors (quality- AND field-filtered), not Stage 1 (quality-filtered

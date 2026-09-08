@@ -148,7 +148,15 @@ def _prep_arc(con: duckdb.DuckDBPyConnection, path: Path) -> pd.DataFrame:
     df = con.execute(f"SELECT * FROM read_parquet('{path}')").fetchdf()
     print(f"  ARC persons: {len(df)}")
 
-    df["family_name_main"] = df["family_names"].apply(max_by_len)
+    # family_name_main comes straight from awards_cif_arc_only.parquet's own column
+    # (2026-09-07 fix) -- previously re-derived here via family_names.apply(max_by_len)
+    # ("longest variant wins"), discarding every per-item count that AwardsCIF's own modal
+    # computation (Counter.most_common(1), same design as full_name_key) has access to and
+    # this script does not (family_names arrives here already deduped to a set, with no
+    # frequency information left to recover). Measured cost of the old scalar, via
+    # verify_family_name_blocking.py's empirical_mismatch_check() against 9,052 ORCID-
+    # confirmed ARC<->OAX pairs: 28.05% would NOT have blocked on family_name_main alone --
+    # rerun that check after this fix to confirm the real improvement, not assumed.
 
     parsed = df["full_names"].apply(max_by_len).apply(parse_given)
     df[["first_name", "middle_name", "first_compound", "first_initial", "middle_initial"]] = (
@@ -183,7 +191,7 @@ def _prep_arc(con: duckdb.DuckDBPyConnection, path: Path) -> pd.DataFrame:
 
 
 def _prep_oax(con: duckdb.DuckDBPyConnection, path: Path) -> pd.DataFrame:
-    # HumanName-parsed columns are persisted by 00c_prepare_oax.py — no re-parsing needed.
+    # HumanName-parsed columns are persisted by 02_prepare_oax.py — no re-parsing needed.
     # Blocks on the FULL family_names (display_name + display_name_alternatives combined), not
     # just the display-only half -- reversed 2026-08-25 after direct pushback on an earlier,
     # overcautious version that excluded alternatives entirely over contamination risk (the
@@ -240,8 +248,8 @@ def main():
     # expensive to rebuild (minutes, 2.78M authors) and only needs updating a few times a year --
     # when the OpenAlex snapshot changes, not on every unrelated source-code edit. So this checks
     # it against authorships_hep.parquet/works_hep.parquet (the real snapshot-derived sources),
-    # matching 00c_prepare_oax.py's own ensure_fresh() policy exactly -- NOT against
-    # 00c_prepare_oax.py's own source file, which would (and did) fire on every cosmetic edit to
+    # matching 02_prepare_oax.py's own ensure_fresh() policy exactly -- NOT against
+    # 02_prepare_oax.py's own source file, which would (and did) fire on every cosmetic edit to
     # that script, contradicting ensure_fresh()'s own deliberate choice to ignore exactly that.
     assert_fresh(
         "03_link_arc_oax (openalex_authors_prep.parquet)",

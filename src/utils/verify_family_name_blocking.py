@@ -47,28 +47,30 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # is caught as a FAILED check rather than silently trusting a stale registry.
 CALL_SITES = [
     {
-        "file": "src/00c_prepare_oax.py", "line": 228,
+        "file": "src/02_prepare_oax.py", "line": 364,
         "role": "OAX family_name_main (feeds 03_link_arc_oax.py blocking + scoring)",
-        "feeds_blocking": True, "fix_status": "unfixed -- family_name_main itself is still a "
-            "longest-wins scalar, kept as the EXACT-MATCH comparison level (the strongest signal "
-            "when both sides DO agree). It is no longer the sole blocking signal: 03_link_arc_oax.py "
-            "now ALSO blocks on list_has_any() over the full family_names set (2026-08-25), and "
-            "scores a set-overlap-but-not-exact match via a dedicated comparison level instead of "
-            "falling to ElseLevel.",
+        "feeds_blocking": True, "fix_status": "FIXED 2026-09-07 -- now prefers "
+            "family_names_display (OpenAlex's own curated display_name) over "
+            "family_names_alt, falling back to alt only when display is empty, instead of "
+            "max_by_len() over the flatly-merged contaminated pool. Empirically confirmed via "
+            "empirical_mismatch_check() below: 28.05% -> 1.72% mismatch rate against 8,362 "
+            "ORCID-confirmed pairs (first measurement of this fix was itself wrong -- see that "
+            "function's own 2026-09-08 fix note). Residual 1.72% is a different, harder category "
+            "(compound/double-barreled surnames, spacing conventions, apparent real name "
+            "changes), not the alternates-contamination this fix targeted.",
     },
     {
-        "file": "src/03_link_arc_oax.py", "line": 67,
+        "file": "src/03_link_arc_oax.py", "line": 151,
         "role": "ARC family_name_main (feeds 03_link_arc_oax.py blocking + scoring)",
-        "feeds_blocking": True, "fix_status": "unfixed scalar (same as above); blocking now ALSO "
-            "uses the full family_names set via list_has_any() (2026-08-25) -- see "
-            "blocking_rules_to_generate_predictions and the new family_name_main comparison's "
-            "'Set overlap' level. Blocks on family_names (display + alternatives combined), not "
-            "just the display-derived half -- alternatives-contamination risk (Clarke/Erfani) is "
-            "real for max_by_len()'s scalar collapse, but not for set-overlap blocking, where a "
-            "spurious pair still has to survive full comparison scoring.",
+        "feeds_blocking": True, "fix_status": "FIXED 2026-09-07 -- no longer re-derived here at "
+            "all; now read straight from awards_cif_arc_only.parquet's own family_name_main "
+            "column, itself computed by AwardsCIF's modal aggregation (Counter.most_common(1) "
+            "over items, same design as full_name_key) instead of max_by_len() over the "
+            "already-deduped family_names set. See the OAX entry above for the combined "
+            "empirical result (both sides fixed together, measured together).",
     },
     {
-        "file": "src/utils/awards_cif.py", "line": 595,
+        "file": "src/utils/awards_cif.py", "line": 725,
         "role": "AwardCIFItem.family_name_main (ARC item-level; feeds cluster_items() dedupe_only "
             "blocking)",
         "feeds_blocking": True, "fix_status": "not applicable -- an AwardCIFItem's own "
@@ -77,22 +79,30 @@ CALL_SITES = [
             "expansion on the ARC side was attempted 2026-08-25 and reverted after testing showed "
             "it corrupts unrelated names, e.g. 'Fuentes'->'funtes'; see names.py's own comment), "
             "so max(key=len) has nothing to collapse ambiguously at the item level. Verified via "
-            "audit_item_family_names_are_singletons().",
+            "audit_item_family_names_are_singletons(). NOTE: this line reads "
+            "'family_name_main = parsed.family_name_main or parsed.family_name_raw', not a raw "
+            "max_by_len() call -- the check below (looking for a literal max_by_len()/max(key=len) "
+            "substring) will correctly show it as not matching that pattern; kept in the registry "
+            "for the role it documents, not because the check is expected to mark it OK.",
     },
     {
-        "file": "src/utils/awards_cif.py", "line": 1532,
+        "file": "src/utils/awards_cif.py", "line": 1723,
         "role": "merge_same_grant_coinvestigators() same-grant auto-merge key (ARC-internal, "
             "cluster-level family_names union)",
         "feeds_blocking": False, "fix_status": "fixed 2026-08-25 -- now groups by ANY shared "
-            "family_names token, not one longest-wins scalar.",
+            "family_names token, not one longest-wins scalar. NOTE: the registered line is the "
+            "fixed code itself ('for fam in c.family_names:'), which will correctly show as NOT "
+            "matching the old max_by_len()/max(key=len) pattern in the check below -- for these "
+            "two 'fixed' entries, that mismatch is the desired state, not drift. Re-verify by "
+            "reading the surrounding function, not by the boolean check alone.",
     },
     {
-        "file": "src/utils/awards_cif.py", "line": 2077,
+        "file": "src/utils/awards_cif.py", "line": 2481,
         "role": "compute_gap_candidates() under-merge grouping key (ARC-internal, "
             "cluster-level family_names union)",
         "feeds_blocking": False, "fix_status": "fixed 2026-08-25 -- now groups by ANY shared "
             "family_names token (deduplicated to unique pairs before compatibility checks), not "
-            "one longest-wins scalar.",
+            "one longest-wins scalar. Same NOTE as the entry above applies.",
     },
 ]
 
@@ -141,7 +151,7 @@ def audit_item_family_names_are_singletons() -> dict:
     away a genuine alternative there. Checked against the real persisted population, not
     assumed from reading the code."""
     from src.utils.awards_cif import load_award_cif_items
-    items = load_award_cif_items()
+    items, _, _ = load_award_cif_items()
     lens = [len(it.family_names) for it in items]
     multi = [it for it, n in zip(items, lens) if n > 1]
     return {
@@ -165,13 +175,19 @@ def empirical_mismatch_check(verbose: bool = True) -> dict:
 
     orcid_resolved = resolved[resolved["resolved_by"] == "orcid"][["arc_id", "oax_id"]]
 
-    def _max_by_len(lst):
-        if lst is None or len(lst) == 0:
-            return None
-        return max(lst, key=len)
-
-    arc_fnm = persons.set_index("cluster_id")["family_names"].apply(_max_by_len)
-    oax_fnm = oax.set_index("unique_id")["family_names"].apply(_max_by_len)
+    # Fixed 2026-09-08 -- this used to re-derive family_name_main locally via its own
+    # max(lst, key=len) over the raw family_names SET, completely bypassing whatever the real
+    # pipeline actually computes for that column. Confirmed a real, misleading consequence:
+    # after the 2026-09-07 family_name_main fix landed (AwardsCIF's own modal aggregation on
+    # the ARC side; family_names_display-preference on the OAX side), this measurement still
+    # showed 'kejun' for Kejun Dong -- checked directly against the freshly-rebuilt
+    # openalex_authors_prep.parquet and found its own real family_name_main column already
+    # correctly says 'dong'; the OLD local re-derivation was hitting a length-5 tie between
+    # 'kejun' and the contaminant 'zhang' (both from family_names_alt) and keeping the
+    # first-seen, reproducing the exact bug being fixed rather than measuring it being fixed.
+    # Reading the actual persisted column is what makes this a real regression check.
+    arc_fnm = persons.set_index("cluster_id")["family_name_main"]
+    oax_fnm = oax.set_index("unique_id")["family_name_main"]
 
     rows = []
     for _, r in orcid_resolved.iterrows():

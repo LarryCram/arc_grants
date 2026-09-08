@@ -1,5 +1,5 @@
 """
-src/00c_prepare_oax.py
+src/02_prepare_oax.py
 
 Loader: prepares OpenAlex HEP-context authors for Splink linkage. Rebuild only when stale
 relative to authorships_hep.parquet/works_hep.parquet -- a few times a year, not every run.
@@ -172,7 +172,7 @@ def oax_name_arrays(display_name: str, alts: list[str]) -> dict:
     # too (e.g. "Björn" -> both "bjorn" and "bjoern" tokens, not just "bjorn"), matching ARC-side
     # exactly. A real, population-wide effect on Splink candidate generation is expected (more
     # given-name token variants -> more candidate pairs for anyone with a given-name diacritic) --
-    # 00c_prepare_oax.py needs a full rerun (and 03_link_arc_oax.py after it) to measure the
+    # 02_prepare_oax.py needs a full rerun (and 03_link_arc_oax.py after it) to measure the
     # actual impact before this is trusted at scale, not assumed zero-impact.
     first_toks: dict[str, None] = {}
     family_from_display: dict[str, None] = {}
@@ -353,15 +353,43 @@ def main():
     n = len(df)
 
     def _canonical(row):
+        # first_name_full preserves order (SQL list_filter, not a re-sort): display_name's own
+        # given-name token(s) come before any alt-derived token, since oax_name_arrays() parses
+        # display_name first. Fixed 2026-09-07 -- was max(full, key=len), the same
+        # position-blind "longest wins" bug already fixed in names.py::HumanNameParser.parse()
+        # (there: "George Stewart Walker" -> "stewart" instead of "george"). Here it could also
+        # promote an alt-derived token over display_name's own, compounding the risk. Using the
+        # first element instead prefers position (and, transitively, source trust) over length.
         full = row["first_name_full"]
         inits = row["first_initials"]
         if full is not None and len(full) > 0:
-            return max(full, key=len)
+            return full[0]
         if inits is not None and len(inits) > 0:
             return inits[0]
         return None
 
-    df["family_name_main"]     = df["family_names"].apply(max_by_len)
+    def _family_name_main(row):
+        # Prefer display_name-derived forms (OpenAlex's own curated spelling, higher trust) over
+        # display_name_alternatives-derived ones -- fixed 2026-09-07. Was
+        # family_names.apply(max_by_len) over the flatly-merged display+alt pool, which a real
+        # empirical check (verify_family_name_blocking.py, 9,052 ORCID-confirmed pairs) showed
+        # sometimes promoting a GIVEN name from a garbled/single-token alternative into the
+        # family-name slot outright (e.g. oax_family_name_main='peter' for a person named Kim,
+        # oax_family_name_main='kejun' for a person surnamed Dong) -- alternatives are documented
+        # elsewhere in this project as sometimes contaminated with unrelated names from OAX's own
+        # disambiguation errors; display_name is OpenAlex's single curated "First Last" field and
+        # doesn't carry that risk. family_names (the full combined set) is untouched by this fix
+        # and still feeds blocking/the set-overlap comparison, where the wider pool is safe (a
+        # spurious pair still has to survive full comparison scoring).
+        disp = row["family_names_display"]
+        if disp is not None and len(disp) > 0:
+            return max(disp, key=len)
+        alt = row["family_names_alt"]
+        if alt is not None and len(alt) > 0:
+            return max(alt, key=len)
+        return None
+
+    df["family_name_main"]     = df.apply(_family_name_main, axis=1)
     df["first_name_canonical"] = df.apply(_canonical, axis=1)
     df["full_name_key"] = (
         (df["first_name_canonical"] + "_" + df["family_name_main"])

@@ -271,6 +271,16 @@ class AwardsCIF:
     for_names: list[str] = field(default_factory=list)
     for_codes: list[str] = field(default_factory=list)
     full_name_key: str | None = None  # modal full_name_key across items
+    # Modal family_name_main across items (2026-09-07) -- the cluster-level analogue of
+    # full_name_key's own Counter.most_common(1) design, added specifically so
+    # 03_link_arc_oax.py can read an already-correct, frequency-based scalar instead of
+    # re-deriving one from the deduped family_names SET via max_by_len() ("longest variant
+    # wins" -- confirmed structurally wrong: it discards every count, and a contaminant only
+    # has to be longer once to win, not more frequent). A cluster-level max_by_len() over
+    # family_names has no per-item counts to work from (family_names is already a deduped
+    # set by the time it reaches AwardsCIF); this field is computed from the items directly,
+    # before that information is lost.
+    family_name_main: str | None = None
 
     # HEP codes across every one of this person's grants' full eligible-org sets (2026-08-16) --
     # union of AwardCIFItem.hep_codes, not just each grant's single admin_org's HEP. See
@@ -820,6 +830,11 @@ def _build_awards_cif(cluster_id: str, items: list[AwardCIFItem]) -> AwardsCIF:
     # own explicit sort) inherits this determinism for free rather than needing its own fix.
     items = sorted(items, key=lambda it: it.unique_id)
     fnk_counts = Counter(it.full_name_key for it in items if it.full_name_key)
+    # Same modal design as full_name_key above, same tie-break (sorted-by-unique_id item
+    # order, via Counter.most_common(1) breaking ties by first-seen) -- see
+    # AwardsCIF.family_name_main's own docstring for why this can't be recovered later from
+    # the already-deduped family_names set alone.
+    fnm_counts = Counter(it.family_name_main for it in items if it.family_name_main)
 
     return AwardsCIF(
         cluster_id=cluster_id,
@@ -842,6 +857,7 @@ def _build_awards_cif(cluster_id: str, items: list[AwardCIFItem]) -> AwardsCIF:
         for_codes=sorted({it.for_code for it in items if it.for_code}),
         for2020_codes=_aggregate_for2020_codes(items),
         full_name_key=fnk_counts.most_common(1)[0][0] if fnk_counts else None,
+        family_name_main=fnm_counts.most_common(1)[0][0] if fnm_counts else None,
         grant_ids=[it.unique_id for it in items],
         # 2026-08-21 fix: was len(items) -- counted raw (grant x investigator) records, not
         # distinct grants, so an announcement/current same-grant name-snapshot pair (e.g.
@@ -880,6 +896,7 @@ def cluster_items(
         "unique_id": it.unique_id,
         "first_name_canonical": it.first_name_canonical,
         "family_name_main": it.family_name_main,
+        "family_names": list(it.family_names),
         "full_name_key": it.full_name_key,
         "first_initial": it.first_initial,
         "orcid": it.orcid,
@@ -893,6 +910,18 @@ def cluster_items(
         blocking_rules_to_generate_predictions=[
             block_on("family_name_main", "first_initial"),
             "l.orcid = r.orcid AND l.orcid IS NOT NULL",
+            # Set-overlap blocking (2026-09-07) -- mirrors 03_link_arc_oax.py's own 2026-08-25
+            # fix (see that file's module docstring for the full incident/measurement). Same
+            # root cause here: family_name_main is one scalar picked from a genuinely
+            # multi-valued family_names set (confirmed real, not theoretical -- 77 real
+            # AwardCIFItem records carry 2+ family_names, e.g. Schröder ->
+            # ['schroder','schroeder','schröder']), so two of the SAME real person's own grant
+            # records can carry disagreeing family_name_main scalars (a diacritic-convention
+            # difference between two data-entry points, or a genuine mid-career spelling
+            # correction) with nothing here to rescue the pair -- this dedupe run had neither
+            # this blocking rule nor the matching comparison level below before this fix, unlike
+            # its already-fixed 03_link_arc_oax.py sibling.
+            "list_has_any(l.family_names, r.family_names) AND l.first_initial = r.first_initial",
         ],
         comparisons=[
             cl.CustomComparison(
@@ -2734,6 +2763,7 @@ def persist_awards_cif(clusters: list[AwardsCIF], path: Path = AWARDS_CIF_PARQUE
         "n_grants": c.n_grants,
         "coawardees": c.coawardees,
         "full_name_key": c.full_name_key,
+        "family_name_main": c.family_name_main,
         "orcid_status": c.orcid_status,
         "orcid_for_codes": c.orcid_for_codes,
         "gap_candidates": c.gap_candidates,
@@ -2801,6 +2831,7 @@ def load_awards_cif(path: Path = AWARDS_CIF_PARQUET) -> list[AwardsCIF]:
             n_grants=row["n_grants"],
             coawardees=[dict(x) for x in row["coawardees"]],
             full_name_key=row["full_name_key"],
+            family_name_main=row["family_name_main"],
             orcid_status=row["orcid_status"],
             orcid_for_codes=[dict(x) for x in row["orcid_for_codes"]],
             gap_candidates=list(row["gap_candidates"]),

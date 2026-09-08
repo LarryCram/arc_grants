@@ -317,8 +317,17 @@ def build_dossier(cohort_row: pd.Series, con: duckdb.DuckDBPyConnection) -> Doss
         f"SELECT full_names FROM read_parquet('{AWARDS_CIF}') WHERE cluster_id = ?", [cluster_id]
     ).fetchone()
     full_names = list(person[0]) if person else [cohort_row["name"]]
-    preferred_name = full_names[0]
-    name_variants = full_names[1:]
+    # Fixed 2026-09-07: was full_names[0] -- awards_cif.parquet's full_names is a sorted SET
+    # (alphabetical), not ordered by recency or completeness, so "[0]" meant "whichever name
+    # happens to sort first," not anything actually preferred. Using the longest recorded form
+    # instead is a deliberate, display-only choice (unlike family_name_main/full_name_key,
+    # where "longest wins" was the bug) -- a report reader is better served by the fullest
+    # name than an arbitrary pick, and nothing here feeds a matching/scoring decision. Still a
+    # real residual limitation: this can't distinguish "most complete" from "most current" (a
+    # name change wouldn't necessarily produce the longest string) without per-item grant-year
+    # data, which full_names alone doesn't carry.
+    preferred_name = max(full_names, key=len)
+    name_variants = [n for n in full_names if n != preferred_name]
 
     annual_series, first_pub_year = _fetch_annual_series(cluster_id, con)
     works, excluded_work_counts = _fetch_works(cluster_id, con)

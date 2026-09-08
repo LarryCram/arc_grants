@@ -187,7 +187,7 @@ class TestCanonicalizeUnicodeHardening:
 
 class TestExpandDiacriticVariants:
     """expand_diacritic_variants() -- thin wrapper over diacritic_variants(), kept for its one
-    real production caller (00c_prepare_oax.py's _parse_name(), which relies on this function's
+    real production caller (02_prepare_oax.py's _parse_name(), which relies on this function's
     own internal lowering and never lowercases externally itself)."""
     def test_matches_diacritic_variants(self):
         assert expand_diacritic_variants("Mühlhaus") == diacritic_variants("Mühlhaus")

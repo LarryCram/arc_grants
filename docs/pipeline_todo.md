@@ -115,6 +115,7 @@ continuation, then the larger/optional items last.
     discussed, why it was set aside), not as a live, sequenced item.
 23. **Rerun the `FetchOrcid` NO_ORCID scan (stale) and run the HAS_ORCID audit for the first time at full population scale** — the tooling (`src/utils/fetch_orcid.py`) is built and fixed; the actual population-scale numbers are either stale (NO_ORCID) or never computed (HAS_ORCID). See its own entry below.
 24. **Diagnose why a recorded/matched orcid doesn't resolve to the correct OAX `author_idx`** — two of four candidate causes closed empirically this session; the real remaining work reframes into exactly two post-link questions (single-candidate-link reliability; multi-candidate disambiguation, which is substantially already built but short-circuits around ORCID). See its own entry below.
+25. **Build a generic, name-agnostic set-comparison utility for Splink evidence** (blocking/scoring/TF-adjustment over any `{value: count}` set, not just names) — deliberately deferred, not part of `src/utils/name_set_processing.py`; see its own entry below
 
 ---
 
@@ -509,24 +510,63 @@ set fields being read, or dead/false-alarm code; the real fix is localized to th
 prep/comparison layer in `03_link_arc_oax.py` and `00c_prepare_oax.py`, not a sweeping
 14-file rewrite.
 
-**Not yet resolved — open before implementation starts:**
-- Whether `00c_prepare_oax.py`'s OAX-side prep has an equivalent "good value already computed
-  but ignored" situation to reuse, or whether OAX authors (individual OpenAlex records, not
-  built from multiple items the way an ACIF is) have no such prior modal computation to draw
-  on at all — not yet checked.
-- Given `family_names`/`full_names` (the real sets) already flow into `03_link_arc_oax.py` as
-  columns (used for the 2026-08-25 set-overlap *blocking* rule already), building the
-  matching set-overlap **scoring** comparison is more tractable than first feared — the data
-  is already there; symmetric overlap (`list_has_any`) vs. subset containment, and a graded
-  differ-count cascade vs. one boolean level, are the two design choices still needing a
-  decision (see the reasoning preserved from the prior pass of this item, still valid).
-- TF-adjustment redesign: for a genuine set-*intersection* match, the frequency of the actual
-  overlapping value can be looked up directly via a SQL join at scoring time (both sides share
-  the identical string when they truly overlap, so its frequency is unambiguous) — better than
-  a precomputed per-record "rarest of my own set" approximation, which is still the fallback
-  needed for TF outside an exact intersection.
-- Full pipeline rerun (`01`→`03`→`04` at minimum) and the test suite are required to verify no
-  regression once a fix lands — not attempted yet, no code has been changed for this item.
+**IMPLEMENTED 2026-09-07/08 (renamed `00c_prepare_oax.py` → `02_prepare_oax.py` in the same
+pass, per direct user request, for pipeline-sequence-number consistency — mechanical rename,
+all references updated: `01_prepare_arc.py`'s importlib path, `run_pipeline.sh`, and every
+comment/docstring referencing the old name):**
+
+1. **`AwardsCIF.family_name_main`** — new field, modal (`Counter.most_common(1)` over items,
+   same design as the existing `full_name_key`), computed in `_build_awards_cif()`, persisted/
+   loaded in `persist_awards_cif()`/`load_awards_cif()`. `03_link_arc_oax.py::_prep_arc()` no
+   longer re-derives `family_name_main` via `max_by_len()` at all — reads this column directly.
+2. **OAX-side `family_name_main`** (`02_prepare_oax.py`) — now prefers `family_names_display`
+   (OpenAlex's own curated form) over `family_names_alt`, not `max_by_len()` over the flatly-
+   merged, alternates-contaminated pool.
+3. **OAX-side `first_name_canonical`** — switched from `max(full, key=len)` to `full[0]`
+   (first element, in display-name-priority order) — the same position-not-length fix already
+   applied to `names.py::HumanNameParser.parse()`, extended here.
+4. **`cluster_items()` (ARC-internal Splink dedupe) — a real, previously-unverified gap found
+   while implementing this, not just a documentation fix.** Unlike its already-fixed
+   `03_link_arc_oax.py` sibling, this comparison had *neither* a set-overlap blocking rule nor
+   a matching scoring level — confirmed by actually reading its full `SettingsCreator` block
+   (an earlier, wrong claim about this file's state was corrected before landing here). Added
+   both, mirroring `03_link_arc_oax.py`'s 2026-08-25 pattern exactly. Verified via a controlled
+   A/B rerun (rule enabled vs. disabled) that this addition is *not* the cause of a separately-
+   discovered, pre-existing regression (see below) — identical output either way.
+5. `dossier_build.py`'s `preferred_name` — was `full_names[0]` (arbitrary, alphabetical-sort
+   artifact); now `max(full_names, key=len)` (longest recorded form) — a deliberate, low-stakes,
+   *display-only* choice (unlike matching, where "longest wins" was the bug).
+
+**Empirical result, `verify_family_name_blocking.py::empirical_mismatch_check()`** (against
+8,362 ORCID-confirmed ARC↔OAX ground-truth pairs — a real regression-check tool that already
+existed, itself needed a fix along the way: it was re-deriving `family_name_main` locally via
+its own `max(key=len)` instead of reading the pipeline's real column, silently re-introducing
+the exact bug being measured):
+- **Mismatch rate: 28.05% → 1.72%** — a ~16x reduction. This is the population that would have
+  been *structurally invisible* to blocking without a recorded ORCID to force-add the pair; the
+  fix makes a large share of it correctly reachable by name alone.
+- Full-pipeline effect (`02`→`01`→`03`→`04` rerun): ARC persons with ≥1 high-confidence OAX
+  candidate rose to **99.1%** (up from the documented 98.4% baseline); final resolved rate
+  **98.5%** (22,550/22,885, up from 98.4%). 443/443 tests passing throughout.
+- Residual 1.72% (144 pairs) is a genuinely different, harder category — compound/double-
+  barreled surnames (which half is "the surname"), spacing conventions, apparent real name
+  changes — not the OpenAlex-alternates contamination this fix targeted. Not pursued further
+  here; a reasonable stopping point, not an oversight.
+
+**A separate, pre-existing regression found and deliberately NOT fixed as part of this item**:
+`resolution_status` came back 86 UNRESOLVED (was 0 in the last documented baseline) after the
+`01_prepare_arc.py` rerun. Confirmed via a controlled A/B test (disabling the new
+`cluster_items()` blocking rule and rerunning) that this is **unrelated to any change in this
+item** — identical 86 with the rule on or off. Root cause traced for one sample case
+(`DP0209363_DAllen`, 8 grants, FOR-code spread spanning medical physiology/banking-finance/
+econometrics/zoology/computer vision — an implausible single career): the ARC-internal Splink
+dedupe had *already* merged multiple different real "David Allen"s into one cluster (confirmed
+via `provenance`: the `splink_cluster` event predates the `enriched_orcid` event), and
+`is_suspicious_for2020()` correctly flagged it — working as designed, not a pipeline bug. This
+is a backlog of common-name-collision cases needing the same manual-review treatment (via
+`manual_splits.csv`/`manual_splits_by_grant.csv`) as the many similar cases already documented
+throughout this project's history (Wei Wang, Gilbert, Young, etc.) — tracked as a new,
+separate item, not folded into this one.
 
 ### 15 — Extract `author_position` on next OpenAlex snapshot conversion
 Check the raw native snapshot carries the field, re-extract as an explicit persisted
@@ -1135,6 +1175,39 @@ investigating what signal(s) would actually substantiate the ">20%" claim — pu
 thresholds and grant-year-vs-earliest-pub-year have both now been tried and don't explain it.
 
 ---
+
+### 25 — Build a generic, name-agnostic set-comparison utility for Splink evidence
+
+Found 2026-09-08 while building `src/utils/name_set_processing.py` (`NameSetProcessing`/
+`NameComparison`, item #14's fix). `NameComparison.for_blocking()`/`for_scoring()`/`for_tf_idf()`
+answer questions that have nothing to do with names specifically — "do these two sets share a
+value," "what's the dominant value," "what's the rarest shared value's population frequency."
+This project already needs exactly the same operation for a field that isn't a name at all:
+`cl.ArrayIntersectAtSizes("inst_arr", ...)` (institution-set overlap) is the identical kind of
+check, and `for_name_tokens`'s own set-overlap comparison is a third instance already live in
+`cluster_items()`.
+
+Right now that logic is duplicated by construction — the institution comparison, the FOR-token
+comparison, and `NameComparison` each implement their own version of "compare two sets" with no
+shared code between them. That's the same failure shape as item #14's original bug (independent
+copies of the same logic, able to drift independently), just one level more abstract: instead of
+several copies of "pick a scalar from a name-set," it would be several copies of "compare two
+evidence-sets for Splink," if this is ever generalized without care.
+
+**Deliberately deferred, not folded into item #14**: building this now would have meant a larger
+refactor mid-fix, and `NameComparison` already fully implements the name-specific case correctly
+on its own (see `scratch/test_name_set_processing_cases.py`'s real-case coverage). The right
+shape when this is eventually built: a generic `SetComparison` (or similar) operating on any
+`{value: count}` structure, with `for_blocking`/`for_scoring`/`for_tf_idf` implemented once —
+`NameComparison` (and, eventually, an institution/FOR-code equivalent) would *compose* it rather
+than reimplement it. The name-specific pieces stay separate: `related()` (edit-distance/substring
+spelling-variant coherence — meaningless for institution IDs or FOR codes, genuinely specific to
+name strings) and `for_label()`/`for_report()` (name-display/provenance semantics) belong to
+`NameSetProcessing`, not the generic comparator.
+
+Not scoped further than this — no design decisions made yet on the generic class's exact shape,
+and no call sites (`inst_arr`, `for_name_tokens`) identified as *needing* migration onto it
+immediately. This is a real, deferred opportunity, not an active defect.
 
 ## Verification
 Items 1 and 2: no pipeline rerun was needed since both turned out to already be correctly

@@ -31,7 +31,7 @@ this docstring claimed -- confirmed 189 real ARC investigator records carry a ge
 character -- but that's exactly the case this substitution already handles correctly on its own,
 for whichever side (ARC or OpenAlex) happens to carry the real character.
 
-What replaced the table: 00c_prepare_oax.py's scan_for_new_diacritics() -- a much narrower,
+What replaced the table: 02_prepare_oax.py's scan_for_new_diacritics() -- a much narrower,
 freshness-gated monitor that watches for OpenAlex growing into scripts/diacritic characters this
 module doesn't yet know how to fold (Turkish, Scandinavian, Finnish, etc. were all discovered
 this way originally), without building any cross-name equivalence table from what it finds.
