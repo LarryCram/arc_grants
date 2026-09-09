@@ -119,6 +119,7 @@ continuation, then the larger/optional items last.
 26. ~~Refactor `orcid_processor.py` to depend on `names.py`/`ParsedName` directly; drop `NameForms` and the adapter layer~~ — **DONE 2026-09-08.** `NameForms`/`default_name_normalizer()`/`all_full_name_keys()` removed outright; `orcid_processor_arc_adapter.py`'s `arc_name_normalizer()` removed; `orcid_bulk.parquet` rebuilt from the raw 17.15M-record snapshot on the new logic. Two real, previously-hidden bugs found and fixed along the way; see its own entry below.
 27. ~~`HumanNameParser.parse()` silently drops a quoted/parenthesized nickname~~ — **DONE 2026-09-08.** Landed as a new `nickname_tokens` field (kept separate from `given_tokens`, not folded in as originally specified) plus a `full_name_keys` field that actually consumes it. The originally-specified 3-case incorporation rule was tested against real cases and replaced by a single uniform rule; see its own entry below for what changed and why.
 28. **`04_resolve_links.py`'s dedup/disambiguation checks are ad hoc booleans — move toward rarity-weighted ("value_counts") evidence with an explicit veto-in/veto-out framework** — 2026-09-09 status: OAX-side dedup (`_oax_names_compat()`) already fixed (real `full_name_keys` field, comparison-time bare-initial filtering); the disambiguation cascade itself confirmed structurally broken via 7 traced cases (two distinct, confirmed defects in `_names_compat()`), archived, and a rebuild started as `FilterCandidates` (`src/04_filter_candidates.py`) — `orcid_veto()` implemented, `fd_compare()`/`score()`/`resolve()` still stubs. See its own entry below and CLAUDE.md's matching dated session entry.
+29. **Build a frequency-distribution (value_counts) table per ACIF for admin org, other/eligible orgs, and FOR codes** — the ARC-side half of item #28's `fd_compare()` FD-comparison utility, not yet built. See its own entry below.
 
 ---
 
@@ -1598,6 +1599,40 @@ rebuild started.** Full narrative in CLAUDE.md's own dated entry for this sessio
   ARC/links/OAX display for any `n_candidates` bucket) is working.
 - **Not yet investigated**: a final, undeveloped observation from this session — "they all look
   suspect — probably the small works and HASS fields" — is a new lead, not yet chased.
+
+### 29 — Build a frequency-distribution (value_counts) table per ACIF for admin org, other/eligible orgs, and FOR codes
+
+Added 2026-09-10. This is the ARC-side counterpart of item #28's `fd_compare()` stub — before
+`FilterCandidates.fd_compare()` can compare an OAX candidate's institution/subfield/coauthor
+pattern against "the ARC person's own institution/FOR," that ARC-side pattern has to actually
+exist as a rarity-weighted distribution, not just a flat set. Right now `AwardsCIF` only carries
+sets (`inst_arr`, `for2020_codes`, `hep_codes`) — union-of-everything, no notion of how often each
+value recurs across a person's own grants, so there's no way yet to say "this institution
+dominates this person's record" vs. "this institution appears once, incidentally."
+
+**Scope, as given**: a per-ACIF `value_counts`-style distribution over three fields:
+- **admin org** (the current-administering-organisation per grant — `AwardCIFItem.admin_org` or
+  its OAX-id form),
+- **other org(s)** (whatever a grant's non-admin eligible/announcement orgs are — needs deciding
+  whether this reuses `inst_ids`/`inst_arr`'s existing `{admin_org, announcement_admin_org}` set,
+  a wider `eligible_orgs` set, or a new construction — not yet decided),
+- **FOR codes** (`for2020_codes`, already a struct list with `is_primary`/`confidence` — needs
+  deciding whether the distribution counts every code once per grant, weights by `is_primary`, or
+  both).
+
+**Relationship to item #25's deferred generic set-comparison utility**: this is a concrete,
+scoped instance of exactly the generic capability item #25 already flagged as needed
+project-wide (a `{value: count}` structure with `for_blocking`/`for_scoring`/`for_tf_idf`-style
+operations, generalized beyond names to institutions/FOR-codes) — building this ACIF-side FD
+table is a natural forcing function for finally scoping that generic utility, rather than a third
+independent one-off implementation of "count values and weight by rarity."
+
+**Not yet scoped**: which rarity weighting to use (this project's existing `oax_tf_*.parquet`
+population-frequency convention, vs. something ACIF-population-relative), whether this lives as a
+new `AwardsCIF` field, a separate persisted table (matching the `oax_tf_*.parquet`/`work_tf_*.parquet`
+precedent), or a `FilterCandidates` method computed on demand, and how it composes with the
+already-planned OAX-candidate side (item #28's institution/subfield/coauthor FD comparison) once
+both exist.
 
 ## Verification
 Items 1 and 2: no pipeline rerun was needed since both turned out to already be correctly
