@@ -540,11 +540,24 @@ def main(dry_run: bool = False,
     need_for = [oid for oid in record_cache.iterkeys() if oid not in for_cache]
     if need_for:
         print(f"\nDeriving FOR codes for {len(need_for)} cached records (no API)...")
+        n_skipped = 0
         for i, oid in enumerate(need_for):
-            rec = record_cache[oid]
+            try:
+                rec = record_cache[oid]
+            except KeyError:
+                # 2026-09-08: a stray ghost index entry (confirmed: `None in record_cache` is
+                # False and .get(None) misses too, yet iterkeys() still yields it -- a corrupted/
+                # stale diskcache index row, not fixable via the cache's own delete()/del API,
+                # which both also raise/return "not found" for it). Skip rather than crash --
+                # this loop is just deriving FOR codes for entries that already exist; a single
+                # unreadable ghost key is not worth aborting a multi-hour run over.
+                n_skipped += 1
+                continue
             for_cache[oid] = orcid_for_codes(rec, era_lookup)
             if (i + 1) % 1000 == 0 or (i + 1) == len(need_for):
                 print(f"  [{i+1}/{len(need_for)}]", flush=True)
+        if n_skipped:
+            print(f"  (skipped {n_skipped} unreadable cache key(s))")
         print(f"for_cache size: {len(for_cache)}")
 
     # Fetch /record for ARC-ORCID names not yet cached

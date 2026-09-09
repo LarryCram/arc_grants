@@ -175,6 +175,7 @@ def oax_name_arrays(display_name: str, alts: list[str]) -> dict:
     # 02_prepare_oax.py needs a full rerun (and 03_link_arc_oax.py after it) to measure the
     # actual impact before this is trusted at scale, not assumed zero-impact.
     first_toks: dict[str, None] = {}
+    nick_toks: dict[str, None] = {}
     family_from_display: dict[str, None] = {}
     family_from_alts: dict[str, None] = {}
 
@@ -184,6 +185,8 @@ def oax_name_arrays(display_name: str, alts: list[str]) -> dict:
         parsed = _name_parser.parse(n)
         for ft in parsed.given_tokens:
             first_toks[ft] = None
+        for nt in parsed.nickname_tokens:
+            nick_toks[nt] = None
         # Both bare (ü→u) and digraph (ü→ue) forms -- real conventions, not one "correct" one;
         # see expand_diacritic_variants()'s docstring for why both are kept.
         for variant in parsed.family_names:
@@ -202,11 +205,27 @@ def oax_name_arrays(display_name: str, alts: list[str]) -> dict:
             if fam:
                 first_toks[fam[0]] = None
 
+    # full_name_keys (2026-09-09): every given/nickname x family combination this author's own
+    # name-strings (display_name + every alternative) produce -- same combinatorial convention
+    # as ParsedName.full_name_keys (names.py), built here across the whole author, not one
+    # occurrence. Complete, not filtered -- this is the canonical NameProcessor-style output;
+    # a bare-initial-derived key like "b_isakhan" carries no identifying information on its own
+    # (given_tokens always self-adds each given-name token's own first letter, needed for
+    # Splink's family+first_initial blocking key -- "Ben" and "Benjamin" both produce "b"), but
+    # deciding that it's too weak to count as evidence is a job for whoever is COMPARING two
+    # candidates for a specific purpose, not for this shared output -- see
+    # awards_cif.py::_oax_names_compat() for where that discrimination actually happens.
+    given_and_nick: dict[str, None] = {**first_toks, **nick_toks}
+    full_name_keys = list(dict.fromkeys(
+        f"{g}_{f}" for g in given_and_nick for f in family_toks if g and f
+    ))
+
     return {
         "first_names": list(first_toks),
         "family_names": list(family_toks),
         "family_names_display": list(family_from_display),
         "family_names_alt": list(family_from_alts),
+        "full_name_keys": full_name_keys,
     }
 
 
@@ -310,7 +329,8 @@ def main():
     con.create_function("oax_names", oax_name_arrays,
                         ['VARCHAR', 'VARCHAR[]'],
                         'STRUCT(first_names VARCHAR[], family_names VARCHAR[], '
-                        'family_names_display VARCHAR[], family_names_alt VARCHAR[])')
+                        'family_names_display VARCHAR[], family_names_alt VARCHAR[], '
+                        'full_name_keys VARCHAR[])')
 
     con.execute(f"""
         COPY (
@@ -336,6 +356,7 @@ def main():
                 parsed.family_names                                         AS family_names,
                 parsed.family_names_display                                 AS family_names_display,
                 parsed.family_names_alt                                     AS family_names_alt,
+                parsed.full_name_keys                                       AS full_name_keys,
                 orcid,
                 inst_ids,
                 topic_names,

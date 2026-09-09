@@ -1996,20 +1996,53 @@ def _load_manual_unlinks(clusters: list[AwardsCIF]) -> dict[str, set[str]]:
     return dict(out)
 
 
-def _oax_names_compat(oax_ids: list[str], oax_firstname: dict, oax_familyname: dict) -> bool:
+def _oax_names_compat(oax_ids: list[str], oax_full_name_keys: dict) -> bool:
     """True when every OAX candidate in a group could plausibly be the same person --
-    mirrors 04_resolve_links.py's _oax_names_compat(). Requires identical family_name_main
-    and mutually compatible first names (same 3-char prefix among full names; initials pass
-    through). Guards the split-record dedup below against collapsing genuinely different
-    people who happen to share a topic."""
-    fams = {oax_familyname.get(oid, "") for oid in oax_ids}
-    if len(fams) != 1:
+    guards the split-record dedup below against collapsing genuinely different people who
+    happen to share a topic.
+
+    2026-09-09 fix: checked via genuine exact-string overlap on each candidate's own
+    full_name_keys (every given/nickname x family combination that candidate's own
+    display_name + alternatives produce -- see 02_prepare_oax.py::oax_name_arrays()), not the
+    old single-scalar first_name/family_name_main + 3-char-prefix heuristic. That heuristic
+    only ever compared first names >=4 characters long and returned True by default whenever
+    fewer than 2 candidates had one -- confirmed on a real case (DE120100315_BenjaminIsakhan,
+    "ben" vs "benjamin"): "ben" is 3 characters, so it was silently dropped from the
+    comparison entirely and the function returned True without ever really testing anything --
+    it happened to reach the right answer, but not because it verified any real relationship
+    between "ben" and "benjamin" (there isn't a shared exact full_name_key between them either;
+    see the module's own open-question note on nickname/short-form matching).
+
+    full_name_keys itself stays complete/unfiltered (NameProcessor's own output contract --
+    see oax_name_arrays()'s docstring) -- the bare-initial exclusion below is local to THIS
+    comparison's own needs, not baked into the shared field. A full_name_key whose given-side
+    is a single character (e.g. "b_isakhan") is excluded here because it carries no identifying
+    information on its own: every given-name token self-adds its own first letter (needed for
+    Splink's family+first_initial blocking key), so "Ben"/"Barbara"/"Bruce" all reduce to "b" --
+    a shared bare-initial key is exactly as consistent with two different people as with one.
+
+    Requires EVERY pair of candidates to share >=1 (informative) full_name_keys string, not just
+    that all candidates share one common string across the whole group -- avoids the same
+    false-chain-bridging risk found elsewhere this project (piling's DBSCAN mega-pools): A/B and
+    B/C sharing a key each doesn't mean A and C are the same person if A and C themselves share
+    nothing. Returns False (does not merge) if any candidate has no informative full_name_keys
+    at all -- insufficient evidence should leave both candidates for the later disambiguation
+    cascade to sort out, not default to merging them."""
+    def _informative(keys):
+        out = set()
+        for k in keys:
+            given, _, family = k.partition("_")
+            if len(given) > 1 and family:
+                out.add(k)
+        return out
+
+    keysets = [_informative(oax_full_name_keys.get(oid) or []) for oid in oax_ids]
+    if any(not ks for ks in keysets):
         return False
-    full_firsts = [oax_firstname.get(oid, "") for oid in oax_ids if len(oax_firstname.get(oid, "")) >= 4]
-    if len(full_firsts) < 2:
-        return True
-    prefix = full_firsts[0][:3]
-    return all(n[:3] == prefix for n in full_firsts[1:])
+    return all(
+        keysets[i] & keysets[j]
+        for i in range(len(keysets)) for j in range(i + 1, len(keysets))
+    )
 
 
 def dedup_oax_candidates(
@@ -2054,16 +2087,15 @@ def dedup_oax_candidates(
         con.execute("SET enable_progress_bar = false")
         con.execute("CREATE OR REPLACE TEMP TABLE _cand_ids AS SELECT UNNEST(?) AS oax_id", [all_oax_ids])
         rows = con.execute(f"""
-            SELECT o.unique_id, o.orcid, o.topic_names, o.first_name, o.family_name_main
+            SELECT o.unique_id, o.orcid, o.topic_names, o.full_name_keys
             FROM read_parquet('{PROCESSED_DATA}/openalex_authors_prep.parquet') o
             JOIN _cand_ids c ON c.oax_id = o.unique_id
         """).fetchall()
-        oax_orcid, oax_topics, oax_firstname, oax_familyname = {}, {}, {}, {}
-        for uid, orcid, topics, first_name, family_name_main in rows:
+        oax_orcid, oax_topics, oax_full_name_keys = {}, {}, {}
+        for uid, orcid, topics, full_name_keys in rows:
             oax_orcid[uid] = orcid
             oax_topics[uid] = list(topics) if topics is not None else []
-            oax_firstname[uid] = (first_name or "").lower().strip()
-            oax_familyname[uid] = (family_name_main or "").lower().strip()
+            oax_full_name_keys[uid] = list(full_name_keys) if full_name_keys is not None else []
 
         idx_sql = ", ".join(i.replace("https://openalex.org/A", "") for i in all_oax_ids)
         wc_rows = con.execute(f"""
@@ -2106,7 +2138,7 @@ def dedup_oax_candidates(
                 topic_to_ids[t].append(oid)
         orcid_protected = {oid for oid in remaining if oax_orcid.get(oid)}
         for ids in topic_to_ids.values():
-            if len(ids) > 1 and _oax_names_compat(ids, oax_firstname, oax_familyname):
+            if len(ids) > 1 and _oax_names_compat(ids, oax_full_name_keys):
                 wcs = {oid: oax_works.get(oid, 0) for oid in ids}
                 best = max(wcs, key=wcs.get)
                 removed.update(

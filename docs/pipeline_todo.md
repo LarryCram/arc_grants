@@ -118,6 +118,7 @@ continuation, then the larger/optional items last.
 25. **Build a generic, name-agnostic set-comparison utility for Splink evidence** (blocking/scoring/TF-adjustment over any `{value: count}` set, not just names) — deliberately deferred, not part of `src/utils/name_set_processing.py`; see its own entry below
 26. ~~Refactor `orcid_processor.py` to depend on `names.py`/`ParsedName` directly; drop `NameForms` and the adapter layer~~ — **DONE 2026-09-08.** `NameForms`/`default_name_normalizer()`/`all_full_name_keys()` removed outright; `orcid_processor_arc_adapter.py`'s `arc_name_normalizer()` removed; `orcid_bulk.parquet` rebuilt from the raw 17.15M-record snapshot on the new logic. Two real, previously-hidden bugs found and fixed along the way; see its own entry below.
 27. ~~`HumanNameParser.parse()` silently drops a quoted/parenthesized nickname~~ — **DONE 2026-09-08.** Landed as a new `nickname_tokens` field (kept separate from `given_tokens`, not folded in as originally specified) plus a `full_name_keys` field that actually consumes it. The originally-specified 3-case incorporation rule was tested against real cases and replaced by a single uniform rule; see its own entry below for what changed and why.
+28. **`04_resolve_links.py`'s dedup/disambiguation checks are ad hoc booleans — move toward rarity-weighted ("value_counts") evidence with an explicit veto-in/veto-out framework** — 2026-09-09 status: OAX-side dedup (`_oax_names_compat()`) already fixed (real `full_name_keys` field, comparison-time bare-initial filtering); the disambiguation cascade itself confirmed structurally broken via 7 traced cases (two distinct, confirmed defects in `_names_compat()`), archived, and a rebuild started as `FilterCandidates` (`src/04_filter_candidates.py`) — `orcid_veto()` implemented, `fd_compare()`/`score()`/`resolve()` still stubs. See its own entry below and CLAUDE.md's matching dated session entry.
 
 ---
 
@@ -1490,6 +1491,113 @@ explicitly asserted the *old*, leaking behaviour as correct — updated to asser
 after confirming with the user this was pinning down an oversight, not a considered design
 choice (matching the same "don't fabricate a given name with no evidence" principle already
 established for the bare-initial fallback next to it, which still stands).
+
+### 28 — `04_resolve_links.py`'s dedup/disambiguation checks are ad hoc booleans; move toward rarity-weighted ("value_counts") evidence with an explicit veto-in/veto-out framework
+
+Found 2026-09-09 working through `dedup_oax_candidates()`/`_oax_names_compat()` (Step 0) and
+`_names_compat()` (cascade Step 1a) case by case against three real 2-OAX-candidate examples.
+
+**Two vocabulary terms, introduced by the user, used throughout this item**: a **veto together**
+is a signal strong enough on its own to block two candidates from being merged/treated as one
+(e.g. `DP0342459_MarcelJackson`'s two OAX candidates, Marcel [algebra/logic] vs Martin [neurology/
+psychiatry], share zero topics — that alone vetoes merging them). A **veto apart** is the
+opposite: a signal strong enough to force two candidates together despite other apparent
+differences (e.g. a shared ORCID).
+
+**Three real cases traced end-to-end early this session, same layout each time (ARC row / ARC-OAX
+link row / both OAX rows), establishing the current mechanics** (four more traced later the same
+session — Zeunert, Amati, Giblin, Tele Tan — see the "later the same session" status update
+below):
+- `DE120100315_BenjaminIsakhan` — OAX candidates A5086064061 ("Ben Isakhan," 9 works) and
+  A5091134612 ("Benjamin Isakhan," 209 works) share 2 topics and a genuine (non-bare-initial)
+  `full_name_keys` overlap (`benjamin_isakhan`, present because A5086064061's own
+  `display_name_alternatives` already lists "Benjamin Isakhan"). Step 0 merges them.
+  Separately found: the kept 209-work record itself contains 8/43 piled works (19%) classified
+  "Space and Planetary Science" — a subfield with no connection to Middle-East-politics/heritage
+  studies — all inheriting `confirmed=True` from the candidate-level ORCID/HEP/field match, since
+  piling's channeling checks the whole candidate, not each individual work. **Flagged by the user
+  as a "keep both by for" case** — not auto-merged, using FOR-code-vs-subfield mismatch as the
+  test — pending this item's broader fix rather than a one-off manual override.
+- `FL160100170_MichaelTyers` — A5004507461 ("Michael Tyers," 32 works) and A5057700057 ("Mike
+  Tyers," 314 works) also share 2 topics, but `_oax_names_compat()`'s informative-key check finds
+  no overlap (`michael_tyers` vs `{mike_tyers, mike_duman, ..., maria_jones}` — genuinely no
+  shared token once bare initials are excluded). Step 0 does *not* merge them; the cascade's own
+  ORCID step (1b) resolves it instead, since A5057700057 carries the ARC person's recorded ORCID.
+  Same real person, same shape as Isakhan, resolved via a different step for a data-availability
+  reason (this pair happens to have zero recorded/alternate-name connection between "Michael" and
+  "Mike" anywhere in OpenAlex, unlike Ben/Benjamin).
+- `DP0342459_MarcelJackson` — zero topic overlap (a clean veto-together), so Step 0 correctly
+  doesn't merge. But cascade Step 1a (`_names_compat()`, meant to catch an obviously-wrong given
+  name) let "Martin" through — not because of the bare-initial mechanism (an incorrect
+  attribution corrected mid-session), but because `"marcel"[:3] == "martin"[:3] == "mar"`, a
+  coincidental 3-letter-prefix match on the *full* given names themselves. Only the cascade's
+  ORCID step (1b) actually resolved the case correctly; the name filter did no real work.
+
+**The open design question this generalizes into**: none of the three signals currently used
+(topic-string exact match, `full_name_keys` exact-string overlap, `_names_compat()`'s 3-char
+prefix) account for how *common* the shared value is. A shared institution between two Jackson
+candidates was noted by the user as illustrative: raw institution-ID overlap exists (both share
+`I196829312`) but is almost certainly weak evidence once weighted by how many other researchers
+also share that institution — "not zero, but very small" once properly counted, not a boolean.
+
+**Proposed direction (design only, not built)**: compute `value_counts`-style (rarity-weighted
+term-frequency, same shape as the project's existing `oax_tf_*.parquet`/TF-adjustment machinery)
+measures per OAX candidate across three dimensions — subfield, institution, and coauthor — rather
+than the current mix of exact-string/boolean checks. Then work out how these three combine into
+an explicit veto-in (force merge) / veto-out (block merge) framework, replacing today's separate,
+ad hoc, differently-implemented checks in `dedup_oax_candidates()`/`_oax_names_compat()` and the
+cascade's `_names_compat()`. Not scoped further than this — no decision yet on how the three
+dimensions combine, what thresholds apply, or whether this subsumes or sits alongside item #25's
+already-deferred generic set-comparison utility (which covers the same "compare two evidence
+sets" shape, though without the rarity-weighting angle this item adds).
+
+**Status update, later the same session (2026-09-09): OAX-side dedup fixed; cascade archived;
+rebuild started.** Full narrative in CLAUDE.md's own dated entry for this session — summary here:
+
+- **`_oax_names_compat()` (Step 0) fixed, not just diagnosed.** `02_prepare_oax.py::oax_name_arrays()`
+  gained a real `full_name_keys` field (every given/nickname x family combination an OAX author's
+  own display_name + alternatives produce, kept complete/unfiltered at construction — an explicit
+  design rule the user corrected into place after an over-hasty first attempt filtered it at
+  construction time instead of at comparison time). `_oax_names_compat()` rewritten to compare on
+  this field directly, with a comparison-time-only filter for uninformative bare-initial keys and
+  a requirement that *every pairwise* combination in a candidate group share ≥1 informative key
+  (not just some common key across the whole group). The old scalar-based version's real bug,
+  confirmed on Isakhan: it filtered to given names ≥4 characters, silently dropping "ben" (3
+  chars) from the comparison entirely and returning `True` without testing anything — right answer
+  for the wrong reason.
+- **Four more real cascade cases traced** (Zeunert, Amati [3-way], Giblin [4-way], Tele Tan
+  [5-way]), confirming ORCID match (cascade Step 1b), not the name check, does the real
+  discriminating work even when the name check looks like it should catch a bad candidate. Giblin
+  is the clearest counter-case: candidates 2/3 drop by score, candidate 4 drops because "Ryan" is
+  neither "Rachel" nor "Rebecca" — decisive on full given names alone, despite OAX cross-
+  contaminating the two real people's work sets.
+- **Two distinct, confirmed defects in the old cascade's `_names_compat()`** (separate from the
+  Step-0 fix above — this is the ARC-vs-OAX-candidate check, cascade Step 1a): (1) a structural
+  always-true bare-initial short-circuit (ARC's own `first_names` always self-adds a bare initial,
+  e.g. `'r'` for Rachel Giblin, which the old loop hits first and returns `True` on
+  unconditionally, regardless of the OAX candidate's real name); (2) a separate coincidental
+  3-character-prefix collision (`"marcel"[:3]=="martin"[:3]=="mar"`, confirmed on
+  `DP0342459_MarcelJackson` via live Splink retraining + `model.json` m/u extraction + direct SQL
+  tracing) — a genuinely different mechanism from (1), not the same bug twice.
+- **FOR2020 taxonomy verified directly** (213 valid 4-digit groups, brute-force enumerated; ARC's
+  own population uses 204, all resolve cleanly, 0 already needing `upgrade_for_code()`) — confirms
+  ARC's FOR data is fully FOR2020-converted. A real display bug found and fixed alongside this:
+  the walkthrough script was printing the legacy primary-only `for_codes` column instead of the
+  full `for2020_codes` struct list, making `LP0883400_ReveccaKakavanosPlew` look like a single-FOR
+  case when she genuinely holds two.
+- **Old cascade archived, rebuild started as `FilterCandidates`** — `src/04_resolve_links.py` →
+  `ZARCHIVE/src_archive_20260909/04_resolve_links.py`, explicitly not via Plan Mode (direct user
+  instruction). `src/04_filter_candidates.py` now holds a container-first `FilterCandidates`
+  class (same methodology precedent as `FetchOrcid`): `orcid_veto()` is real and implemented
+  (hard veto on a confirmed ORCID mismatch, evaluated per-candidate so the loop keeps scoring
+  remaining candidates — not a loop-terminator, needed for small fragment candidates like Tele
+  Tan's candidate 5 to still get evaluated); `fd_compare()`/`score()`/`resolve()` are stubs
+  (`NotImplementedError`) pending the FD-comparison utility design this item already flags as
+  needed. This pipeline stage currently produces no resolved-links output at all — only the
+  review/walkthrough capability (loading deduped candidate pools, printing the 3-part
+  ARC/links/OAX display for any `n_candidates` bucket) is working.
+- **Not yet investigated**: a final, undeveloped observation from this session — "they all look
+  suspect — probably the small works and HASS fields" — is a new lead, not yet chased.
 
 ## Verification
 Items 1 and 2: no pipeline rerun was needed since both turned out to already be correctly

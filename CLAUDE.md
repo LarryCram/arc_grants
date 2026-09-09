@@ -16,6 +16,10 @@ Link ARC Chief Investigators/Fellows (CIFs) to their OpenAlex author records for
 02_prepare_oax.py       → openalex_authors_prep.parquet, oax_tf_*.parquet
 03_link_arc_oax.py      → arc_oax_links.parquet (link_only: ARC persons → OAX authors)
 04_resolve_links.py     → arc_oax_resolved.parquet, arc_ambiguous_deferred.parquet
+                           (ARCHIVED 2026-09-09 to ZARCHIVE/src_archive_20260909/ -- confirmed
+                           structurally broken, see dated entry below. Rebuild in progress as
+                           04_filter_candidates.py/FilterCandidates; resolve() not yet built, so
+                           this pipeline stage currently produces no output at all.)
 ```
 The Splink pipeline replaces the entire old multi-layer pipeline, archived at
 `ZARCHIVE/src_archive_20260520/` (moved there 2026-08-14, nothing references it).
@@ -1791,6 +1795,185 @@ throughout every step.
 Full detail, including the accepted next steps (rerun the NO_ORCID scan, run the HAS_ORCID audit
 for the first time, decide whether to record the Jocelyn Craig merge now or wait for #21's
 structural fix): `docs/pipeline_todo.md` item #23.
+
+## `04_resolve_links.py`'s disambiguation cascade found structurally broken via 7 traced real cases; archived and rebuild started as `FilterCandidates` (2026-09-09)
+
+Continuing the OAX-candidate-dedup work from the day before (item 28's original three cases,
+Isakhan/Tyers/Marcel-Jackson), this session fixed the OAX-side dedup mechanism itself, then
+traced 4 more real multi-candidate cases through the *disambiguation cascade* (the step after
+dedup — `04_resolve_links.py`'s own ORCID/institution/field/probability/works_count sequence) and
+found it structurally broken in a way dedup alone can't fix — leading to archiving the file and
+starting a rebuild.
+
+### OAX-side dedup fixed: `full_name_keys` widened to a real per-author field, `_oax_names_compat()` rewritten
+
+`02_prepare_oax.py::oax_name_arrays()` gained `full_name_keys` — every given/nickname x family
+combination an OAX author's own `display_name` + `display_name_alternatives` produce (same
+combinatorial shape as `ParsedName.full_name_keys` on the ARC side, built independently here
+across a whole author rather than one name-occurrence). `nickname_tokens` folded in via a
+separate `nick_toks` dict, never mixed into the existing `first_toks`/`first_names` (still feeds
+Splink blocking, deliberately unchanged). **Explicit design rule, direct correction after an
+over-hasty first attempt**: `full_name_keys` stays complete/unfiltered at construction — "the
+rule is that the list of (normalised) full_names output of NameProcessor is complete. Not
+filtered." A bare-initial-derived key (e.g. `b_isakhan`, since every given-name token self-adds
+its own first letter for Splink's `family+first_initial` blocking) carries no identifying
+information on its own, but deciding it's too weak to count is a job for whoever is *comparing*
+two candidates for a specific purpose, not for the shared field.
+
+`awards_cif.py::_oax_names_compat()` (the dedup-time compatibility check) rewritten accordingly:
+a local `_informative()` filter excludes single-character-given keys at comparison time only;
+requires **every pairwise** intersection among a candidate group's informative keysets to be
+non-empty (not just some common key shared across the whole group — avoids the same
+false-chain-bridging risk already found in piling's DBSCAN mega-pools, where A~B and B~C sharing
+evidence doesn't mean A~C do). Returns `False` (don't merge) if any candidate has zero informative
+keys — insufficient evidence defaults to leaving both for the disambiguation cascade, not to
+merging.
+
+**The old version's real bug, confirmed on `DE120100315_BenjaminIsakhan`**: the old check compared
+single scalar `first_name`/`family_name_main` values, filtering to given names ≥4 characters —
+"ben" (3 chars) was silently dropped from the comparison entirely, so the function returned `True`
+without ever really testing anything. It reached the right answer for Isakhan by accident, not
+because it verified any real relationship between "ben" and "benjamin" — there isn't even a shared
+*exact* `full_name_keys` string between them; the fix works only because OAX's own
+`display_name_alternatives` for the 9-work "Ben Isakhan" record already lists "Benjamin Isakhan"
+literally, giving a genuine `benjamin_isakhan` key on both sides.
+
+### Disambiguation cascade: two confirmed, distinct defects in the old `_names_compat()`; 7 real cases traced
+
+Separately from OAX-side dedup, the *disambiguation cascade*'s own given-name sanity check
+(cascade Step 1a, comparing ARC's own recorded first names against an OAX candidate's) was traced
+through 7 real multi-candidate ARC cases end-to-end (Isakhan, Tyers, Marcel/Martin Jackson,
+Zeunert, Amati [3-way], Giblin [4-way], Tele Tan [5-way]) to establish which step actually does
+the real discriminating work in each — repeatedly, it was ORCID match (cascade Step 1b), not the
+name check, even in cases where the name check looked like it should have caught a bad candidate.
+
+Two separate, confirmed defects in `_names_compat()`, found by tracing real data rather than
+reading the code in isolation:
+
+1. **Structural always-true bare-initial short-circuit.** ARC's own `first_names` always contains
+   a self-added bare initial (needed for Splink blocking) — confirmed on Rachel Giblin's cluster
+   (`arc_fns=['r','rebecca']`): the check's own `for a in arc_fns: if len(a)<4 or a[:3]==o[:3]:
+   return True` loop hits `'r'` first and returns `True` unconditionally, regardless of what the
+   OAX candidate's own name actually is. This makes the check structurally unable to ever reject
+   anything, for any candidate, ever — not a rare edge case.
+2. **A separate, coincidental prefix-collision failure mode**, confirmed on
+   `DP0342459_MarcelJackson`: even without the bare-initial bug, two genuinely different full
+   given names can share a coincidental 3-character prefix (`"marcel"[:3] == "martin"[:3] ==
+   "mar"`), letting "Martin" pass a check meant to catch exactly this kind of mismatch. Verified
+   via live Splink retraining (re-running `03_link_arc_oax.py`'s own blocking/comparisons/TF
+   tables/EM training against real data, `linker.misc.save_model_to_json()` to extract the actual
+   trained m/u values per comparison level) plus direct SQL-condition tracing — a genuinely
+   different mechanism from (1), not the same bug showing up twice.
+
+**Giblin (4-way)**: candidates 2 and 3 dropped by Splink score, candidate 4 dropped because its
+recorded given name ("Ryan") is neither "Rachel" nor "Rebecca" — a case where the full given names
+alone are decisive ("Rachel is not Rebecca. Neither is Ryan") even though OAX's own topic/work
+data cross-contaminates the two real people's candidate records. Confirms the disambiguation
+cascade needs a real, working given-name-clash check as a genuine veto, not just decoration — the
+old bug (1) meant this case was only saved by Splink's own score threshold, not by the check that
+was supposed to catch it.
+
+**Marilyn Ball / Matthew Ball**: investigated why two sub-threshold candidates (one scoring 0.89,
+just under the 0.9 high-confidence cutoff) don't appear in the resolved output — confirmed
+directly, via the same live-retraining approach, that they're excluded by Splink's own `>0.9`
+high-confidence threshold and scoring, not by the character-mismatch check at all (the same
+investigation hit a real tool limitation: `linker.visualisations.waterfall_chart()` requires
+`retain_intermediate_calculation_columns=True`, not set in production settings, so the call fails
+outright — worked around via `model.json` m/u values + direct SQL tracing, which was sufficient).
+
+**Tele Tan (5-way)**: the case motivating the "ORCID mismatch = hard veto, evaluated
+per-candidate, not a loop-terminator" design (below) — a small, 1-work fragment candidate
+(candidate 5) needs to still be scored even after an earlier candidate in the same group fails on
+ORCID, so the veto must reject that one candidate and continue, not stop the whole loop. (Zeunert
+and Amati were traced the same way, each confirming ORCID as the real discriminator rather than
+the name check; Amati's 3-way candidate set additionally had its coauthor/subfield/institution
+value_counts computed directly as a concrete precedent for the FD-comparison direction below,
+rather than left as a purely abstract idea.)
+
+### FOR2020 taxonomy verified directly; a real display bug found and fixed
+
+In parallel, verified (not assumed) that ARC's FOR-code population is fully FOR2020-converted:
+brute-force enumerated the full FOR2020 4-digit group-code space via
+`for_resolve.for2020_group_name()` (`Resolver()` has no bulk-listing method) — **213 valid groups
+total**. Cross-checked against `awards_cif_arc_only.parquet.for2020_codes` (a struct list:
+`{code,name,is_primary,confidence}`): ARC's own population actually uses **204** distinct codes,
+all resolve cleanly (0 failures), and all are already FOR2020 (0 `upgrade_for_code()` changes
+needed). The 9 groups in the full taxonomy but absent from ARC's own population are all
+Indigenous/Māori/Pacific-Peoples-related (4508, 4509, 4510, 4512, 4514, 4515, 4517, 4599, plus one
+unrelated 3299) — consistent with, not contradicting, this project's already-deliberate
+Indigenous-research exclusion. Independently verified against a real pasted ARC grant page
+(`DP0210510`) carrying several FOR codes.
+
+**A real display bug found and fixed along the way**: the case-walkthrough script was printing
+the legacy `for_codes` column (primary-only) instead of `for2020_codes` (the full, correct struct
+list) — made `LP0883400_ReveccaKakavanosPlew` look like all her FOR entries collapsed to one group
+(`3101`) when her real `for2020_codes` correctly holds two distinct groups (`{3101, primary}`,
+`{3206}`). Found via direct verification of a stated hypothesis ("so Plew has one div code because
+all her codes collapse to that") that turned out wrong as stated, for a different reason than
+expected — a script bug, not a FOR-resolution defect. Fixed in what's now
+`FilterCandidates.print_arc_section()`.
+
+`for_to_subfield` — a precomputed `{FOR2020 group code: OAX subfield name}` dict, all 213 entries,
+0 `None` results, a genuine many-to-one mapping (e.g. 3604/3605/3606 all → "Visual Arts and
+Performing Arts"; 3002/3004 both → "Agronomy and Crop Science") — built once in
+`FilterCandidates.__init__()` (below) rather than resolved live per candidate, since the
+vocabulary is small and fixed.
+
+### Old cascade archived; rebuild started as `FilterCandidates`, container-first
+
+Rather than patch the old cascade's confirmed defects in place, the whole disambiguation step was
+archived (`src/04_resolve_links.py` → `ZARCHIVE/src_archive_20260909/04_resolve_links.py`) and
+restarted, on direct instruction, explicitly *not* via Plan Mode ("I'd actually prefer that you
+don't plan"): build incrementally, starting with a walkthrough script (load ACIFs in `cluster_id`
+order, skip 1-candidate groups for now, walk 2-candidate groups sorted by ascending total
+works_count, print each in a fixed 3-part ARC/ARC-OAX-links/OAX display) — refined repeatedly
+against real output (drop 1-candidate print noise; report OAX subfield not topic; print the
+mapped FOR→subfield on the ARC side, not raw FOR codes; parameterize the candidate-pool size
+instead of hardcoding 2; print 10 cases per run, since the IDE was truncating fewer).
+
+This became `src/04_filter_candidates.py`, built as a class, `FilterCandidates`, deliberately
+**container-first** — the class shape (state + method signatures) is meant to drive out the
+remaining design decisions as they're filled in, rather than writing loose functions first and
+wrapping them in a class once everything is settled (direct user methodology preference: "For me,
+the container helps shape the details"). Same rationale as the already-validated `FetchOrcid`
+precedent (`src/utils/fetch_orcid.py`) — state that's expensive-ish to build but constant across
+every candidate comparison (there: a materialized ORCID bulk table; here: `for_to_subfield`) is
+built once in `__init__`, not recomputed per call.
+
+**Proposed algorithm** (from direct conversation, fully specified but only partly built —
+`orcid_veto()` is real; `fd_compare()`/`score()`/`resolve()` are stubs raising
+`NotImplementedError`):
+a. Sort an ACIF's OAX candidates by `works_count` descending.
+b. Hard veto (`orcid_veto()`, **implemented**): reject any candidate whose own ORCID is non-null
+   AND differs from the ARC person's recorded ORCID. A per-candidate reject, explicitly not a
+   loop-terminator — "we won't pursue an OAX with orcid if it does not match... even if the names
+   look OK" — the loop must keep scoring remaining candidates so a later, smaller fragment (Tele
+   Tan's candidate 5) still gets evaluated. Deliberately a *hard* veto rather than the old Splink
+   comparison's soft evidence (m=0.15 for a confirmed mismatch) — the false-negative risk this
+   accepts (~2-3 known real cases of a stably-but-wrongly-recorded ARC ORCID, cheaply recoverable
+   via `manual_merges.csv` when found) was judged smaller than the false-positive risk it closes
+   (two different real people, each with their own real but different ORCID, both surviving to
+   compete for the same ARC person).
+c. For survivors, compute a frequency-distribution (rarity-weighted `value_counts`) comparison
+   across institution/subfield/coauthor against the ARC person's own institution/FOR/coawardees —
+   **not yet designed**, explicitly flagged as needing real design work ("needs a well designed
+   utility").
+d. Combine ORCID-match status and the FD-comparison result into one score per candidate — depends
+   on (c).
+e. Accept the highest-scoring candidate and any other high-scoring candidates too (fragment-
+   merging, not a forced single winner) unless a first-name clash rules one out. The name-clash
+   check itself must be rebuilt on the same informative `full_name_keys` logic already fixed for
+   OAX-side dedup above — explicitly not a reuse of the old, now-confirmed-broken
+   `_names_compat()`.
+
+**Not yet done**: `fd_compare()`, `score()`, `resolve()` remain stubs — this pipeline stage
+currently produces no resolved-links output at all (the walkthrough/review capability works;
+nothing downstream of it does yet). The rebuilt first-name-clash check for step (e) doesn't exist
+yet. A final, undeveloped observation from this session — "they all look suspect — probably the
+small works and HASS fields" — is a new lead not yet investigated. Full case-by-case detail
+(Isakhan/Tyers/Marcel-Jackson's exact evidence, the veto-together/veto-apart vocabulary, the
+`value_counts` design direction) lives in `docs/pipeline_todo.md` item #28, kept up to date as
+this rebuild continues rather than duplicated at length here.
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
