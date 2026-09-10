@@ -1580,6 +1580,21 @@ rebuild started.** Full narrative in CLAUDE.md's own dated entry for this sessio
   3-character-prefix collision (`"marcel"[:3]=="martin"[:3]=="mar"`, confirmed on
   `DP0342459_MarcelJackson` via live Splink retraining + `model.json` m/u extraction + direct SQL
   tracing) — a genuinely different mechanism from (1), not the same bug twice.
+- **`DP0209486_CameronKepert` (2026-09-10) — a real, confirmed counterexample to a naive
+  full_name_key-intersection veto.** A 2-candidate case: the 742-work, ORCID-matched "Cameron J.
+  Kepert" plus a 45-work, no-ORCID "C.M. Kepert" fragment whose own `full_name_keys` include
+  `christopher_kepert` (a genuine alternate full given name, not a bare initial) alongside
+  `cameron_kepert`'s intersection-free `c_kepert`/`m_kepert`. Under a rule requiring the two
+  candidates to share ≥1 informative `full_name_key`, this pair fails (`cameron_kepert` vs
+  `christopher_kepert` share nothing) — but user-supplied external research confirmed Cameron
+  Kepert never changed his name; "Christopher M." is a known database misattribution of his
+  initials in some older indexes (ResearchGate/UWA repository), not a second real person. The
+  45-work fragment genuinely is Cameron Kepert — institution overlap (both its institutions are a
+  subset of the ORCID-matched candidate's own footprint) and subfield overlap (4/5 entries sit in
+  the same materials/physical-chemistry area) correctly predicted same-person where a bare
+  full-name-key check would have wrongly excluded it. Concrete evidence that the FD-comparison
+  (institution/subfield) can't simply be subordinate to a hard name-clash veto — the two need to
+  be weighed together, not applied as a strict override in either direction.
 - **FOR2020 taxonomy verified directly** (213 valid 4-digit groups, brute-force enumerated; ARC's
   own population uses 204, all resolve cleanly, 0 already needing `upgrade_for_code()`) — confirms
   ARC's FOR data is fully FOR2020-converted. A real display bug found and fixed alongside this:
@@ -1599,6 +1614,59 @@ rebuild started.** Full narrative in CLAUDE.md's own dated entry for this sessio
   ARC/links/OAX display for any `n_candidates` bucket) is working.
 - **Not yet investigated**: a final, undeveloped observation from this session — "they all look
   suspect — probably the small works and HASS fields" — is a new lead, not yet chased.
+
+**Status update, 2026-09-10 (session continued): provenance persisted as two real DuckDB tables;
+`orcid_veto()` wired into a working flag-and-print loop; a real high-confidence false-veto risk
+surfaced on the very second case run.**
+
+- **`oax_provenance.duckdb` now holds two tables**, both built directly into `FilterCandidates`
+  (`src/04_filter_candidates.py`), not as scratch scripts — per direct instruction, "this has to
+  be embed in 04_ not outside. That is why we have the 04_ container for a class."
+  - `oax_provenance` (`cluster_id, oax_id, works_count, status, reason, stage`, upsert on
+    `(cluster_id, oax_id)`) — the filter's own keep/drop/uncertain verdicts, as designed earlier.
+  - `acif_oax_candidates` (`cluster_id, oax_id`) — new this session, the design doc's own
+    flagged-but-unbuilt note under item 1 ("this step is repeated many times — persist as a
+    duckdb database"). `load_clusters_by_size()` now checks this table first; only recomputes
+    `populate_oax_candidates()`/`dedup_oax_candidates()` (both re-derive from
+    `arc_oax_links.parquet` + OpenAlex prep tables — the expensive part) when the cache is empty
+    or `force_rebuild=True`. Verified: first call recomputed and persisted 155,197 rows across
+    22,870 ACIFs (131 zero-candidate / 6,709 one-candidate / 16,030 two-plus); a second call hit
+    the cache and reproduced identical bucket counts, skipping recomputation entirely. No
+    automatic freshness gate yet against `arc_oax_links.parquet` changing upstream — `force_rebuild`
+    must be passed explicitly when a rerun is known to be needed.
+- **`orcid_veto()` fixed for the same URL-vs-bare ORCID mismatch found and fixed three times
+  elsewhere in this project** (`channel_piles()`, `oeuvre_build.py`'s Stage 3 ORCID gate,
+  `test2_orcid_top_candidate_rates()` earlier this session) — the version built and left
+  unverified in the prior status update compared `arc_orcid != oax_orcid` directly, which would
+  never fire against OpenAlex's raw `https://orcid.org/...`-prefixed field. Fixed to
+  `.endswith()`, with a `pd.isna()` guard for the NaN-float form the raw authors table actually
+  returns for a missing orcid.
+- **`flag_next_mismatch()` built** — walks in test-1's order (candidate count ASC, then works
+  DESC), skips any ACIF whose top-by-works candidate already has a recorded `oax_provenance` row,
+  and for the first unprocessed ACIF whose top candidate fails `orcid_veto()`, records
+  `drop`/`orcid_mismatch`/`orcid_veto` and prints the full case — each successive call advances to
+  the next unprocessed mismatch, implementing the design doc's closing line (">> the first filter
+  is annotate a miss-match as that and flag it to be excluded") as real, callable logic for the
+  first time.
+- **Two real cases run**:
+  1. `LP0989385_YukChuLiu` / `A5026782331` — re-confirms the case already traced in an earlier
+     session (the real match, `A5018200205`'s 1998 ANU thesis, never entered the candidate pool at
+     all — see that session's HEP-authorship-intake-filter finding). Sub-HC Splink match
+     (0.708412), both ORCIDs present and genuinely different — a correct veto, though it produces
+     no match rather than the true one, since the true one was never a candidate to begin with.
+  2. `DP0342703_KimbalMarriott` / `A5085695563` — a materially different shape, surfaced
+     immediately on the very next case: `match_probability=0.998393`, `high_confidence=True`,
+     **11 grants**, ARC `full_names=['Ken Marriott', 'Kimbal Marriott']` against OAX
+     `full_name='Kim Marriott'` — a plausible nickname relationship — with differing ORCIDs
+     (`0000-0002-5388-9216` ARC vs `0000-0002-9813-0377` OAX). This is exactly the accepted-risk
+     category `orcid_veto()`'s own design docstring named in advance (a stably-but-wrongly-recorded
+     ARC ORCID, "empirically rare (~2-3 known cases) and cheaply recoverable via
+     `manual_merges.csv` when found") — surfacing on the second real case tested is a stronger
+     signal than the docstring's own "~2-3 known cases" estimate assumed, though not yet confirmed
+     either way (no external ORCID/biography check done on this specific pair yet). Flagged as an
+     open question for how the veto should treat a high-confidence, many-grant match differently
+     from a low-confidence, single-grant one — not yet resolved, no further cases run past this
+     point pending that decision.
 
 ### 29 — Build a frequency-distribution (value_counts) table per ACIF for admin org, other/eligible orgs, and FOR codes
 

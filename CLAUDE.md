@@ -1975,6 +1975,41 @@ small works and HASS fields" — is a new lead not yet investigated. Full case-b
 `value_counts` design direction) lives in `docs/pipeline_todo.md` item #28, kept up to date as
 this rebuild continues rather than duplicated at length here.
 
+### `FilterCandidates` gains persisted state and a working orcid-veto loop; a real high-confidence false-veto risk surfaces immediately (2026-09-10)
+
+Direct continuation of the above, same rebuild. `oax_provenance.duckdb` now holds two tables,
+both built into the class itself per direct instruction ("this has to be embed in 04_ not
+outside. That is why we have the 04_ container for a class"):
+- `oax_provenance` — as designed, keep/drop/uncertain verdicts per `(cluster_id, oax_id)`.
+- `acif_oax_candidates` (new) — the prepared candidate pool itself, persisted so
+  `load_clusters_by_size()` doesn't re-run `populate_oax_candidates()`/`dedup_oax_candidates()`
+  (both re-derive from `arc_oax_links.parquet` + OpenAlex prep tables) on every call — the design
+  doc's own flagged-but-unbuilt note under item 1 ("this step is repeated many times — persist as
+  a duckdb database"). Verified: first call recomputes and persists 155,197 rows across 22,870
+  ACIFs; a second call hits the cache and reproduces identical bucket counts with no
+  recomputation. No freshness gate against `arc_oax_links.parquet` changing upstream yet —
+  `force_rebuild=True` must be passed explicitly.
+
+`orcid_veto()` (left unverified in the prior session's entry) had the same URL-vs-bare ORCID bug
+already fixed three times elsewhere in this project (`channel_piles()`, `oeuvre_build.py`'s Stage
+3 ORCID gate, `test2_orcid_top_candidate_rates()`) — fixed to `.endswith()` with a `pd.isna()`
+guard. New `flag_next_mismatch()` walks in test-1 order, skips already-annotated ACIFs, records
+`drop`/`orcid_mismatch`/`orcid_veto` for the first unprocessed top-candidate mismatch, and prints
+the case — implementing the design doc's closing line as real, callable logic.
+
+Two cases run: `LP0989385_YukChuLiu`/`A5026782331` (sub-HC 0.708, correctly vetoed — the true
+match, per an earlier session's finding, never entered this candidate pool at all). Then,
+immediately on the second case, `DP0342703_KimbalMarriott`/`A5085695563` —
+`match_probability=0.998`, `high_confidence=True`, 11 grants, ARC `full_names` include "Kimbal
+Marriott"/"Ken Marriott" against OAX "Kim Marriott" (a plausible nickname), ORCIDs differ. This is
+exactly the accepted-risk category `orcid_veto()`'s own docstring named in advance (a
+stably-but-wrongly-recorded ARC ORCID) — surfacing on the very next case tested is a stronger
+signal than the docstring's "~2-3 known cases" estimate assumed, though not independently
+confirmed yet (no external ORCID/biography check done on this specific pair). Open question, not
+resolved: should a high-confidence/many-grant match be vetoed the same way as a low-confidence/
+single-grant one? No further cases run pending that decision. Full detail:
+`docs/pipeline_todo.md` item #28's latest status update.
+
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
 
