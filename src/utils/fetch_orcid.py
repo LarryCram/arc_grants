@@ -28,10 +28,10 @@ import csv
 
 import duckdb
 
-from config.settings import ADMIN_ORGS_CSV, PROCESSED_DATA
+from config.settings import ADMIN_ORGS_CSV, ORCID_BULK_PARQUET, PROCESSED_DATA
 from src.utils import orcid_client
 from src.utils.names import HumanNameParser, ParsedName
-from src.utils.orcid_processor import BULK_PARQUET_DEFAULT, OrcidRecord
+from src.utils.orcid_processor import OrcidRecord
 from src.utils.orcid_processor_arc_adapter import get_record
 
 ARC_ONLY_PARQUET_DEFAULT = PROCESSED_DATA / "awards_cif_arc_only.parquet"
@@ -39,7 +39,7 @@ ARC_ONLY_PARQUET_DEFAULT = PROCESSED_DATA / "awards_cif_arc_only.parquet"
 
 class FetchOrcid:
     def __init__(self, con: duckdb.DuckDBPyConnection | None = None,
-                 bulk_parquet: str = BULK_PARQUET_DEFAULT,
+                 bulk_parquet: str = ORCID_BULK_PARQUET,
                  cache=None):
         self._owns_con = con is None
         self.con = con or duckdb.connect()

@@ -63,19 +63,23 @@ import time
 from pathlib import Path
 
 import diskcache
+import duckdb
 import requests
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from config.settings import PROCESSED_DATA, DISKCACHE_DIR, ADMIN_ORGS_CSV
+from config.settings import PROCESSED_DATA, DISKCACHE_DIR, ADMIN_ORGS_CSV, ORCID_BULK_PARQUET
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
-from src.utils.names import name_part_tokens
+from src.utils.names import HumanNameParser, name_part_tokens
 from src.utils.name_diacritic_variants import strip_diacriticals
 from src.utils.io import setup_stdout_utf8
 from src.utils.orcid_cache import orcid_addresses, orcid_external_ids, orcid_works_count
 from src.utils.era_journals import load_era_lookup, orcid_for_codes
 from src.utils.orcid_processor import OrcidProcessor
-from src.utils.orcid_processor_arc_adapter import institution_matched_candidates
+from src.utils.orcid_processor_arc_adapter import (
+    au_country_compatible_candidates,
+    institution_compatible_candidates,
+)
 from src.utils.orcid_client import get_access_token, ORCID_CLIENT_ID, default_cache
 
 PROJECT_DATA = Path(__file__).resolve().parents[1] / "data_persisted"
@@ -166,7 +170,7 @@ def _get_orcid_proc() -> OrcidProcessor:
     as every other ARC-side name comparison."""
     global _ORCID_PROC
     if _ORCID_PROC is None:
-        _ORCID_PROC = OrcidProcessor()
+        _ORCID_PROC = OrcidProcessor(bulk_parquet=ORCID_BULK_PARQUET)
     return _ORCID_PROC
 
 
@@ -193,48 +197,76 @@ def _search_bulk_db(first: str, family: str, institution_names: list[str],
     Confidence levels are the EXISTING, already-trusted vocabulary
     (_apply_enriched_orcids()/apply_enriched_orcids() already promote 'high'/'au_match'
     unchanged) -- deliberately not inventing a new label, since the semantics line up exactly:
-      - exactly one bulk-snapshot candidate has an institution_matched_candidates() hit ->
-        'au_match' (same meaning as the live path's "single AU-country-address candidate", just
+      - institution_names narrows the raw candidate list to exactly one survivor -> 'au_match'
+        (same meaning as the live path's "single AU-country-address candidate", just
         institution-corroborated rather than country-corroborated -- at least as strong).
-      - no institution corroboration, but the name is globally unique in the bulk snapshot
-        (exactly one candidate at all) -> 'high' (same meaning as the live path's "num_found==1
+      - failing that, the bulk snapshot's own `countries` field narrows to exactly one survivor
+        -> 'au_match' (the same country-corroboration the live path does, just read straight off
+        the local snapshot -- zero API calls -- instead of fetching each candidate's /record).
+      - no institution_names given at all, and the name is globally unique in the bulk snapshot
+        (exactly one raw candidate) -> 'high' (same meaning as the live path's "num_found==1
         globally", which is *also* not AU-filtered -- see _resolve_results()).
-    Multiple institution-matched candidates, or multiple candidates with no institution
-    corroboration, return None -- same conservatism as _search_by_institution(): a genuine
-    ambiguity here should defer to the existing broader mechanism, not guess.
-    """
+    Anything else (0 or 2+ survivors at every stage) returns None -- same conservatism as
+    _search_by_institution(): a genuine ambiguity here should defer to the existing broader
+    mechanism, not guess.
+
+    2026-09-11: narrowing uses institution_compatible_candidates()/au_country_compatible_candidates()
+    (keep unless individually disqualified by conflicting data), not a positive-confirmation-only
+    filter -- found via the Kimbal/Ken Marriott case, where a positive-confirmation-only version
+    confidently picked a same-named but wrong candidate (Ken Marriott, whose ORCID happens to
+    record a decades-old Monash *education* entry) while the real candidate (Kim Marriott, a real
+    Monash professor with literally zero data ever filled in on his own ORCID record) was
+    invisible to the check entirely -- an empty field was silently treated as "doesn't match"
+    instead of "unknown." Each candidate's own keep/drop verdict must depend only on that
+    candidate's own recorded data, never on what any other candidate's record does or doesn't
+    contain -- a confirmed match is only trustworthy once it's also the SOLE remaining candidate
+    after every candidate with genuinely conflicting data has been dropped, not merely the first
+    candidate to show positive evidence.
+
+    The `countries` step exists because most live /record fetches turn out to add nothing:
+    measured 2026-09-11 against every already-cached live record whose bulk row implied total
+    emptiness (no employments/educations/memberships/countries), 80.1% came back live still
+    completely empty. Checking the bulk snapshot's own `countries` field first (populated for
+    ~13% of accounts) resolves that fraction for free before ever reaching for a live call."""
     candidates = _get_orcid_proc().discover(first, family)
     if not candidates:
         return None
 
-    inst_matched = institution_matched_candidates(candidates, institution_names) if institution_names else []
-    if len(inst_matched) == 1:
-        orcid = inst_matched[0]["orcid"]
-        rec = fetch_record(orcid, record_cache, for_cache, era_lookup)
-        meta = _candidate_meta(orcid, rec)
-        return {
-            "orcid": orcid, "confidence": "au_match", "num_found": len(candidates),
-            "works_count":   meta["works_count"],
-            "external_ids":  json.dumps(meta["external_ids"]),
-            "au_candidates": json.dumps([meta]),
-            "source":        "bulk_db_institution",
-        }
-    if inst_matched:
-        return None  # 2+ institution-matched candidates -- genuine ambiguity, defer
+    pool = candidates
+    if institution_names:
+        survivors = institution_compatible_candidates(candidates, institution_names)
+        if len(survivors) == 1:
+            return _bulk_match(survivors[0], candidates, record_cache, for_cache, era_lookup,
+                               confidence="au_match", source="bulk_db_institution")
+        if not survivors:
+            return None  # every candidate individually ruled out by institution -- nobody left
+        pool = survivors  # narrower base for the country check below
 
-    if len(candidates) == 1:
-        orcid = candidates[0]["orcid"]
-        rec = fetch_record(orcid, record_cache, for_cache, era_lookup)
-        meta = _candidate_meta(orcid, rec)
-        return {
-            "orcid": orcid, "confidence": "high", "num_found": 1,
-            "works_count":   meta["works_count"],
-            "external_ids":  json.dumps(meta["external_ids"]),
-            "au_candidates": json.dumps([meta]),
-            "source":        "bulk_db_name_unique",
-        }
-    return None  # 2+ candidates, no institution corroboration -- defer to the live API's own
-                 # country-filter logic rather than guess among them
+    au_survivors = au_country_compatible_candidates(pool)
+    if len(au_survivors) == 1:
+        return _bulk_match(au_survivors[0], candidates, record_cache, for_cache, era_lookup,
+                           confidence="au_match", source="bulk_db_country")
+
+    if not institution_names and len(candidates) == 1:
+        return _bulk_match(candidates[0], candidates, record_cache, for_cache, era_lookup,
+                           confidence="high", source="bulk_db_name_unique")
+
+    return None  # nothing narrowed to a unique survivor -- defer to the narrow live search
+
+
+def _bulk_match(candidate: dict, all_candidates: list[dict],
+                record_cache: diskcache.Cache, for_cache: diskcache.Cache,
+                era_lookup: dict, *, confidence: str, source: str) -> dict:
+    orcid = candidate["orcid"]
+    rec = fetch_record(orcid, record_cache, for_cache, era_lookup)
+    meta = _candidate_meta(orcid, rec)
+    return {
+        "orcid": orcid, "confidence": confidence, "num_found": len(all_candidates),
+        "works_count":   meta["works_count"],
+        "external_ids":  json.dumps(meta["external_ids"]),
+        "au_candidates": json.dumps([meta]),
+        "source":        source,
+    }
 
 
 def _search_by_institution(first: str, family: str, institution_names: list[str],
@@ -337,7 +369,16 @@ def _query_orcid(q: str) -> dict | None:
 
 def _resolve_results(data: dict, record_cache: diskcache.Cache,
                      for_cache: diskcache.Cache, era_lookup: dict) -> dict:
-    """Resolve a non-empty search response to a result dict with all metadata."""
+    """Resolve a non-empty search response to a result dict with all metadata.
+
+    AU-signal check is "AU or unknown", not "AU or excluded" (2026-09-11, root-caused via the
+    Kimbal Marriott/Melinda Hinkson cases -- see CLAUDE.md). A candidate's ORCID record can
+    carry no country data at all (no personal address, no employment-org address) without that
+    meaning they're confirmed non-Australian -- many real Australian researchers hold an
+    institution-minted ORCID with zero country data ever filled in. The old check
+    (`"AU" in countries`) silently treated "no signal" identically to "confirmed elsewhere",
+    which let a coincidentally-name-matching but unrelated person with populated (non-AU or
+    AU) country data outcompete the genuinely correct, but country-silent, candidate."""
     num_found = data.get("num-found", 0)
     if num_found > TOO_COMMON:
         return {"orcid": None, "confidence": "too_common", "num_found": num_found, **_EMPTY}
@@ -348,8 +389,9 @@ def _resolve_results(data: dict, record_cache: diskcache.Cache,
     if num_found == 1:
         rec  = fetch_record(orcids[0], record_cache, for_cache, era_lookup)
         meta = _candidate_meta(orcids[0], rec)
-        countries = {a.get("country", {}).get("value") for a in orcid_addresses(rec)}
-        au_cands  = [meta] if "AU" in countries else []
+        countries = {v for a in orcid_addresses(rec)
+                     if (v := a.get("country", {}).get("value"))}
+        au_cands  = [meta] if (not countries or "AU" in countries) else []
         return {
             "orcid": orcids[0], "confidence": "high", "num_found": 1,
             "works_count":   meta["works_count"],
@@ -361,8 +403,9 @@ def _resolve_results(data: dict, record_cache: diskcache.Cache,
     for oid in orcids:
         try:
             rec       = fetch_record(oid, record_cache, for_cache, era_lookup)
-            countries = {a.get("country", {}).get("value") for a in orcid_addresses(rec)}
-            if "AU" in countries:
+            countries = {v for a in orcid_addresses(rec)
+                         if (v := a.get("country", {}).get("value"))}
+            if not countries or "AU" in countries:
                 au_candidates.append(_candidate_meta(oid, rec))
         except Exception:
             continue

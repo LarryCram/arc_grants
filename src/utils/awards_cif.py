@@ -36,7 +36,7 @@ from splink import DuckDBAPI, Linker, SettingsCreator, block_on
 import splink.comparison_library as cl
 import splink.comparison_level_library as cll
 
-from config.settings import PROCESSED_DATA, ADMIN_ORGS_CSV, GRANT_SUMMARIES_CSV, ARC_GRANTS_CSV, DISKCACHE_DIR, OAX_AUTHORS, TOP_CUT, DUCKDB_TMP_DIR
+from config.settings import PROCESSED_DATA, ADMIN_ORGS_CSV, GRANT_SUMMARIES_CSV, ARC_GRANTS_CSV, DISKCACHE_DIR, OAX_AUTHORS, TOP_CUT, DUCKDB_TMP_DIR, ORCID_BULK_PARQUET
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
 from src.utils.names import make_expanded_for_tokens, for_name_tokens, HumanNameParser, ParsedName
 from src.utils.for_resolve import (
@@ -2304,7 +2304,7 @@ def widen_names_with_orcid_bulk_db(clusters: list[AwardsCIF]) -> list[AwardsCIF]
     all_orcids = sorted({oid for c in clusters for oid in c.orcids if oid})
     if not all_orcids:
         return clusters
-    with OrcidProcessor() as proc:
+    with OrcidProcessor(bulk_parquet=ORCID_BULK_PARQUET) as proc:
         bulk = proc.lookup_by_orcid(all_orcids)
     bulk_names_by_orcid: dict[str, list[str]] = {}
     for orcid, rec in bulk.items():

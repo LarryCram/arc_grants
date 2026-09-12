@@ -11,7 +11,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.utils.orcid_processor_arc_adapter import (
+    au_country_compatible_candidates,
     get_record,
+    institution_compatible_candidates,
     institution_matched_candidates,
     resolve_institution_overlap,
 )
@@ -44,6 +46,85 @@ class TestInstitutionMatchedCandidates:
     def test_candidate_without_institution_names_key_safe(self):
         candidates = [{"orcid": "0000-0001"}]
         assert institution_matched_candidates(candidates, {"University of Queensland"}) == []
+
+
+class TestInstitutionCompatibleCandidates:
+    """2026-09-11, the Kimbal/Ken Marriott case: a candidate with no institution_names data at
+    all must be kept, not treated as a non-match -- each candidate's own keep/drop verdict
+    depends only on that candidate's own recorded data, never on another candidate's."""
+
+    def test_confirmed_match_alone_is_the_sole_survivor(self):
+        candidates = [
+            {"orcid": "0000-0001", "institution_names": ["Monash University"]},
+            {"orcid": "0000-0002", "institution_names": ["University of Sydney"]},
+        ]
+        survivors = institution_compatible_candidates(candidates, {"Monash University"})
+        assert {c["orcid"] for c in survivors} == {"0000-0001"}
+
+    def test_no_data_candidate_is_kept_not_dropped(self):
+        # Real Marriott shape: one candidate has an unrelated (wrong-person) institution match,
+        # the true candidate has literally no institution data on file at all.
+        candidates = [
+            {"orcid": "wrong-person", "institution_names": ["Monash University"]},
+            {"orcid": "true-person", "institution_names": []},
+        ]
+        survivors = institution_compatible_candidates(candidates, {"Monash University"})
+        assert {c["orcid"] for c in survivors} == {"wrong-person", "true-person"}
+
+    def test_conflicting_institution_data_is_the_only_thing_that_drops_a_candidate(self):
+        candidates = [
+            {"orcid": "0000-0001", "institution_names": ["University of Sydney"]},
+            {"orcid": "0000-0002", "institution_names": []},
+            {"orcid": "0000-0003", "institution_names": []},
+        ]
+        survivors = institution_compatible_candidates(candidates, {"Monash University"})
+        assert {c["orcid"] for c in survivors} == {"0000-0002", "0000-0003"}
+
+    def test_candidate_without_institution_names_key_is_kept(self):
+        candidates = [{"orcid": "0000-0001"}]
+        survivors = institution_compatible_candidates(candidates, {"Monash University"})
+        assert {c["orcid"] for c in survivors} == {"0000-0001"}
+
+    def test_case_insensitive(self):
+        candidates = [{"orcid": "0000-0001", "institution_names": ["monash university"]}]
+        survivors = institution_compatible_candidates(candidates, {"Monash University"})
+        assert {c["orcid"] for c in survivors} == {"0000-0001"}
+
+
+class TestAuCountryCompatibleCandidates:
+    """2026-09-11: the free, local counterpart to _resolve_results()'s live-API AU-or-NULL fix --
+    a candidate with no `countries` data on file is kept (unknown, not disqualifying); only a
+    confirmed non-AU country actually rules a candidate out."""
+
+    def test_confirmed_au_alone_is_the_sole_survivor(self):
+        candidates = [
+            {"orcid": "0000-0001", "countries": ["AU"]},
+            {"orcid": "0000-0002", "countries": ["US"]},
+        ]
+        assert {c["orcid"] for c in au_country_compatible_candidates(candidates)} == {"0000-0001"}
+
+    def test_no_country_data_is_kept_not_dropped(self):
+        candidates = [
+            {"orcid": "0000-0001", "countries": []},
+            {"orcid": "0000-0002", "countries": []},
+        ]
+        survivors = au_country_compatible_candidates(candidates)
+        assert {c["orcid"] for c in survivors} == {"0000-0001", "0000-0002"}
+
+    def test_confirmed_non_au_is_dropped(self):
+        candidates = [
+            {"orcid": "0000-0001", "countries": ["US", "GB"]},
+            {"orcid": "0000-0002", "countries": []},
+        ]
+        survivors = au_country_compatible_candidates(candidates)
+        assert {c["orcid"] for c in survivors} == {"0000-0002"}
+
+    def test_missing_countries_key_is_kept(self):
+        assert au_country_compatible_candidates([{"orcid": "0000-0001"}]) == [{"orcid": "0000-0001"}]
+
+    def test_case_insensitive(self):
+        candidates = [{"orcid": "0000-0001", "countries": ["au"]}]
+        assert au_country_compatible_candidates(candidates) == candidates
 
 
 class TestResolveInstitutionOverlap:

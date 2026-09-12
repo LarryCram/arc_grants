@@ -57,3 +57,18 @@ OPENALEX_API_KEY = os.getenv("OPENALEX_API_KEY", "")
 # ORCID's daily quota during 00b_enrich_orcid.py's original run, see CLAUDE.md 2026-08-08)
 ORCID_CLIENT_ID     = os.getenv("ORCID_CLIENT_ID", "")
 ORCID_CLIENT_SECRET = os.getenv("ORCID_CLIENT_SECRET", "")
+
+# ORCID bulk snapshot (local-only conversion of the ORCID public-data dump, no live API calls --
+# see src/utils/orcid_processor.py). Optional, not _required-validated: orcid_processor.py is
+# deliberately written to be standalone (no config.settings import at all, for portability
+# outside this project) and has its own hardcoded default matching these same paths -- exposing
+# them here too is for visibility/discoverability and so callers *within* this project can pass
+# an explicit, per-machine path instead of silently relying on that hardcoded default (2026-09-10:
+# found via a new-machine run where .env carried ORCID_BULK_PARQUET but nothing actually read it
+# -- config/settings.py never exposed it and orcid_processor.py can't see .env at all, so the two
+# had only ever stayed in sync by whoever edited them keeping both by hand). ORCID_DISKCACHE_DIR
+# is deliberately NOT exposed here despite being present in .env -- checked directly, it's a
+# genuinely dead, redundant duplicate of DISKCACHE_DIR above (same value); orcid_client.py already
+# correctly uses DISKCACHE_DIR, nothing reads ORCID_DISKCACHE_DIR anywhere.
+ORCID_BULK_DUMP    = os.getenv("ORCID_BULK_DUMP", "/home/lc/s/orcid/records.jsonl.gz")
+ORCID_BULK_PARQUET = os.getenv("ORCID_BULK_PARQUET", "/home/lc/s/orcid/orcid_bulk.parquet")

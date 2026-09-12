@@ -51,6 +51,40 @@ def institution_matched_candidates(candidates: list[dict], own_institution_names
     ]
 
 
+def institution_compatible_candidates(candidates: list[dict], own_institution_names: list[str] | set[str]) -> list[dict]:
+    """Every candidate NOT individually disqualified by institution evidence -- kept unless its
+    OWN institution_names is non-empty and shares nothing with own_institution_names. A candidate
+    with no institution data at all (a real, common ORCID coverage gap -- many real researchers
+    have never filled in employment history) carries no evidence either way, so it is kept: the
+    right rule is "keep it if there is no reason to drop it out," decided purely from that one
+    candidate's own recorded data, never from what any OTHER candidate's record does or doesn't
+    contain (2026-09-11, found via the Kimbal/Ken Marriott case -- see CLAUDE.md). Distinct from
+    institution_matched_candidates(), which returns only CONFIRMED overlaps -- this is the wider
+    "not ruled out" set a caller should use to detect genuine ambiguity (2+ survivors) rather than
+    mistaking "found one confirmed match" for "found the only possible candidate," when another
+    same-named candidate with simply no institution data on file could equally be the true match."""
+    wanted = {i.lower() for i in own_institution_names}
+    return [
+        c for c in candidates
+        if not (names := {n.lower() for n in c.get("institution_names", []) if n}) or (wanted & names)
+    ]
+
+
+def au_country_compatible_candidates(candidates: list[dict]) -> list[dict]:
+    """Every candidate NOT ruled out by the bulk snapshot's own `countries` field -- kept unless
+    it's non-empty and doesn't include Australia. Same "keep it if there is no reason to drop it
+    out" principle as institution_compatible_candidates(), applied to country instead of
+    institution: measured 2026-09-11 that only ~13% of orcid_bulk.parquet has `countries`
+    populated at all, so its absence on a given candidate is not evidence they're not
+    Australian -- it just means the snapshot has nothing recorded. This mirrors
+    00b_enrich_orcid.py::_resolve_results()'s live-API "AU or unknown" fix (same date, same root
+    cause), applied to the free, local bulk field instead of a live /record fetch -- a candidate
+    whose own bulk row already has `countries` populated needs no live call at all to answer the
+    AU question."""
+    return [c for c in candidates
+            if not c.get("countries") or "AU" in {x.upper() for x in c["countries"]}]
+
+
 def resolve_institution_overlap(candidates: list[dict], own_institution_names: set[str]) -> str | None:
     """Given OrcidProcessor.discover()'s candidate list (each dict carries an
     "institution_names" list -- every employer/education/membership org name found across that

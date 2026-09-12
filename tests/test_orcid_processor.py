@@ -200,6 +200,13 @@ class TestOrcidProcessorDiscover:
         assert by_orcid["0000-0000-0000-0001"]["institution_names"] == ["University of Queensland"]
         assert by_orcid["0000-0000-0000-0002"]["institution_names"] == ["Macquarie University"]
 
+    def test_countries_attached(self, bulk_parquet):
+        # RECORDS here never set "countries" -- parse_bulk_record() defaults a missing key to
+        # [], and discover() must surface that as an empty list, not omit the key or KeyError.
+        with OrcidProcessor(bulk_parquet=bulk_parquet) as proc:
+            candidates = proc.discover("Simon", "Kelly")
+        assert all(c["countries"] == [] for c in candidates)
+
     def test_bare_initial_fallback(self, bulk_parquet):
         # "W Cope" -> full_name_key "w_cope", which is now ALSO in both "William Cope"'s and
         # "Wendy Cope"'s own all_full_name_keys (each includes its own bare-initial combination,

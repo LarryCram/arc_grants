@@ -267,10 +267,13 @@ class OrcidProcessor:
 
     def discover(self, first_name: str, family_name: str) -> list[dict]:
         """Pure name matching against orcid_bulk.parquet. Returns every name-matched candidate
-        as {"orcid", "name", "institution_names"} -- institution_names is every employer/
-        education/membership org name found across that candidate's whole recorded career, not
-        reduced to a single winner here (see this module's own docstring for why that reduction
-        is deliberately the caller's job). Empty list if nothing matches -- never guesses."""
+        as {"orcid", "name", "institution_names", "countries"} -- institution_names is every
+        employer/education/membership org name found across that candidate's whole recorded
+        career, not reduced to a single winner here (see this module's own docstring for why
+        that reduction is deliberately the caller's job); countries is the record's own
+        self-reported country list (2026-09-11: only ~13% of the snapshot has this populated at
+        all -- most accounts carry no country signal, which callers must treat as "unknown," not
+        "not Australian"). Empty list if nothing matches -- never guesses."""
         parsed = self.name_normalizer(f"{first_name} {family_name}".strip())
         candidates: list[dict] = []
         if parsed.full_name_key:
@@ -291,7 +294,7 @@ class OrcidProcessor:
         all_full_name_keys, which nothing here checked."""
         rows = self.con.execute(
             """
-            SELECT orcid, name, employments, educations, memberships
+            SELECT orcid, name, employments, educations, memberships, countries
             FROM read_parquet(?)
             WHERE list_contains(all_full_name_keys, ?)
             """,
@@ -308,7 +311,7 @@ class OrcidProcessor:
             return []
         rows = self.con.execute(
             """
-            SELECT orcid, name, employments, educations, memberships
+            SELECT orcid, name, employments, educations, memberships, countries
             FROM read_parquet(?)
             WHERE family_name_main = ?
               AND (list_contains(given_tokens, ?) OR list_contains(nickname_tokens, ?))
@@ -319,12 +322,13 @@ class OrcidProcessor:
 
     @staticmethod
     def _to_candidate(row: tuple) -> dict:
-        orcid, name, employments, educations, memberships = row
+        orcid, name, employments, educations, memberships, countries = row
         institution_names = list(dict.fromkeys(
             e["name"] for group in (employments, educations, memberships)
             for e in (group or []) if e.get("name")
         ))
-        return {"orcid": orcid, "name": name, "institution_names": institution_names}
+        return {"orcid": orcid, "name": name, "institution_names": institution_names,
+                "countries": list(countries or [])}
 
     # ------------------------------------------------------------------
     # Keyed lookup -- widening name-form evidence for an ORCID already in hand
