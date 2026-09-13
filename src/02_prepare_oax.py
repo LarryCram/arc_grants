@@ -178,10 +178,18 @@ def oax_name_arrays(display_name: str, alts: list[str]) -> dict:
     nick_toks: dict[str, None] = {}
     family_from_display: dict[str, None] = {}
     family_from_alts: dict[str, None] = {}
+    per_occurrence_keys: dict[str, None] = {}  # 2026-09-13, see full_name_keys below
 
     def _parse_name(n: str, family_target: dict[str, None]) -> None:
         if not n:
             return
+        # 2026-09-13: parse ONCE per string and reuse for both the pooled given/family sets
+        # below and full_name_keys' per-occurrence union -- an earlier version of this fix
+        # called _name_parser.parse(n) a second time in a separate loop to build full_name_keys,
+        # silently doubling this function's total parsing cost across the whole ~2.78M-author
+        # population (measured live: a full 02_prepare_oax.py rerun ran for 13+ minutes without
+        # finishing where prior full runs completed well within that, and was killed once this
+        # was traced -- confirmed as the cause before re-running, not assumed).
         parsed = _name_parser.parse(n)
         for ft in parsed.given_tokens:
             first_toks[ft] = None
@@ -191,6 +199,8 @@ def oax_name_arrays(display_name: str, alts: list[str]) -> dict:
         # see expand_diacritic_variants()'s docstring for why both are kept.
         for variant in parsed.family_names:
             family_target[variant] = None
+        for k in parsed.full_name_keys:
+            per_occurrence_keys[k] = None
 
     _parse_name(display_name, family_from_display)
     # Always parsed now, not fallback-only (2026-08-18, user-directed) -- alternatives are a
@@ -205,20 +215,30 @@ def oax_name_arrays(display_name: str, alts: list[str]) -> dict:
             if fam:
                 first_toks[fam[0]] = None
 
-    # full_name_keys (2026-09-09): every given/nickname x family combination this author's own
-    # name-strings (display_name + every alternative) produce -- same combinatorial convention
-    # as ParsedName.full_name_keys (names.py), built here across the whole author, not one
-    # occurrence. Complete, not filtered -- this is the canonical NameProcessor-style output;
-    # a bare-initial-derived key like "b_isakhan" carries no identifying information on its own
-    # (given_tokens always self-adds each given-name token's own first letter, needed for
-    # Splink's family+first_initial blocking key -- "Ben" and "Benjamin" both produce "b"), but
-    # deciding that it's too weak to count as evidence is a job for whoever is COMPARING two
-    # candidates for a specific purpose, not for this shared output -- see
+    # full_name_keys (2026-09-09, corrected 2026-09-13): every given/nickname x family
+    # combination this author's own name-strings (display_name + every alternative) produce.
+    # Deliberately a PER-OCCURRENCE union (per_occurrence_keys, accumulated inside _parse_name()
+    # above from each string's own single-occurrence ParsedName.full_name_keys), NOT a
+    # pooled-then-cross-multiplied set -- pooling given/family tokens across occurrences first
+    # (the pre-2026-09-13 approach) manufactures spurious keys no single input string ever
+    # actually asserted, by crossing a given-token contributed by ONE alternate against a
+    # family-token contributed by a DIFFERENT alternate. Confirmed concretely: A5101895081
+    # ("Di Yan", real name "Danhong Yan") has a reversed-order alternate "Yan Di" (no comma, so
+    # nameparser's own default Given-then-Family reading puts "yan" in the given slot) --
+    # pooling that against the correctly-parsed "Di Yan"/"Danhong Yan" family token ("yan")
+    # manufactures "yan_yan", a key this person's own data never actually claims anywhere, which
+    # then falsely blocks against any ARC record whose own name is genuinely doubled (e.g. "Yan
+    # Yan"). Per-occurrence union can't produce this: no single occurrence of this person's name
+    # ever has both slots equal to "yan" at once. A genuinely doubled/mononym identity (someone
+    # whose real name IS e.g. "Yan Yan") is unaffected -- that single occurrence's own
+    # cross-product still correctly includes "yan_yan". Complete, not filtered -- a bare-initial
+    # -derived key like "b_isakhan" carries no identifying information on its own (given_tokens
+    # always self-adds each given-name token's own first letter, needed for Splink's
+    # family+first_initial blocking key -- "Ben" and "Benjamin" both produce "b"), but deciding
+    # that it's too weak to count as evidence is a job for whoever is COMPARING two candidates
+    # for a specific purpose, not for this shared output -- see
     # awards_cif.py::_oax_names_compat() for where that discrimination actually happens.
-    given_and_nick: dict[str, None] = {**first_toks, **nick_toks}
-    full_name_keys = list(dict.fromkeys(
-        f"{g}_{f}" for g in given_and_nick for f in family_toks if g and f
-    ))
+    full_name_keys = list(per_occurrence_keys)
 
     return {
         "first_names": list(first_toks),

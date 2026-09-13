@@ -61,7 +61,6 @@ _MANUAL_SPLITS_CSV = _DATA_PERSISTED / "manual_splits.csv"
 _MANUAL_SPLITS_BY_GRANT_CSV = _DATA_PERSISTED / "manual_splits_by_grant.csv"
 _MANUAL_ORCIDS_CSV = _DATA_PERSISTED / "manual_orcids.csv"
 _MANUAL_MERGES_CSV = _DATA_PERSISTED / "manual_merges.csv"
-_ENRICHMENT_BLOCKLIST_CSV = _DATA_PERSISTED / "enrichment_blocklist.csv"
 _MANUAL_RESOLUTIONS_CSV = _DATA_PERSISTED / "manual_resolutions.csv"
 _MANUAL_CONFIRMED_NOT_SUSPICIOUS_CSV = _DATA_PERSISTED / "manual_confirmed_not_suspicious.csv"
 _MANUAL_CONFIRMED_DISTINCT_CSV = _DATA_PERSISTED / "manual_confirmed_distinct.csv"
@@ -271,6 +270,22 @@ class AwardsCIF:
     for_names: list[str] = field(default_factory=list)
     for_codes: list[str] = field(default_factory=list)
     full_name_key: str | None = None  # modal full_name_key across items
+    # full_name_keys (2026-09-13): every given/nickname x family combination this ACIF's own
+    # recorded name-strings produce -- the ARC-side analogue of oax_name_arrays()'s own
+    # full_name_keys, requested repeatedly (see docs/pipeline_todo.md item #14's closing note:
+    # "nothing new to design, just an export loop, not yet written"). Computed via PER-OCCURRENCE
+    # union -- each item's own AwardCIFItem.parsed.full_name_keys (already a clean, single-string
+    # cross-product) unioned across items -- never by pooling raw given/family tokens across
+    # items first and cross-multiplying the pooled sets afterward. That distinction is the whole
+    # point: pooling-then-crossing is exactly what manufactures a spurious "yan_yan"-style key for
+    # someone whose OWN name is never actually doubled (confirmed concretely: Kotagiri
+    # Ramamohanarao/Ramamohanarao Kotagiri, Taras Plakhotnik/Plakhotnik T. V., and 14 other
+    # reversed-citation-order ARC records all showed first_name==family_name_main under the old
+    # single-scalar parse_given(max_by_len(...)) approach -- per-occurrence union produces none of
+    # their spurious self-keys, while correctly preserving the 17 ACIFs whose name genuinely IS
+    # doubled/mononym, e.g. Yan Yan, Li Li, Wei Wei -- verified directly against all 35 real
+    # first_name==family_name_main cases in the population, 2026-09-13).
+    full_name_keys: list[str] = field(default_factory=list)
     # Modal family_name_main across items (2026-09-07) -- the cluster-level analogue of
     # full_name_key's own Counter.most_common(1) design, added specifically so
     # 03_link_arc_oax.py can read an already-correct, frequency-based scalar instead of
@@ -857,6 +872,9 @@ def _build_awards_cif(cluster_id: str, items: list[AwardCIFItem]) -> AwardsCIF:
         for_codes=sorted({it.for_code for it in items if it.for_code}),
         for2020_codes=_aggregate_for2020_codes(items),
         full_name_key=fnk_counts.most_common(1)[0][0] if fnk_counts else None,
+        full_name_keys=sorted({
+            k for it in items if it.parsed for k in it.parsed.full_name_keys
+        }),
         family_name_main=fnm_counts.most_common(1)[0][0] if fnm_counts else None,
         grant_ids=[it.unique_id for it in items],
         # 2026-08-21 fix: was len(items) -- counted raw (grant x investigator) records, not
@@ -1314,34 +1332,24 @@ def _load_coinvestigator_names() -> dict[str, list[str]]:
     return out
 
 
-def _load_enriched_orcid_by_name() -> dict[str, str]:
-    """norm_full_name -> orcid, from orcid_enrichment.parquet (if present)."""
-    path = PROCESSED_DATA / "orcid_enrichment.parquet"
-    if not path.exists():
-        return {}
-    df = pd.read_parquet(path)
-    out: dict[str, str] = {}
-    for _, r in df.iterrows():
-        if pd.notna(r.get("orcid")):
-            out[_norm_full(f"{r['first_name']} {r['family_name']}")] = r["orcid"]
-    return out
-
-
 def split_multi_name_clusters(
     clusters: list[AwardsCIF],
     coinv_by_grant: dict[str, list[str]] | None = None,
-    enriched_orcid: dict[str, str] | None = None,
 ) -> list[AwardsCIF]:
     """For clusters containing 2+ genuinely distinct full name forms, use co-investigator
-    overlap, FOR-name overlap, and enriched-ORCID disagreement to detect mis-merged different
-    people -- mirrors _split_multi_name_clusters(). Abbreviated name forms (first token <=2
-    chars, e.g. "Chun Li") don't drive splits; after full-name forms are split, each
-    abbreviated item is assigned to the sub-cluster with the best FOR overlap, or left
-    singleton if none overlaps."""
+    overlap and FOR-name overlap to detect mis-merged different people -- mirrors
+    _split_multi_name_clusters(). Abbreviated name forms (first token <=2 chars, e.g.
+    "Chun Li") don't drive splits; after full-name forms are split, each abbreviated item is
+    assigned to the sub-cluster with the best FOR overlap, or left singleton if none overlaps.
+
+    2026-09-12: the enriched-ORCID-disagreement signal (a third, independent split trigger)
+    was removed along with ORCID enrichment itself -- see ZARCHIVE/src_archive_20260912/ and
+    docs/pipeline_todo.md for why (orcid_bulk-based discovery was found structurally unable to
+    discriminate between same-surname candidates once absent self-reported data is correctly
+    treated as "unknown" rather than "doesn't match" -- the Kimbal/Ken Marriott case). The
+    disjoint_coinv/disjoint_for signals are unaffected and still function independently."""
     if coinv_by_grant is None:
         coinv_by_grant = _load_coinvestigator_names()
-    if enriched_orcid is None:
-        enriched_orcid = _load_enriched_orcid_by_name()
 
     def _first_tok(norm: str) -> str:
         parts = norm.split()
@@ -1375,11 +1383,9 @@ def split_multi_name_clusters(
         split_pairs: set[tuple] = set()
         for i, a in enumerate(form_list):
             for b in form_list[i + 1:]:
-                oa, ob = enriched_orcid.get(a), enriched_orcid.get(b)
-                different_orcid = bool(oa and ob and oa != ob)
                 disjoint_coinv = len(coinv[a] & coinv[b]) == 0
                 disjoint_for = len(for_sets[a] & for_sets[b]) == 0
-                if different_orcid or (disjoint_coinv and disjoint_for):
+                if disjoint_coinv and disjoint_for:
                     split_pairs.add((a, b))
 
         if not split_pairs:
@@ -1517,123 +1523,6 @@ def apply_manual_splits(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
             )
             out.append(new_cif)
     return out
-
-
-def apply_enriched_orcids(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
-    """Promote high/au_match-confidence ORCIDs from orcid_enrichment.parquet -- mirrors
-    _apply_enriched_orcids(). Only promotes when exactly 1 distinct ORCID is found across all
-    enriched name forms in a cluster, and the cluster currently has no ORCID.
-
-    enrichment_blocklist.csv rows are keyed on cluster_id too, resolved via
-    resolve_cluster_id() -- raises StaleClusterIdError rather than silently letting a
-    previously-confirmed wrong ORCID match get re-promoted once the blocked cluster's own id
-    has drifted (see that function's docstring)."""
-    enrichment_path = PROCESSED_DATA / "orcid_enrichment.parquet"
-    if not enrichment_path.exists():
-        return clusters
-    enrichment = pd.read_parquet(enrichment_path)
-    enrichment = enrichment[
-        enrichment["confidence"].isin(["high", "au_match"]) & enrichment["orcid"].notna()
-    ]
-    if len(enrichment) == 0:
-        return clusters
-
-    blocklist: set[tuple[str, str]] = set()
-    if _ENRICHMENT_BLOCKLIST_CSV.exists():
-        with open(_ENRICHMENT_BLOCKLIST_CSV, newline="") as f:
-            for row in csv.DictReader(f):
-                cid, orcid = row["cluster_id"].strip(), row["orcid"].strip()
-                if cid and orcid:
-                    blocklist.add((resolve_cluster_id(cid, clusters), orcid))
-
-    enrich_by_name: dict[tuple[str, str], set[str]] = defaultdict(set)
-    conf_by_name: dict[tuple[str, str], str] = {}
-    for _, r in enrichment.iterrows():
-        key = (r["first_name"], r["family_name"])
-        enrich_by_name[key].add(r["orcid"])
-        conf_by_name[key] = r["confidence"]
-
-    for c in clusters:
-        if c.orcids:
-            continue
-        found: set[str] = set()
-        conf = None
-        for it in c.items:
-            key = (it.first_name, it.family_name)
-            if key in enrich_by_name:
-                found |= enrich_by_name[key]
-                conf = conf_by_name[key]
-        if len(found) != 1:
-            continue
-        orcid = next(iter(found))
-        if (c.cluster_id, orcid) in blocklist:
-            continue
-        c.orcids = [orcid]
-        c.orcid_status = "HAS_ORCID"
-        c.record_event("enriched_orcid", orcid=orcid, confidence=conf)
-    return clusters
-
-
-def promote_low_by_for(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
-    """Promote low-confidence enrichment candidates when FOR-token overlap uniquely picks one
-    AU candidate -- mirrors _promote_low_by_for(). Compares each AU candidate's ORCID-derived
-    ERA FOR (from for_cache, populated by 00b_enrich_orcid.py) against the cluster's ARC
-    for_names."""
-    enrichment_path = PROCESSED_DATA / "orcid_enrichment.parquet"
-    if not enrichment_path.exists():
-        return clusters
-    enrichment = pd.read_parquet(enrichment_path)
-    enrichment = enrichment[
-        (enrichment["confidence"] == "low")
-        & enrichment["au_candidates"].notna()
-        & (enrichment["au_candidates"] != "[]")
-    ]
-    if len(enrichment) == 0:
-        return clusters
-
-    candidates_by_name: dict[tuple[str, str], list[dict]] = defaultdict(list)
-    for _, r in enrichment.iterrows():
-        key = (r["first_name"], r["family_name"])
-        raw = r["au_candidates"]
-        for cand in (json.loads(raw) if isinstance(raw, str) else raw):
-            if cand.get("orcid"):
-                candidates_by_name[key].append(cand)
-
-    with diskcache.Cache(str(DISKCACHE_DIR / "orcid_for")) as for_cache:
-        for c in clusters:
-            if c.orcids:
-                continue
-            seen: set[str] = set()
-            candidates: list[dict] = []
-            for it in c.items:
-                for cand in candidates_by_name.get((it.first_name, it.family_name), []):
-                    if cand["orcid"] not in seen:
-                        seen.add(cand["orcid"])
-                        candidates.append(cand)
-            if len(candidates) < 2:
-                continue
-            arc_toks = {tok for name in c.for_names for tok in for_name_tokens(name)}
-            if not arc_toks:
-                continue
-            scores = []
-            for cand in candidates:
-                oid = cand["orcid"]
-                orcid_for = for_cache.get(oid, [])
-                orcid_toks = {tok for e in orcid_for for tok in for_name_tokens(e["name"])}
-                scores.append((oid, len(arc_toks & orcid_toks)))
-            max_score = max(s for _, s in scores)
-            if max_score == 0:
-                continue
-            winners = [oid for oid, s in scores if s == max_score]
-            if len(winners) != 1:
-                continue
-            winner = winners[0]
-            c.orcids = [winner]
-            c.orcid_status = "HAS_ORCID"
-            c.record_event(
-                "enriched_orcid", orcid=winner, confidence="low_for_disambiguated", for_score=max_score,
-            )
-    return clusters
 
 
 def apply_manual_orcids(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
@@ -1851,8 +1740,6 @@ def refine_clusters(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     clusters = split_orcid_conflicts(clusters)
     clusters = split_multi_name_clusters(clusters)
     clusters = apply_manual_splits(clusters)
-    clusters = apply_enriched_orcids(clusters)
-    clusters = promote_low_by_for(clusters)
     clusters = apply_manual_orcids(clusters)
     clusters = merge_persons_by_orcid(clusters)
     clusters = apply_manual_merges(clusters)
@@ -2318,6 +2205,25 @@ def widen_names_with_orcid_bulk_db(clusters: list[AwardsCIF]) -> list[AwardsCIF]
         new_family: set[str] = set()
         for oid in c.orcids:
             for raw_name in bulk_names_by_orcid.get(oid, []):
+                # 2026-09-13: skip any name/alias string containing a comma outright, rather
+                # than try to repair it -- measured directly against the full ARC-orcid
+                # population (11,227 orcids found in orcid_bulk.parquet): only 47/14,446
+                # name/alias strings (0.33%) contain a comma at all, and they're a genuine mix
+                # of unrelated failure shapes with no single safe repair -- some are ORCID's own
+                # live "Last, First" citation-order forms (correctly reversed by nameparser's
+                # comma rule, but only useful if the source string itself is well-formed), some
+                # are two distinct real names concatenated into one field by whatever built
+                # orcid_bulk.parquet ("Easy ORCID") or already jammed together in the person's
+                # own live ORCID record, and some are credential/title lists ("Ph.D, MIEAust,
+                # CPEng"). A blanket comma-strip was tested and found unsafe: it fixes ~16/47
+                # cases but actively corrupts ~12/47 by merging two real names into one garbled
+                # string. Gating instead costs almost nothing: only 43/11,227 ORCIDs (0.38%)
+                # have any comma-containing string at all, 42 of those still contribute >=1
+                # clean form, and the single remaining case just gets no ORCID-sourced widening
+                # at all -- identical to this step never having run for that one cluster, not a
+                # regression (ARC's own raw name data is never touched or removed here).
+                if "," in raw_name:
+                    continue
                 new_full.add(raw_name)
                 fn, fam = _name_forms(raw_name, "")
                 new_first.update(fn)
@@ -2841,6 +2747,7 @@ def persist_awards_cif(clusters: list[AwardsCIF], path: Path = AWARDS_CIF_PARQUE
         "n_grants": c.n_grants,
         "coawardees": c.coawardees,
         "full_name_key": c.full_name_key,
+        "full_name_keys": c.full_name_keys,
         "family_name_main": c.family_name_main,
         "orcid_status": c.orcid_status,
         "orcid_for_codes": c.orcid_for_codes,
@@ -2909,6 +2816,7 @@ def load_awards_cif(path: Path = AWARDS_CIF_PARQUET) -> list[AwardsCIF]:
             n_grants=row["n_grants"],
             coawardees=[dict(x) for x in row["coawardees"]],
             full_name_key=row["full_name_key"],
+            full_name_keys=list(row["full_name_keys"]),
             family_name_main=row["family_name_main"],
             orcid_status=row["orcid_status"],
             orcid_for_codes=[dict(x) for x in row["orcid_for_codes"]],

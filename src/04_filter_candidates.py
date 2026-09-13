@@ -95,7 +95,7 @@ class FilterCandidates:
     """
 
     def __init__(self, con: duckdb.DuckDBPyConnection | None = None,
-                 force_rebuild_caches: bool = False):
+                 force_rebuild_caches: bool = False, force_rebuild_oax_fd: bool = False):
         self.con = con or duckdb.connect(str(PROVENANCE_DB))
         self._ensure_provenance_table()
         self._ensure_candidates_table()
@@ -112,9 +112,35 @@ class FilterCandidates:
         self.for_to_subfield: dict[str, str] = self._ensure_for_subfield_cache(force_rebuild_caches)
         self.grant_for2020: dict[str, list[dict]] = self._ensure_grant_for2020_cache(force_rebuild_caches)
         self.institution_oax_crosswalk: dict[str, str] = _load_institution_oax_crosswalk()
-        self._ensure_fd_tables(force_rebuild_caches)
+        # 2026-09-12: force_rebuild_caches only ever needs to force the ARC-side/pair tables
+        # (arc_subfield_fd/arc_institution_fd/fd_pair_scores -- keyed on cluster_id/arc_oax_links
+        # pairs, genuinely stale after any 01/03 rerun) -- NOT oax_subfield_fd/oax_institution_fd,
+        # which are a pure property of OpenAlex authorship data (authorships_hep.parquet/
+        # works_hep.parquet), completely unaffected by an ARC-side rerun. Found the hard way:
+        # force_rebuild_caches=True after removing ORCID enrichment blanket-rebuilt both together,
+        # wastefully re-scanning the full ~2.78M-author OAX population when only the ARC-side
+        # tables actually needed to change. force_rebuild_oax_fd is now its own, separate flag --
+        # pass it only when authorships_hep.parquet/works_hep.parquet themselves are rebuilt.
+        self._ensure_fd_tables(force_rebuild_arc=force_rebuild_caches,
+                                force_rebuild_oax=force_rebuild_oax_fd)
+        # 2026-09-12: fd_compare() used to hit fd_pair_scores via a fresh single-row SELECT per
+        # call -- fine for interactive/case-by-case use, but measured at ~3.5ms/candidate (mostly
+        # DuckDB per-statement overhead, not the lookup itself) once run_full_resolution_pass()
+        # started calling it once per candidate across the WHOLE population (157,348 calls ->
+        # 559.6s). fd_pair_scores is only ~185K rows -- small enough to hold as a plain Python
+        # dict, turning every subsequent lookup into an O(1) in-memory hit with zero SQL
+        # round-trip. fd_compare() falls back to the live per-pair query only for a pair genuinely
+        # absent from this cache (not in arc_oax_links.parquet at all).
+        self._fd_pair_cache: dict[tuple[str, str], tuple] = {
+            (r[0], r[1]): (r[2], r[3], r[4])
+            for r in self.con.execute(
+                "SELECT arc_id, oax_id, institution_score, subfield_score, match_probability "
+                "FROM fd_pair_scores"
+            ).fetchall()
+        }
 
-    def _ensure_fd_tables(self, force_rebuild: bool = False) -> None:
+    def _ensure_fd_tables(self, force_rebuild_arc: bool = False,
+                           force_rebuild_oax: bool = False) -> None:
         """Precomputed institution/subfield frequency-distribution tables, built once in bulk
         (2026-09-11) rather than recomputed live per fd_compare() call:
           arc_institution_fd / arc_subfield_fd  -- one row per (cluster_id, key), same
@@ -139,35 +165,56 @@ class FilterCandidates:
               rows at all -- same "absence isn't evidence" distinction _hist_intersection()
               already makes, preserved here rather than collapsed by the join.
 
-        Rebuilt only when empty or force_rebuild=True -- no automatic freshness check yet,
-        matching every other cache in this class (pass force_rebuild_caches=True after
-        awards_cif_arc_only.parquet, openalex_authors_prep.parquet, or arc_oax_links.parquet
-        actually change)."""
-        n = self.con.execute("""
+        2026-09-12: force_rebuild_arc and force_rebuild_oax are separate flags, deliberately --
+        oax_institution_fd/oax_subfield_fd are a pure property of OpenAlex authorship data
+        (authorships_hep.parquet/works_hep.parquet), untouched by an ARC-side rerun; a single
+        combined force_rebuild flag was found blanket-rebuilding both together after removing
+        ORCID enrichment, wastefully re-scanning the full ~2.78M-author population when only the
+        ARC-side tables + fd_pair_scores needed to change. force_rebuild_arc also forces
+        fd_pair_scores (it depends on both sides' normalized tables, so it's always rebuilt
+        whenever either half is force-rebuilt, using whichever oax_*_fd tables currently exist).
+        Each half rebuilt only when empty or its own force flag is set -- no automatic freshness
+        check yet, matching every other cache in this class."""
+        oax_n = self.con.execute("""
+            SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'oax_subfield_fd'
+        """).fetchone()[0]
+        rebuild_oax = force_rebuild_oax or oax_n == 0
+        if not rebuild_oax:
+            oax_n = self.con.execute("SELECT COUNT(*) FROM oax_subfield_fd").fetchone()[0]
+            rebuild_oax = oax_n == 0
+
+        arc_n = self.con.execute("""
             SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'fd_pair_scores'
         """).fetchone()[0]
-        if not force_rebuild and n > 0:
-            n_rows = self.con.execute("SELECT COUNT(*) FROM fd_pair_scores").fetchone()[0]
-            if n_rows > 0:
-                return
+        rebuild_arc = force_rebuild_arc or rebuild_oax or arc_n == 0
+        if not rebuild_arc:
+            arc_n = self.con.execute("SELECT COUNT(*) FROM fd_pair_scores").fetchone()[0]
+            rebuild_arc = arc_n == 0
 
-        self.con.execute(f"""
-            CREATE OR REPLACE TABLE oax_subfield_fd AS
-            SELECT a.author_idx, w.subfield_name, COUNT(DISTINCT a.work_idx) AS n
-            FROM read_parquet('{AUTHORSHIPS_HEP}') a
-            JOIN read_parquet('{WORKS_HEP}') w USING (work_idx)
-            WHERE w.subfield_name IS NOT NULL
-            GROUP BY a.author_idx, w.subfield_name
-        """)
-        self.con.execute(f"""
-            CREATE OR REPLACE TABLE oax_institution_fd AS
-            SELECT author_idx,
-                   'https://openalex.org/I' || institution_idx::VARCHAR AS institution_id,
-                   COUNT(DISTINCT work_idx) AS n
-            FROM read_parquet('{AUTHORSHIPS_HEP}')
-            WHERE institution_idx IS NOT NULL
-            GROUP BY author_idx, institution_idx
-        """)
+        if not rebuild_oax and not rebuild_arc:
+            return
+
+        if rebuild_oax:
+            self.con.execute(f"""
+                CREATE OR REPLACE TABLE oax_subfield_fd AS
+                SELECT a.author_idx, w.subfield_name, COUNT(DISTINCT a.work_idx) AS n
+                FROM read_parquet('{AUTHORSHIPS_HEP}') a
+                JOIN read_parquet('{WORKS_HEP}') w USING (work_idx)
+                WHERE w.subfield_name IS NOT NULL
+                GROUP BY a.author_idx, w.subfield_name
+            """)
+            self.con.execute(f"""
+                CREATE OR REPLACE TABLE oax_institution_fd AS
+                SELECT author_idx,
+                       'https://openalex.org/I' || institution_idx::VARCHAR AS institution_id,
+                       COUNT(DISTINCT work_idx) AS n
+                FROM read_parquet('{AUTHORSHIPS_HEP}')
+                WHERE institution_idx IS NOT NULL
+                GROUP BY author_idx, institution_idx
+            """)
+
+        if not rebuild_arc:
+            return
 
         self.con.execute(f"""
             CREATE OR REPLACE TEMP TABLE cluster_grants AS
@@ -218,11 +265,42 @@ class FilterCandidates:
             SELECT author_idx, subfield_name, n * 1.0 / SUM(n) OVER (PARTITION BY author_idx) AS prop
             FROM oax_subfield_fd
         """)
+        # 2026-09-13 (user-directed): carry both sides' own orcid straight into fd_pair_scores,
+        # so a person exploring this table can see match_probability/FD scores AND the
+        # orcid_veto() inputs for the same pair without a separate join back to
+        # awards_cif_arc_only.parquet/authors/*.parquet each time. arc_orcid is the ACIF's own
+        # FIRST recorded orcid (list_extract(..., 1), matching score()'s own `cluster.orcids[0]`
+        # convention -- a MULTI_ORCID cluster's second+ orcid is still not used here, same known
+        # gap as score() itself); oax_orcid is the candidate's raw OpenAlex-recorded orcid
+        # (full URL form, unchanged/uncompared -- orcid_veto()'s own .endswith() logic still
+        # happens in Python, this table just persists the two raw values it operates on).
+        # 2026-09-13: works_count and n_candidates baked in here too (user-directed: "will be
+        # even more efficient if the required columns... are made at create time rather than by
+        # joins") -- works_count is the candidate's own global authors/*.parquet figure (same
+        # source _fetch_candidate_info() uses), n_candidates is a genuine one-row-per-arc_id
+        # scalar (a real GROUP BY, not a window function joined back unreduced -- the latter
+        # produces an N x N blow-up per arc_id before any downstream DISTINCT/GROUP BY collapses
+        # it back down, confirmed a real cost on large candidate pools). With both columns
+        # resident on fd_pair_scores itself, a caller can express the whole orcid_veto()/
+        # fd_compare() decision as one flat, self-contained SQL query over this single table --
+        # no join to oax_provenance (which would also be this class's own possibly-stale prior
+        # output, a real circularity risk) or to authors/*.parquet needed at query time at all.
         self.con.execute(f"""
             CREATE OR REPLACE TEMP TABLE pairs AS
-            SELECT arc_id, oax_id, match_probability,
-                   TRY_CAST(regexp_extract(oax_id, 'A(\\d+)', 1) AS BIGINT) AS author_idx
-            FROM read_parquet('{LINKS}')
+            SELECT l.arc_id, l.oax_id, l.match_probability,
+                   TRY_CAST(regexp_extract(l.oax_id, 'A(\\d+)', 1) AS BIGINT) AS author_idx,
+                   list_extract(a.orcids, 1) AS arc_orcid,
+                   au.orcid AS oax_orcid,
+                   au.works_count AS works_count,
+                   au.display_name AS oax_author_name
+            FROM read_parquet('{LINKS}') l
+            LEFT JOIN read_parquet('{ARC_ONLY_PARQUET}') a ON a.cluster_id = l.arc_id
+            LEFT JOIN read_parquet('{AUTHORS}') au
+                ON au.author_idx = TRY_CAST(regexp_extract(l.oax_id, 'A(\\d+)', 1) AS BIGINT)
+        """)
+        self.con.execute("""
+            CREATE OR REPLACE TEMP TABLE arc_n_candidates AS
+            SELECT arc_id, COUNT(*) AS n_candidates FROM pairs GROUP BY arc_id
         """)
         self.con.execute("""
             CREATE OR REPLACE TABLE fd_pair_scores AS
@@ -248,11 +326,13 @@ class FilterCandidates:
                        EXISTS (SELECT 1 FROM oax_sf_norm o WHERE o.author_idx = p.author_idx) AS has_oax_sf
                 FROM pairs p
             )
-            SELECT p.arc_id, p.oax_id, p.match_probability,
+            SELECT p.arc_id, p.oax_id, p.match_probability, p.arc_orcid, p.oax_orcid,
+                   p.works_count, p.oax_author_name, n.n_candidates,
                    CASE WHEN h.has_arc_inst AND h.has_oax_inst THEN COALESCE(io.overlap, 0.0) END AS institution_score,
                    CASE WHEN h.has_arc_sf AND h.has_oax_sf THEN COALESCE(sfo.overlap, 0.0) END AS subfield_score
             FROM pairs p
             JOIN has_data h ON h.arc_id = p.arc_id AND h.oax_id = p.oax_id
+            JOIN arc_n_candidates n ON n.arc_id = p.arc_id
             LEFT JOIN inst_overlap io ON io.arc_id = p.arc_id AND io.oax_id = p.oax_id
             LEFT JOIN sf_overlap sfo ON sfo.arc_id = p.arc_id AND sfo.oax_id = p.oax_id
         """)
@@ -317,6 +397,28 @@ class FilterCandidates:
                 reason      = excluded.reason,
                 stage       = excluded.stage
         """, [cluster_id, oax_id, works_count, status, reason, stage])
+
+    def record_provenance_many(self, rows: list[tuple]) -> None:
+        """Batched counterpart to record_provenance() -- ONE executemany() call instead of one
+        execute() per row (2026-09-12, user-directed correction: 'you don't need duckdb to
+        complete the transaction since each row is separate' -- wrapping the whole loop in one
+        BEGIN/COMMIT transaction only removed per-statement AUTO-COMMIT overhead; it did nothing
+        about each row still being its own separately parsed/planned INSERT. Measured: this was
+        the dominant remaining cost in run_full_resolution_pass(), ~1.76ms/row even inside one
+        transaction, ~277s of its 351.3s total). Each tuple: (cluster_id, oax_id, works_count,
+        status, reason, stage) -- same shape and same upsert semantics as record_provenance()."""
+        if not rows:
+            return
+        for status in {r[3] for r in rows}:
+            assert status in ("keep", "drop", "uncertain"), f"bad status: {status!r}"
+        self.con.executemany("""
+            INSERT INTO oax_provenance VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (cluster_id, oax_id) DO UPDATE SET
+                works_count = excluded.works_count,
+                status      = excluded.status,
+                reason      = excluded.reason,
+                stage       = excluded.stage
+        """, rows)
 
     def load_provenance(self, cluster_id: str | None = None) -> "pd.DataFrame":
         """Read back recorded verdicts -- all of them, or just one ACIF's if cluster_id given."""
@@ -647,11 +749,13 @@ class FilterCandidates:
         lookups, unchanged) for a pair that isn't in arc_oax_links.parquet at all -- e.g. a
         candidate a future direct-orcid lookup surfaces that Splink's own blocking never found,
         which fd_pair_scores structurally can't cover since it's built from that same links
-        file."""
-        row = self.con.execute("""
-            SELECT institution_score, subfield_score, match_probability
-            FROM fd_pair_scores WHERE arc_id = ? AND oax_id = ?
-        """, [cluster.cluster_id, oax_id]).fetchone()
+        file.
+
+        2026-09-12: reads self._fd_pair_cache (the whole fd_pair_scores table, preloaded once in
+        __init__) instead of a fresh per-call SQL query -- see that cache's own comment for the
+        measured cost this removes (~3.5ms/candidate of pure per-statement overhead at bulk
+        scale)."""
+        row = self._fd_pair_cache.get((cluster.cluster_id, oax_id))
         if row is not None:
             inst_score, sf_score, match_prob = row
         else:
@@ -1103,7 +1207,13 @@ class FilterCandidates:
         orcid_veto() then fd_compare(), recording provenance for EVERY one (drop or keep),
         skipping pairs already recorded by a prior run. Returns aggregate counts, the basis for
         reviewing 'a lot of misses' after the fact rather than one case at a time
-        (2026-09-10, user-directed)."""
+        (2026-09-10, user-directed).
+
+        2026-09-12: wraps every record_provenance() write in ONE explicit transaction instead of
+        letting each INSERT auto-commit individually -- measured directly: per-row auto-commit
+        cost 5.07ms/cluster (~115s at full 22,740-cluster population scale), a single wrapping
+        transaction cuts that to 1.76ms/cluster (~40s) -- ~3x, and was the dominant cost in this
+        whole pass (more than fd_compare()'s own precomputed-table lookup, 1.43ms/cluster)."""
         info_by_id = self._fetch_candidate_info(clusters)
         done_df = self.con.execute("SELECT cluster_id, oax_id FROM oax_provenance").fetchdf()
         done = set(zip(done_df["cluster_id"], done_df["oax_id"]))
@@ -1114,35 +1224,152 @@ class FilterCandidates:
             "fd_reject_inst_only": 0, "fd_reject_for_only": 0, "fd_reject_both": 0,
             "keep": 0,
         }
-        for i, c in enumerate(clusters):
-            counts["total"] += 1
-            top_oid = self._top_candidate(c, info_by_id)
-            if (c.cluster_id, top_oid) in done:
-                counts["already_done"] += 1
-                continue
-            wc, oax_orcid = info_by_id.get(self._author_idx(top_oid), (0, None))
+        self.con.execute("BEGIN TRANSACTION")
+        try:
+            for i, c in enumerate(clusters):
+                counts["total"] += 1
+                top_oid = self._top_candidate(c, info_by_id)
+                if (c.cluster_id, top_oid) in done:
+                    counts["already_done"] += 1
+                    continue
+                wc, oax_orcid = info_by_id.get(self._author_idx(top_oid), (0, None))
 
-            if c.orcids and self.orcid_veto(c.orcids[0], oax_orcid):
-                self.record_provenance(c.cluster_id, top_oid, wc, "drop", "orcid_mismatch", "orcid_veto")
-                counts["orcid_mismatch"] += 1
+                if c.orcids and self.orcid_veto(c.orcids[0], oax_orcid):
+                    self.record_provenance(c.cluster_id, top_oid, wc, "drop", "orcid_mismatch", "orcid_veto")
+                    counts["orcid_mismatch"] += 1
+                    continue
+
+                fd = self.fd_compare(c, top_oid)
+                if fd["eject"]:
+                    self.record_provenance(c.cluster_id, top_oid, wc, "drop", fd["reason"], "fd_compare")
+                    if fd["reason"] == "fd_inst_low":
+                        counts["fd_reject_inst_only"] += 1
+                    elif fd["reason"] == "fd_for_low":
+                        counts["fd_reject_for_only"] += 1
+                    else:
+                        counts["fd_reject_both"] += 1
+                    continue
+
+                self.record_provenance(c.cluster_id, top_oid, wc, "keep", None, "fd_compare")
+                counts["keep"] += 1
+
+                if progress_every and (i + 1) % progress_every == 0:
+                    print(f"  ...{i + 1}/{len(clusters)} processed", flush=True)
+        finally:
+            self.con.execute("COMMIT")
+        return counts
+
+    def resolve_and_record(self, cluster, info_by_id: dict) -> tuple[list[str], list[tuple]]:
+        """resolve()'s own logic (orcid_veto -> fd_compare -> top-score-or->=0.9 acceptance),
+        but over EVERY candidate in the pool (not just the top-by-works one run_bulk_pass()
+        covers) -- the actual per-ACIF 'fate' the provenance table exists to hold. Reuses
+        info_by_id (author_idx -> (works_count, orcid)) rather than re-querying per candidate,
+        same batching discipline as run_bulk_pass().
+
+        2026-09-12: returns the provenance rows rather than writing them itself (record_provenance()
+        per candidate is exactly the per-statement-overhead problem record_provenance_many() exists
+        to avoid -- see that method's own docstring) -- the caller batches every cluster's rows
+        together and writes them all in ONE executemany() call.
+
+        Reason/stage vocabulary, one row per (cluster_id, oax_id):
+          drop / orcid_mismatch / orcid_veto  -- confirmed conflicting orcid
+          drop / fd_inst_low(+fd_for_low)     / fd_compare -- fd_compare()'s own ejection rule
+          drop / below_top_score              / resolve    -- survived both gates, but didn't
+                                                                clear resolve()'s own accept bar
+                                                                (top score, or >=0.9)
+          keep / None                         / resolve    -- accepted by resolve()
+
+        Returns (accepted_oax_ids, provenance_rows)."""
+        rows: list[tuple] = []
+        survivors: list[tuple[str, float]] = []
+        for oax_id in cluster.oax_candidates:
+            author_idx = self._author_idx(oax_id)
+            wc, oax_orcid = info_by_id.get(author_idx, (0, None))
+
+            if cluster.orcids and self.orcid_veto(cluster.orcids[0], oax_orcid):
+                rows.append((cluster.cluster_id, oax_id, wc, "drop", "orcid_mismatch", "orcid_veto"))
                 continue
 
-            fd = self.fd_compare(c, top_oid)
+            fd = self.fd_compare(cluster, oax_id)
             if fd["eject"]:
-                self.record_provenance(c.cluster_id, top_oid, wc, "drop", fd["reason"], "fd_compare")
-                if fd["reason"] == "fd_inst_low":
-                    counts["fd_reject_inst_only"] += 1
-                elif fd["reason"] == "fd_for_low":
-                    counts["fd_reject_for_only"] += 1
-                else:
-                    counts["fd_reject_both"] += 1
+                rows.append((cluster.cluster_id, oax_id, wc, "drop", fd["reason"], "fd_compare"))
                 continue
 
-            self.record_provenance(c.cluster_id, top_oid, wc, "keep", None, "fd_compare")
-            counts["keep"] += 1
+            survivors.append((oax_id, fd["match_probability"] or 0.0))
 
-            if progress_every and (i + 1) % progress_every == 0:
-                print(f"  ...{i + 1}/{len(clusters)} processed", flush=True)
+        if not survivors:
+            return [], rows
+
+        top_score = max(s for _, s in survivors)
+        accepted = []
+        for oax_id, s in survivors:
+            wc, _ = info_by_id.get(self._author_idx(oax_id), (0, None))
+            if s == top_score or s >= 0.9:
+                rows.append((cluster.cluster_id, oax_id, wc, "keep", None, "resolve"))
+                accepted.append(oax_id)
+            else:
+                rows.append((cluster.cluster_id, oax_id, wc, "drop", "below_top_score", "resolve"))
+        return accepted, rows
+
+    def run_full_resolution_pass(self, clusters: list, progress_every: int = 1000,
+                                  flush_every: int = 5000) -> dict:
+        """Population-level driver for resolve_and_record() -- the actual apply-the-provenance-
+        table step (2026-09-12, user-directed: 'code up the provenance information... and start
+        to apply it'). Processes every ACIF's FULL candidate pool (not run_bulk_pass()'s
+        top-by-works-only shortcut).
+
+        2026-09-12 (user correction: 'you don't need duckdb to complete the transaction since
+        each row is separate' -- wrapping the loop in one BEGIN/COMMIT transaction, done in an
+        earlier pass, only removes per-statement auto-commit; it does nothing about each row
+        still being its own separately parsed/planned INSERT). Provenance rows are now
+        accumulated across `flush_every` clusters at a time and written via ONE
+        record_provenance_many() executemany() call per batch, not one execute() per candidate --
+        measured: 559.6s (original, one execute() per candidate, no transaction) -> 351.3s (the
+        fd_pair_cache fix alone) -> the batched-write version, see call site for the final number.
+        Still wrapped in one outer transaction (batched executemany() calls are themselves
+        auto-committing without it) -- correctness/resumability at the ACIF level is unaffected
+        either way, since nothing is durable until COMMIT regardless of how the writes inside it
+        are batched.
+
+        Skipped/resumed at the ACIF level (not per-candidate): an ACIF is skipped whole if ANY
+        of its candidates already carries a stage='resolve' row from a prior call -- re-running
+        resolve_and_record() on a partially-recorded ACIF would re-derive the same top_score
+        against a mix of old and new rows inconsistently. Returns per-ACIF outcome counts:
+        how many ACIFs resolved to exactly 1 candidate (the clean, common case), 2+ (fragment
+        merge -- multiple candidates cleared >=0.9), or 0 (every candidate vetoed/ejected)."""
+        info_by_id = self._fetch_candidate_info(clusters)
+        done_df = self.con.execute(
+            "SELECT DISTINCT cluster_id FROM oax_provenance WHERE stage = 'resolve'"
+        ).fetchdf()
+        done_clusters = set(done_df["cluster_id"])
+
+        counts = {"total": 0, "already_done": 0, "n_accepted_0": 0, "n_accepted_1": 0, "n_accepted_2plus": 0}
+        pending_rows: list[tuple] = []
+        self.con.execute("BEGIN TRANSACTION")
+        try:
+            for i, c in enumerate(clusters):
+                counts["total"] += 1
+                if c.cluster_id in done_clusters:
+                    counts["already_done"] += 1
+                    continue
+                accepted, rows = self.resolve_and_record(c, info_by_id)
+                pending_rows.extend(rows)
+                if len(accepted) == 0:
+                    counts["n_accepted_0"] += 1
+                elif len(accepted) == 1:
+                    counts["n_accepted_1"] += 1
+                else:
+                    counts["n_accepted_2plus"] += 1
+
+                if flush_every and len(pending_rows) >= flush_every:
+                    self.record_provenance_many(pending_rows)
+                    pending_rows = []
+
+                if progress_every and (i + 1) % progress_every == 0:
+                    print(f"  ...{i + 1}/{len(clusters)} processed", flush=True)
+            self.record_provenance_many(pending_rows)
+        finally:
+            self.con.execute("COMMIT")
         return counts
 
 
