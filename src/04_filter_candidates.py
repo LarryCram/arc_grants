@@ -139,6 +139,34 @@ class FilterCandidates:
             ).fetchall()
         }
 
+    def _fd_cache_stale(self, group: str, source_paths: list) -> bool:
+        """Real mtime-based staleness check for a group of cached tables ("oax" or "arc"),
+        mirroring src/utils/pipeline_freshness.py's own principle (a real filesystem mtime is
+        ground truth, same as `make`) -- not reused directly, since that module compares two
+        FILES' mtimes and these tables live as rows inside one shared oax_provenance.duckdb
+        file, not as their own standalone files. Stale if the group has never been built, or if
+        any declared source file's mtime is newer than this group's own last-built timestamp
+        (tracked in a small metadata table, _fd_cache_meta)."""
+        self.con.execute("""
+            CREATE TABLE IF NOT EXISTS _fd_cache_meta (
+                cache_group VARCHAR PRIMARY KEY, built_at TIMESTAMP
+            )
+        """)
+        row = self.con.execute(
+            "SELECT built_at FROM _fd_cache_meta WHERE cache_group = ?", [group]
+        ).fetchone()
+        if row is None:
+            return True
+        built_at = row[0]
+        newest_source = max(p.stat().st_mtime for p in source_paths if p.exists())
+        return newest_source > built_at.timestamp()
+
+    def _mark_fd_cache_fresh(self, group: str) -> None:
+        self.con.execute("""
+            INSERT INTO _fd_cache_meta VALUES (?, now())
+            ON CONFLICT (cache_group) DO UPDATE SET built_at = excluded.built_at
+        """, [group])
+
     def _ensure_fd_tables(self, force_rebuild_arc: bool = False,
                            force_rebuild_oax: bool = False) -> None:
         """Precomputed institution/subfield frequency-distribution tables, built once in bulk
@@ -148,70 +176,110 @@ class FilterCandidates:
               FOR2020-code union resolved through for_to_subfield).
           oax_institution_fd / oax_subfield_fd  -- one row per (author_idx, key), same
               definitions as oax_work_institution_counts()/oax_work_subfield_counts()
-              (work-count-weighted, COUNT(DISTINCT work_idx)), built over the FULL ~2.78M-author
-              HEP-context population -- not just today's arc_oax_links.parquet candidates --
-              because a future direct-orcid lookup (bypassing Splink's own blocking) could
-              surface an author never in today's candidate pool at all, and its FD needs to
-              already exist when that happens, not be computed on first use (2026-09-11,
-              user-directed).
+              (work-count-weighted, COUNT(DISTINCT work_idx)).
           fd_pair_scores -- one row per (arc_id, oax_id) in arc_oax_links.parquet, the actual
               histogram-intersection institution_score/subfield_score for that pair, computed
               via the SAME normalize-then-sum(LEAST(...)) logic as _hist_intersection() but as
-              one vectorized SQL join over every pair at once (182,759 pairs in ~1.3s) instead
-              of a Python loop -- verified to reproduce _hist_intersection()'s own live-computed
-              values exactly (spot-checked against DP0342529_LeoRadom's known
+              one vectorized SQL join over every pair at once instead of a Python loop --
+              verified to reproduce _hist_intersection()'s own live-computed values exactly
+              (spot-checked against DP0342529_LeoRadom's known
               institution_score=0.7055417700578991 / subfield_score=0.5167439464193715).
               NULL (not 0.0) on either axis when either side of that specific pair has zero FD
               rows at all -- same "absence isn't evidence" distinction _hist_intersection()
               already makes, preserved here rather than collapsed by the join.
 
-        2026-09-12: force_rebuild_arc and force_rebuild_oax are separate flags, deliberately --
-        oax_institution_fd/oax_subfield_fd are a pure property of OpenAlex authorship data
-        (authorships_hep.parquet/works_hep.parquet), untouched by an ARC-side rerun; a single
-        combined force_rebuild flag was found blanket-rebuilding both together after removing
-        ORCID enrichment, wastefully re-scanning the full ~2.78M-author population when only the
-        ARC-side tables + fd_pair_scores needed to change. force_rebuild_arc also forces
-        fd_pair_scores (it depends on both sides' normalized tables, so it's always rebuilt
-        whenever either half is force-rebuilt, using whichever oax_*_fd tables currently exist).
-        Each half rebuilt only when empty or its own force flag is set -- no automatic freshness
-        check yet, matching every other cache in this class."""
-        oax_n = self.con.execute("""
-            SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'oax_subfield_fd'
-        """).fetchone()[0]
-        rebuild_oax = force_rebuild_oax or oax_n == 0
-        if not rebuild_oax:
-            oax_n = self.con.execute("SELECT COUNT(*) FROM oax_subfield_fd").fetchone()[0]
-            rebuild_oax = oax_n == 0
+        2026-09-13 (user-directed review): oax_institution_fd/oax_subfield_fd used to be built
+        over the FULL ~2.78M-author HEP-context population (a 2026-09-11 decision, "a future
+        direct-orcid lookup bypassing Splink's own blocking could surface an author never in
+        today's candidate pool"). Measured directly: fd_pair_scores only ever references 149,311
+        distinct author_idx, out of 2.78-2.81M in the full-population tables -- 94.7% of the
+        single most expensive part of this whole build (a full scan of authorships_hep.parquet/
+        works_hep.parquet) was unused, for a future feature that was never built. Now scoped to
+        just the author_idx values appearing in arc_oax_links.parquet (via candidate_author_idx,
+        built from `pairs`, moved earlier in this function so the OAX tables can join against
+        it). If a genuine direct-orcid-lookup-bypassing-blocking feature is built later, this
+        scoping decision needs revisiting alongside it, not before.
 
-        arc_n = self.con.execute("""
-            SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'fd_pair_scores'
-        """).fetchone()[0]
-        rebuild_arc = force_rebuild_arc or rebuild_oax or arc_n == 0
-        if not rebuild_arc:
-            arc_n = self.con.execute("SELECT COUNT(*) FROM fd_pair_scores").fetchone()[0]
-            rebuild_arc = arc_n == 0
+        Freshness (2026-09-13, replaces the old "rebuild only if empty" check): a real mtime-based
+        staleness check (_fd_cache_stale(), mirroring pipeline_freshness.py's own principle --
+        cannot reuse that module directly, since its API compares two FILES' mtimes and these
+        tables live as rows inside one shared oax_provenance.duckdb file) against each group's own
+        declared source files -- authorships_hep.parquet/works_hep.parquet for "oax",
+        arc_oax_links.parquet/awards_cif_arc_only.parquet/grants_flat.parquet for "arc". Rebuilds
+        automatically when genuinely stale, not just when missing/empty -- force_rebuild_arc/
+        force_rebuild_oax still available to force a rebuild regardless (e.g. after editing this
+        class's own SQL). force_rebuild_arc also forces fd_pair_scores (it depends on both sides'
+        normalized tables, so it's always rebuilt whenever either half is force-rebuilt, using
+        whichever oax_*_fd tables currently exist)."""
+        oax_sources = [Path(AUTHORSHIPS_HEP), Path(WORKS_HEP)]
+        arc_sources = [Path(LINKS), Path(ARC_ONLY_PARQUET), Path(GRANTS_FLAT)]
+
+        rebuild_oax = force_rebuild_oax or self._fd_cache_stale("oax", oax_sources)
+        rebuild_arc = force_rebuild_arc or rebuild_oax or self._fd_cache_stale("arc", arc_sources)
 
         if not rebuild_oax and not rebuild_arc:
             return
+
+        # 2026-09-13: carry both sides' own orcid straight into fd_pair_scores, so a person
+        # exploring this table can see match_probability/FD scores AND the orcid_veto() inputs
+        # for the same pair without a separate join back to awards_cif_arc_only.parquet/
+        # authors/*.parquet each time. arc_orcid is the ACIF's own FIRST recorded orcid
+        # (list_extract(..., 1), matching score()'s own `cluster.orcids[0]` convention -- a
+        # MULTI_ORCID cluster's second+ orcid is still not used here, same known gap as score()
+        # itself); oax_orcid is the candidate's raw OpenAlex-recorded orcid (full URL form,
+        # unchanged/uncompared -- orcid_veto()'s own .endswith() logic still happens in Python,
+        # this table just persists the two raw values it operates on). works_count and
+        # n_candidates baked in too (user-directed: "will be even more efficient if the required
+        # columns... are made at create time rather than by joins") -- works_count is the
+        # candidate's own global authors/*.parquet figure (same source _fetch_candidate_info()
+        # uses), n_candidates is a genuine one-row-per-arc_id scalar (a real GROUP BY, not a
+        # window function joined back unreduced -- the latter produces an N x N blow-up per
+        # arc_id before any downstream DISTINCT/GROUP BY collapses it back down). Built here,
+        # BEFORE the FD tables (moved 2026-09-13), so oax_subfield_fd/oax_institution_fd can be
+        # scoped to just the author_idx values pairs actually references.
+        self.con.execute(f"""
+            CREATE OR REPLACE TEMP TABLE pairs AS
+            SELECT l.arc_id, l.oax_id, l.match_probability,
+                   TRY_CAST(regexp_extract(l.oax_id, 'A(\\d+)', 1) AS BIGINT) AS author_idx,
+                   list_extract(a.orcids, 1) AS arc_orcid,
+                   au.orcid AS oax_orcid,
+                   au.works_count AS works_count,
+                   au.display_name AS oax_author_name
+            FROM read_parquet('{LINKS}') l
+            LEFT JOIN read_parquet('{ARC_ONLY_PARQUET}') a ON a.cluster_id = l.arc_id
+            LEFT JOIN read_parquet('{AUTHORS}') au
+                ON au.author_idx = TRY_CAST(regexp_extract(l.oax_id, 'A(\\d+)', 1) AS BIGINT)
+        """)
+        self.con.execute("""
+            CREATE OR REPLACE TEMP TABLE arc_n_candidates AS
+            SELECT arc_id, COUNT(*) AS n_candidates FROM pairs GROUP BY arc_id
+        """)
+        self.con.execute("""
+            CREATE OR REPLACE TEMP TABLE candidate_author_idx AS
+            SELECT DISTINCT author_idx FROM pairs WHERE author_idx IS NOT NULL
+        """)
 
         if rebuild_oax:
             self.con.execute(f"""
                 CREATE OR REPLACE TABLE oax_subfield_fd AS
                 SELECT a.author_idx, w.subfield_name, COUNT(DISTINCT a.work_idx) AS n
                 FROM read_parquet('{AUTHORSHIPS_HEP}') a
+                JOIN candidate_author_idx c ON c.author_idx = a.author_idx
                 JOIN read_parquet('{WORKS_HEP}') w USING (work_idx)
                 WHERE w.subfield_name IS NOT NULL
                 GROUP BY a.author_idx, w.subfield_name
             """)
             self.con.execute(f"""
                 CREATE OR REPLACE TABLE oax_institution_fd AS
-                SELECT author_idx,
-                       'https://openalex.org/I' || institution_idx::VARCHAR AS institution_id,
-                       COUNT(DISTINCT work_idx) AS n
-                FROM read_parquet('{AUTHORSHIPS_HEP}')
-                WHERE institution_idx IS NOT NULL
-                GROUP BY author_idx, institution_idx
+                SELECT a.author_idx,
+                       'https://openalex.org/I' || a.institution_idx::VARCHAR AS institution_id,
+                       COUNT(DISTINCT a.work_idx) AS n
+                FROM read_parquet('{AUTHORSHIPS_HEP}') a
+                JOIN candidate_author_idx c ON c.author_idx = a.author_idx
+                WHERE a.institution_idx IS NOT NULL
+                GROUP BY a.author_idx, a.institution_idx
             """)
+            self._mark_fd_cache_fresh("oax")
 
         if not rebuild_arc:
             return
@@ -265,43 +333,6 @@ class FilterCandidates:
             SELECT author_idx, subfield_name, n * 1.0 / SUM(n) OVER (PARTITION BY author_idx) AS prop
             FROM oax_subfield_fd
         """)
-        # 2026-09-13 (user-directed): carry both sides' own orcid straight into fd_pair_scores,
-        # so a person exploring this table can see match_probability/FD scores AND the
-        # orcid_veto() inputs for the same pair without a separate join back to
-        # awards_cif_arc_only.parquet/authors/*.parquet each time. arc_orcid is the ACIF's own
-        # FIRST recorded orcid (list_extract(..., 1), matching score()'s own `cluster.orcids[0]`
-        # convention -- a MULTI_ORCID cluster's second+ orcid is still not used here, same known
-        # gap as score() itself); oax_orcid is the candidate's raw OpenAlex-recorded orcid
-        # (full URL form, unchanged/uncompared -- orcid_veto()'s own .endswith() logic still
-        # happens in Python, this table just persists the two raw values it operates on).
-        # 2026-09-13: works_count and n_candidates baked in here too (user-directed: "will be
-        # even more efficient if the required columns... are made at create time rather than by
-        # joins") -- works_count is the candidate's own global authors/*.parquet figure (same
-        # source _fetch_candidate_info() uses), n_candidates is a genuine one-row-per-arc_id
-        # scalar (a real GROUP BY, not a window function joined back unreduced -- the latter
-        # produces an N x N blow-up per arc_id before any downstream DISTINCT/GROUP BY collapses
-        # it back down, confirmed a real cost on large candidate pools). With both columns
-        # resident on fd_pair_scores itself, a caller can express the whole orcid_veto()/
-        # fd_compare() decision as one flat, self-contained SQL query over this single table --
-        # no join to oax_provenance (which would also be this class's own possibly-stale prior
-        # output, a real circularity risk) or to authors/*.parquet needed at query time at all.
-        self.con.execute(f"""
-            CREATE OR REPLACE TEMP TABLE pairs AS
-            SELECT l.arc_id, l.oax_id, l.match_probability,
-                   TRY_CAST(regexp_extract(l.oax_id, 'A(\\d+)', 1) AS BIGINT) AS author_idx,
-                   list_extract(a.orcids, 1) AS arc_orcid,
-                   au.orcid AS oax_orcid,
-                   au.works_count AS works_count,
-                   au.display_name AS oax_author_name
-            FROM read_parquet('{LINKS}') l
-            LEFT JOIN read_parquet('{ARC_ONLY_PARQUET}') a ON a.cluster_id = l.arc_id
-            LEFT JOIN read_parquet('{AUTHORS}') au
-                ON au.author_idx = TRY_CAST(regexp_extract(l.oax_id, 'A(\\d+)', 1) AS BIGINT)
-        """)
-        self.con.execute("""
-            CREATE OR REPLACE TEMP TABLE arc_n_candidates AS
-            SELECT arc_id, COUNT(*) AS n_candidates FROM pairs GROUP BY arc_id
-        """)
         self.con.execute("""
             CREATE OR REPLACE TABLE fd_pair_scores AS
             WITH inst_overlap AS (
@@ -336,6 +367,7 @@ class FilterCandidates:
             LEFT JOIN inst_overlap io ON io.arc_id = p.arc_id AND io.oax_id = p.oax_id
             LEFT JOIN sf_overlap sfo ON sfo.arc_id = p.arc_id AND sfo.oax_id = p.oax_id
         """)
+        self._mark_fd_cache_fresh("arc")
 
     def _ensure_provenance_table(self) -> None:
         """oax_provenance: one row per (cluster_id, oax_id) -- the filter's own keep/drop/

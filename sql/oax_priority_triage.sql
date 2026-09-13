@@ -3,9 +3,12 @@
 -- _ensure_fd_tables() was extended to bake works_count/n_candidates/arc_orcid/oax_orcid
 -- directly into fd_pair_scores at build time -- see that function's own comments for why.
 --
--- Default mode (as written): only the accepted ("Match likely") pairs, one row per candidate.
--- QA/audit mode: comment out or delete the final WHERE line to see all four priority tiers,
--- including everything orcid_veto()/fd_compare() would drop and why.
+-- Persists the FULL 4-tier result (not just the accepted "Match likely" tier) as a real
+-- table, data.oax_priority_triage, inside oax_provenance.duckdb -- so downstream code/review
+-- can read it directly instead of re-running this query every time. 183,187 rows at last
+-- build: priority 0 (orcid unequal) 40,813 / 1 (match_probability<0.9) 47,331 /
+-- 2 (inst+subfield<0.7) 63,865 / 3 (Match likely) 31,178.
+-- To get just the accepted pairs: SELECT * FROM data.oax_priority_triage WHERE priority_level = 3.
 --
 -- Corrections vs. the original draft:
 --   1. Removed the join to data.oax_provenance entirely -- it joined on oax_id alone, which is
@@ -29,6 +32,7 @@
 
 ATTACH IF NOT EXISTS '/home/lc/k/WORKING_ARC_PROJECT/processed/oax_provenance.duckdb' AS data;
 
+CREATE OR REPLACE TABLE data.oax_priority_triage AS
 SELECT
     arc_id,
     oax_id,
@@ -44,6 +48,8 @@ SELECT
     CASE
         WHEN arc_orcid IS NOT NULL AND oax_orcid IS NOT NULL
              AND NOT ends_with(oax_orcid, arc_orcid) THEN 0
+        WHEN arc_orcid IS NOT NULL AND oax_orcid IS NOT NULL
+             AND ends_with(oax_orcid, arc_orcid) THEN 3
         WHEN match_probability < 0.9 THEN 1
         WHEN COALESCE(institution_score, 0) + COALESCE(subfield_score, 0) < 0.7 THEN 2
         ELSE 3
@@ -51,10 +57,15 @@ SELECT
     CASE
         WHEN arc_orcid IS NOT NULL AND oax_orcid IS NOT NULL
              AND NOT ends_with(oax_orcid, arc_orcid) THEN 'orcid unequal'
+        WHEN arc_orcid IS NOT NULL AND oax_orcid IS NOT NULL
+             AND ends_with(oax_orcid, arc_orcid) THEN 'orcid confirmed match'
         WHEN match_probability < 0.9 THEN 'Match Prob < 0.9'
         WHEN COALESCE(institution_score, 0) + COALESCE(subfield_score, 0) < 0.7 THEN 'Inst + Subfield < 0.7'
         ELSE 'Match likely'
     END AS reason
-FROM data.fd_pair_scores
-WHERE priority_level = 3   -- comment out for the full QA/audit view (all 4 tiers)
-ORDER BY n_candidates DESC, works_count, arc_id, total_score DESC, match_probability DESC;
+FROM data.fd_pair_scores;
+
+-- Example reads (not run by this file):
+--   SELECT * FROM data.oax_priority_triage WHERE priority_level = 3
+--     ORDER BY n_candidates DESC, works_count, arc_id, total_score DESC, match_probability DESC;
+--   SELECT priority_level, reason, COUNT(*) FROM data.oax_priority_triage GROUP BY 1, 2 ORDER BY 1;
