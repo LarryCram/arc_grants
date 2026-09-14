@@ -325,9 +325,16 @@ def main():
                 GROUP BY author_idx
               )
             SELECT
-              'https://openalex.org/A' || sf.author_idx::VARCHAR  AS unique_id,
-              au.display_name                                       AS full_name,
-              au.display_name_alternatives,
+              sf.author_idx                                         AS author_idx,
+              au.display_name                                       AS author_name,
+              COALESCE(au.full_name, au.display_name)               AS full_name,
+              CASE
+                WHEN au.full_name IS NULL THEN au.display_name_alternatives
+                WHEN au.display_name_alternatives IS NULL THEN [au.full_name]
+                WHEN list_contains(au.display_name_alternatives, au.full_name)
+                  THEN au.display_name_alternatives
+                ELSE list_append(au.display_name_alternatives, au.full_name)
+              END                                                    AS display_name_alternatives,
               replace(au.orcid, 'https://orcid.org/', '')          AS orcid,
               COALESCE(ia.inst_ids, [])                            AS inst_ids,
               list_transform(au.topics, x -> x.display_name)       AS topic_names,
@@ -356,9 +363,10 @@ def main():
         COPY (
             WITH base AS (
                 SELECT
-                    unique_id,
+                    author_idx,
+                    author_name,
                     full_name,
-                    oax_names(full_name, display_name_alternatives) AS parsed,
+                    oax_names(author_name, display_name_alternatives) AS parsed,
                     orcid,
                     inst_ids,
                     topic_names,
@@ -368,7 +376,8 @@ def main():
                 FROM '{out_hep}'
             )
             SELECT
-                unique_id,
+                author_idx,
+                author_name,
                 full_name,
                 parsed.first_names                                          AS first_names,
                 list_filter(parsed.first_names, x -> len(x) = 1)           AS first_initials,

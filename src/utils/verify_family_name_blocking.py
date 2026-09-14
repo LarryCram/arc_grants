@@ -187,7 +187,10 @@ def empirical_mismatch_check(verbose: bool = True) -> dict:
     # first-seen, reproducing the exact bug being fixed rather than measuring it being fixed.
     # Reading the actual persisted column is what makes this a real regression check.
     arc_fnm = persons.set_index("cluster_id")["family_name_main"]
-    oax_fnm = oax.set_index("unique_id")["family_name_main"]
+    oax_fnm = (
+        oax.assign(oax_id="https://openalex.org/A" + oax["author_idx"].astype(str))
+        .set_index("oax_id")["family_name_main"]
+    )
 
     rows = []
     for _, r in orcid_resolved.iterrows():

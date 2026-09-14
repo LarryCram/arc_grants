@@ -903,20 +903,22 @@ class FilterCandidates:
                            oax_ids_sorted_by_works_desc: list[str], works_by_id: dict) -> None:
         oid_list = ",".join(f"'{o}'" for o in oax_ids_sorted_by_works_desc)
         df = self.con.execute(f"""
-            SELECT unique_id, full_name, full_name_keys, orcid, inst_ids,
+            SELECT author_idx, full_name, full_name_keys, orcid, inst_ids,
                    subfield_names, first_name, family_name_main
-            FROM read_parquet('{OAX_PREP}') WHERE unique_id IN ({oid_list})
+            FROM read_parquet('{OAX_PREP}')
+            WHERE 'https://openalex.org/A' || author_idx::VARCHAR IN ({oid_list})
         """).fetchdf()
-        df = df.set_index("unique_id").loc[oax_ids_sorted_by_works_desc].reset_index()
+        df["oax_id"] = "https://openalex.org/A" + df["author_idx"].astype(str)
+        df = df.set_index("oax_id").loc[oax_ids_sorted_by_works_desc].reset_index()
         # Computed once -- doesn't vary per candidate, only the OAX side does.
         arc_inst = self.admin_org_counts(grant_ids)
         arc_sf = self.subfield_counts(grant_ids)
         print()
         print("=== 3. OAX (sorted by works_count desc) ===")
         for _, r in df.iterrows():
-            aidx = self._author_idx(r["unique_id"])
+            aidx = r["author_idx"]
             hep_wc = self.oax_work_count(aidx)
-            print(f"  -- {r['unique_id']} (HEP-context works_count={hep_wc}  "
+            print(f"  -- {r['oax_id']} (HEP-context works_count={hep_wc}  "
                   f"[global: {works_by_id[aidx]}]) --")
             print("     full_name (singular):", repr(r["full_name"]))
             print("     full_name_keys:      ", list(r["full_name_keys"]))
@@ -928,7 +930,7 @@ class FilterCandidates:
             print("     first_name:", r["first_name"], "| family_name_main:", r["family_name_main"])
             inst_score = self._hist_intersection(arc_inst, inst_fd)
             sf_score = self._hist_intersection(arc_sf, sf_fd)
-            match_prob = self._match_probability(cluster_id, r["unique_id"])
+            match_prob = self._match_probability(cluster_id, r["oax_id"])
             fd_max = max(inst_score or 0.0, sf_score or 0.0)
             eject = (match_prob or 0.0) < 0.9 and fd_max < 0.8
             def _sig3(x):

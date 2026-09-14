@@ -72,7 +72,7 @@ def main(test: bool = False):
         print(f"[TEST] Limited to {deferred['arc_id'].nunique()} arc_ids")
 
     arc_by_id = {r["cluster_id"]: r for _, r in arc.iterrows()}
-    oax_by_id = {r["unique_id"]:  r for _, r in oax_prep.iterrows()}
+    oax_by_id = {f"https://openalex.org/A{r['author_idx']}": r for _, r in oax_prep.iterrows()}
 
     # -- 1. Collect ORCIDs to fetch --
     orcids_needed = set()

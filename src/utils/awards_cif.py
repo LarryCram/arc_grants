@@ -1974,12 +1974,14 @@ def dedup_oax_candidates(
         con.execute("SET enable_progress_bar = false")
         con.execute("CREATE OR REPLACE TEMP TABLE _cand_ids AS SELECT UNNEST(?) AS oax_id", [all_oax_ids])
         rows = con.execute(f"""
-            SELECT o.unique_id, o.orcid, o.topic_names, o.full_name_keys
+            SELECT o.author_idx, o.orcid, o.topic_names, o.full_name_keys
             FROM read_parquet('{PROCESSED_DATA}/openalex_authors_prep.parquet') o
-            JOIN _cand_ids c ON c.oax_id = o.unique_id
+            JOIN _cand_ids c
+              ON TRY_CAST(regexp_replace(c.oax_id, 'https://openalex.org/A', '') AS BIGINT) = o.author_idx
         """).fetchall()
         oax_orcid, oax_topics, oax_full_name_keys = {}, {}, {}
-        for uid, orcid, topics, full_name_keys in rows:
+        for author_idx, orcid, topics, full_name_keys in rows:
+            uid = f"https://openalex.org/A{author_idx}"
             oax_orcid[uid] = orcid
             oax_topics[uid] = list(topics) if topics is not None else []
             oax_full_name_keys[uid] = list(full_name_keys) if full_name_keys is not None else []

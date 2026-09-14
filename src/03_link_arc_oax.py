@@ -205,7 +205,7 @@ def _prep_oax(con: duckdb.DuckDBPyConnection, path: Path) -> pd.DataFrame:
     # legitimate evidence -- the case where ARC's own spelling only ever shows up in an author's
     # alternatives, not their current curated display_name.
     df = con.execute(f"""
-        SELECT unique_id, orcid, family_name_main, family_names,
+        SELECT author_idx, orcid, family_name_main, family_names,
                first_name, middle_name, first_compound, first_initial, middle_initial,
                first_names,
                inst_ids
@@ -222,12 +222,17 @@ def _prep_oax(con: duckdb.DuckDBPyConnection, path: Path) -> pd.DataFrame:
         lambda x: [t for t in x if len(t) > 1] if x is not None else []
     )
 
+    # Splink stacks df_arc/df_oax and needs one consistently-typed unique_id column across both --
+    # ARC's own unique_id (cluster_id) is a string, so author_idx (native int) is stringified here
+    # rather than left as int64, even though it's reconstructed back to int right after prediction
+    # (main()'s links["oax_id"] construction) for the URL-string form everything downstream expects.
+    df["author_idx"] = df["author_idx"].astype(str)
     return df[[
-        "unique_id", "family_name_main", "family_names",
+        "author_idx", "family_name_main", "family_names",
         "first_name", "middle_name", "first_compound", "first_initial", "middle_initial",
         "first_names_multichar",
         "full_name_key", "orcid", "inst_arr",
-    ]]
+    ]].rename(columns={"author_idx": "unique_id"})
 
 
 def main():
@@ -450,8 +455,15 @@ def main():
         df_pred.as_pandas_dataframe()
         [["unique_id_l", "unique_id_r", "match_probability"]]
         .rename(columns={"unique_id_l": "arc_id", "unique_id_r": "oax_id"})
-        .sort_values(["arc_id", "match_probability"], ascending=[True, False])
     )
+    # oax_id stays a URL string at this output boundary (arc_oax_links.parquet, and everything
+    # downstream: awards_cif.py, oeuvre_build.py, manual_resolutions.csv/manual_merges.csv, ...)
+    # even though the OAX-side unique_id column feeding Splink is now the native author_idx int
+    # (see _prep_oax()) -- reconstructed here, not carried as an int, per this project's own
+    # documented convention that the string form is the correct one at a human-facing/output
+    # boundary (see CLAUDE.md's OpenAlex Snapshot Migration notes).
+    links["oax_id"] = "https://openalex.org/A" + links["oax_id"].astype("int64").astype(str)
+    links = links.sort_values(["arc_id", "match_probability"], ascending=[True, False])
     links["high_confidence"] = links["match_probability"] >= LINK_THRESHOLD
 
     # Force-add ORCID-exact-match pairs missed by predict (corrupted OAX name fields
@@ -466,6 +478,7 @@ def main():
         .rename(columns={"unique_id_arc": "arc_id", "unique_id_oax": "oax_id"})
         [["arc_id", "oax_id"]]
     )
+    orcid_pairs["oax_id"] = "https://openalex.org/A" + orcid_pairs["oax_id"].astype("int64").astype(str)
     existing = set(zip(links["arc_id"], links["oax_id"]))
     forced = orcid_pairs[
         ~orcid_pairs.apply(lambda r: (r["arc_id"], r["oax_id"]) in existing, axis=1)
