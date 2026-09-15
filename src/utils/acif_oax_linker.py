@@ -162,6 +162,10 @@ class AcifOaxLinker:
         d["dropped_by_rarity_gate"] = self.con.execute(
             "SELECT COUNT(*) FROM data.blk_bare_initial_dropped"
         ).fetchone()[0]
+        orcid_rows = self.con.execute(
+            "SELECT orcid_check, COUNT(*) FROM data.blk_candidate_pairs GROUP BY 1 ORDER BY 1"
+        ).fetchall()
+        d["orcid_check_counts"] = dict(orcid_rows)
 
         print("=== AcifOaxLinker.block() diagnostics ===")
         for reason, n in rows:
@@ -169,6 +173,9 @@ class AcifOaxLinker:
         print(f"  {'TOTAL':<16} {d['total_pairs']:>10,}")
         print(f"  ACIFs covered:          {d['acifs_covered']:,} / {len(self.arc):,}")
         print(f"  dropped by rarity gate: {d['dropped_by_rarity_gate']:,}")
+        print("  orcid_check:")
+        for check, n in orcid_rows:
+            print(f"    {check:<10} {n:>10,}")
         return d
 
     def fd_score(self) -> None:

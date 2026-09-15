@@ -55,7 +55,7 @@ import duckdb
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from config.settings import PROCESSED_DATA, OAX_AUTHORS
+from config.settings import PROCESSED_DATA
 from src.utils.for_resolve import for2020_group_name, oax_subfield_name
 from src.utils.awards_cif import (
     load_awards_cif,
@@ -69,7 +69,6 @@ from src.utils.awards_cif import (
 OAX_PREP = PROCESSED_DATA / "openalex_authors_prep.parquet"
 LINKS = PROCESSED_DATA / "arc_oax_links.parquet"
 GRANTS_FLAT = PROCESSED_DATA / "grants_flat.parquet"
-AUTHORS = f"{OAX_AUTHORS}/*.parquet"
 AUTHORSHIPS_HEP = PROCESSED_DATA / "authorships_hep.parquet"
 WORKS_HEP = PROCESSED_DATA / "works_hep.parquet"
 
@@ -229,15 +228,17 @@ class FilterCandidates:
         # genuine, unresolved conflict, not a lower-priority alternative, so truncating to one
         # entry could both wrongly veto a candidate matching a later entry and wrongly pass one
         # only coincidentally matching the first -- see orcid_veto()'s own docstring).
-        # sql/oax_priority_triage.sql reads this array with a list_filter/ends_with check, not a
-        # scalar comparison, to match. oax_orcid is the candidate's raw OpenAlex-recorded orcid
-        # (full URL form, unchanged/uncompared -- orcid_veto()'s own .endswith() logic still
-        # happens in Python, this table just persists the two raw values it operates on).
+        # sql/oax_priority_triage.sql reads this array with a list_filter check, not a
+        # scalar comparison, to match. oax_orcid is the candidate's own OpenAlex-recorded orcid,
+        # read from openalex_authors_prep.parquet (2026-09-15, was the raw authors/*.parquet
+        # dimension table) -- 00b_extract_oax.py's own Phase 1 already strips the
+        # "https://orcid.org/" prefix when building that file, so both sides here are bare and
+        # orcid_veto()'s own comparison is now plain equality, not .endswith().
         # works_count and n_candidates baked in too (user-directed: "will be even more efficient
         # if the required
         # columns... are made at create time rather than by joins") -- works_count is the
-        # candidate's own global authors/*.parquet figure (same source _fetch_candidate_info()
-        # uses), n_candidates is a genuine one-row-per-arc_id scalar (a real GROUP BY, not a
+        # candidate's own global openalex_authors_prep.parquet figure (same source
+        # _fetch_candidate_info() uses), n_candidates is a genuine one-row-per-arc_id scalar (a real GROUP BY, not a
         # window function joined back unreduced -- the latter produces an N x N blow-up per
         # arc_id before any downstream DISTINCT/GROUP BY collapses it back down). Built here,
         # BEFORE the FD tables (moved 2026-09-13), so oax_subfield_fd/oax_institution_fd can be
@@ -249,10 +250,10 @@ class FilterCandidates:
                    a.orcids AS arc_orcid,
                    au.orcid AS oax_orcid,
                    au.works_count AS works_count,
-                   au.display_name AS oax_author_name
+                   au.author_name AS oax_author_name
             FROM read_parquet('{LINKS}') l
             LEFT JOIN read_parquet('{ARC_ONLY_PARQUET}') a ON a.cluster_id = l.arc_id
-            LEFT JOIN read_parquet('{AUTHORS}') au
+            LEFT JOIN read_parquet('{OAX_PREP}') au
                 ON au.author_idx = TRY_CAST(regexp_extract(l.oax_id, 'A(\\d+)', 1) AS BIGINT)
         """)
         self.con.execute("""
@@ -688,12 +689,13 @@ class FilterCandidates:
 
     def orcid_veto(self, arc_orcids: list[str] | str | None, oax_orcid: str | None) -> bool:
         """True if this candidate must be rejected outright: the ACIF has >=1 recorded ORCID,
-        OAX has a recorded ORCID, and it matches NONE of the ACIF's own. OpenAlex's own orcid
-        field is a full URL ("https://orcid.org/0000-...") while ARC's is bare -- compare via
-        .endswith(), the same fix already applied elsewhere in this project (channel_piles(),
-        oeuvre_build.py's Stage 3 ORCID gate, test2_orcid_top_candidate_rates() above) for this
-        exact mismatch. A null on either side is NOT a veto -- absence of evidence isn't
-        evidence of a different person, only a genuine, confirmed mismatch is.
+        OAX has a recorded ORCID, and it matches NONE of the ACIF's own. Both sides are bare
+        (no "https://orcid.org/" prefix) -- ARC's own has always been, and OAX's own is stripped
+        early, once, in 00b_extract_oax.py's Phase 1 (`replace(au.orcid, 'https://orcid.org/',
+        '') AS orcid`, feeding openalex_authors_prep.parquet), confirmed directly against real
+        data (2026-09-15) rather than assumed -- so plain equality is correct here, not
+        .endswith(). A null on either side is NOT a veto -- absence of evidence isn't evidence of
+        a different person, only a genuine, confirmed mismatch is.
 
         2026-09-15 fix: takes the ACIF's WHOLE orcids list now, not just orcids[0] -- there was
         no principled reason to prefer the first entry specifically. A cluster only ever has
@@ -710,7 +712,7 @@ class FilterCandidates:
         if not arc_orcids or oax_orcid is None or (isinstance(oax_orcid, float) and pd.isna(oax_orcid)):
             return False
         oax = str(oax_orcid)
-        return not any(oax.endswith(str(a)) for a in arc_orcids)
+        return not any(oax == str(a) for a in arc_orcids)
 
     @staticmethod
     def _hist_intersection(a: Counter, b: Counter) -> float | None:
@@ -838,11 +840,11 @@ class FilterCandidates:
         }
 
     def _oax_orcid(self, author_idx: int) -> str | None:
-        """This candidate's own OpenAlex-recorded orcid (full URL form, e.g.
-        'https://orcid.org/0000-...') -- the value orcid_veto() compares the ACIF's own orcid
-        against."""
+        """This candidate's own OpenAlex-recorded orcid, already bare (00b_extract_oax.py strips
+        the "https://orcid.org/" prefix once, early, building openalex_authors_prep.parquet) --
+        the value orcid_veto() compares the ACIF's own orcid against."""
         row = self.con.execute(
-            f"SELECT orcid FROM read_parquet('{AUTHORS}') WHERE author_idx = ?", [author_idx]
+            f"SELECT orcid FROM read_parquet('{OAX_PREP}') WHERE author_idx = ?", [author_idx]
         ).fetchone()
         return row[0] if row else None
 
@@ -1020,7 +1022,7 @@ class FilterCandidates:
         print(f"\n[{n_candidates}-candidate clusters] {len(cand):,} total. Fetching works_count for their OAX ids...")
         all_idx = sorted({self._author_idx(idx) for c in cand for idx in c.oax_candidates})
         idx_sql = ",".join(str(i) for i in all_idx)
-        wc_df = self.con.execute(f"SELECT author_idx, works_count FROM read_parquet('{AUTHORS}') WHERE author_idx IN ({idx_sql})").fetchdf()
+        wc_df = self.con.execute(f"SELECT author_idx, works_count FROM read_parquet('{OAX_PREP}') WHERE author_idx IN ({idx_sql})").fetchdf()
         works_by_id = {row.author_idx: row.works_count for row in wc_df.itertuples()}
 
         scored = []
@@ -1037,13 +1039,14 @@ class FilterCandidates:
 
     def _fetch_candidate_info(self, clusters: list) -> dict[int, tuple]:
         """author_idx -> (works_count, orcid) for every OAX candidate across the given ACIFs,
-        one batched query against the raw OpenAlex authors table. Shared by test2/test3/
-        test1-ordering so each doesn't re-derive its own copy of this lookup."""
+        one batched query against openalex_authors_prep.parquet (orcid already bare -- see
+        orcid_veto()'s own docstring). Shared by test2/test3/test1-ordering so each doesn't
+        re-derive its own copy of this lookup."""
         all_idx = sorted({self._author_idx(idx) for c in clusters for idx in c.oax_candidates})
         idx_sql = ",".join(str(i) for i in all_idx)
         df = self.con.execute(f"""
             SELECT author_idx, works_count, orcid
-            FROM read_parquet('{AUTHORS}') WHERE author_idx IN ({idx_sql})
+            FROM read_parquet('{OAX_PREP}') WHERE author_idx IN ({idx_sql})
         """).fetchdf()
         return {row.author_idx: (row.works_count, row.orcid) for row in df.itertuples()}
 
@@ -1089,7 +1092,7 @@ class FilterCandidates:
         _, oax_orcid = info_by_id.get(self._author_idx(top_oid), (0, None))
         if pd.isna(oax_orcid):
             return "null"
-        return "match" if any(str(oax_orcid).endswith(o) for o in c.orcids) else "mismatch"
+        return "match" if any(str(oax_orcid) == o for o in c.orcids) else "mismatch"
 
     def test2_orcid_top_candidate_rates(self, by_size: dict[int, list]) -> dict:
         """design 04_ filter.md test 2: for every ACIF with >=1 deduped OAX candidate AND a

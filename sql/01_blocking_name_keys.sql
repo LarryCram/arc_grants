@@ -129,7 +129,7 @@ SELECT arc_id, author_idx FROM bare_initial_only_pairs;
 --    strongest, name-independent signal) is distinguishable from 'name_key_only' and from
 --    pairs found both ways. ─────────────────────────────────────────────────────────────────
 
-CREATE OR REPLACE TABLE data.blk_candidate_pairs AS
+CREATE OR REPLACE TEMP TABLE candidate_pairs_raw AS
 SELECT
     arc_id,
     author_idx,
@@ -141,8 +141,39 @@ SELECT
 FROM name_key_pairs n
 FULL OUTER JOIN orcid_pairs o USING (arc_id, author_idx);
 
+-- ── Stage 6: orcid_check -- an ARC-recorded orcid vs. a given OAX candidate's own orcid,
+--    each a genuine scalar (an ACIF has NULL or exactly one orcid; an OAX author_idx has NULL
+--    or exactly one orcid), not the "any of a list" question orcid_veto()/orcid_any_match()
+--    answer elsewhere. Both sides are already bare (no "https://orcid.org/" prefix) -- ARC's
+--    own orcid always has been, and oax_name_keys.orcid is built by 00b_extract_oax.py's Phase 1
+--    (`replace(au.orcid, 'https://orcid.org/', '') AS orcid`) -- confirmed directly against real
+--    data (2026-09-15), not assumed -- so a plain equality is correct here, no ends_with() needed.
+--    'unknown' when either side has nothing to compare (absence is not a mismatch); collapsing
+--    arc_orcid_scalar to one row per acif_id (arbitrary pick on the rare MULTI_ORCID conflict
+--    case) rather than joining its raw multi-row form, which would fan out candidate_pairs_raw. ---
+
+CREATE OR REPLACE TEMP TABLE arc_orcid_check AS
+SELECT acif_id AS arc_id, min(orcid) AS orcid
+FROM arc_orcid_scalar
+GROUP BY acif_id;
+
+CREATE OR REPLACE TABLE data.blk_candidate_pairs AS
+SELECT
+    p.arc_id,
+    p.author_idx,
+    p.match_reason,
+    CASE
+        WHEN a.orcid IS NULL OR o.orcid IS NULL THEN 'unknown'
+        WHEN a.orcid = o.orcid THEN 'match'
+        ELSE 'mismatch'
+    END AS orcid_check
+FROM candidate_pairs_raw p
+LEFT JOIN arc_orcid_check a ON a.arc_id = p.arc_id
+LEFT JOIN oax_orcid_scalar o ON o.author_idx = p.author_idx;
+
 -- Example reads (not run by this file):
 --   SELECT match_reason, COUNT(*) FROM data.blk_candidate_pairs GROUP BY 1 ORDER BY 1;
+--   SELECT orcid_check, COUNT(*) FROM data.blk_candidate_pairs GROUP BY 1 ORDER BY 1;
 --   SELECT COUNT(DISTINCT arc_id) FROM data.blk_candidate_pairs;
 --   SELECT * FROM data.blk_candidate_pairs WHERE arc_id = 'DP0989027_AndrewKillcross';
 --   SELECT COUNT(*) FROM data.blk_bare_initial_dropped;  -- pairs the rarity gate removed

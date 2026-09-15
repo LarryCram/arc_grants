@@ -23,9 +23,13 @@
 --      GROUP BY ALL collapsed it back down (quadratic in candidate-pool size, a real cost on
 --      large pools).
 --   3. oax_orcid[19:] (a hardcoded 18-character offset into "https://orcid.org/...") replaced
---      with ends_with(oax_orcid, arc_orcid) -- robust to any prefix format, not just this one
---      exact string, and handles NULL on either side the same way orcid_veto() already does
---      (absence is not a mismatch).
+--      with ends_with(oax_orcid, arc_orcid), later replaced again (2026-09-15) with plain
+--      equality once fd_pair_scores' own oax_orcid started coming from
+--      openalex_authors_prep.parquet (00b_extract_oax.py's Phase 1 strips the
+--      "https://orcid.org/" prefix there, confirmed against real data) instead of the raw
+--      OpenAlex authors dimension table -- both sides are bare now, so no prefix-robust
+--      comparison is needed. Handles NULL on either side the same way orcid_veto() already
+--      does (absence is not a mismatch).
 --   4. No more SELECT DISTINCT / GROUP BY ALL -- with no joins left, fd_pair_scores already has
 --      exactly one row per (arc_id, oax_id); those were only ever compensating for bug #1/#2's
 --      row multiplication.
@@ -39,7 +43,7 @@
 
 CREATE OR REPLACE MACRO has_arc_orcid(arc_orcid) AS arc_orcid IS NOT NULL AND len(arc_orcid) > 0;
 CREATE OR REPLACE MACRO orcid_any_match(oax_orcid, arc_orcid) AS
-    len(list_filter(arc_orcid, x -> ends_with(oax_orcid, x))) > 0;
+    len(list_filter(arc_orcid, x -> oax_orcid = x)) > 0;
 
 ATTACH IF NOT EXISTS '/home/lc/k/WORKING_ARC_PROJECT/processed/oax_provenance.duckdb' AS data;
 

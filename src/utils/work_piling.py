@@ -420,7 +420,11 @@ def cluster_piles_agglomerative(distance_matrix: np.ndarray, distance_threshold:
 
 def fetch_candidate_orcids(cluster_ids: list[str], con: duckdb.DuckDBPyConnection | None = None) -> dict[int, str]:
     """author_idx -> own OpenAlex orcid (or None), for every candidate across the given
-    cluster_ids. Used by channel_piles()'s ORCID-first check."""
+    cluster_ids. Used by channel_piles()'s ORCID-first check. Reads openalex_authors_prep.parquet
+    (author_idx-keyed, orcid already stripped of its "https://orcid.org/" prefix by
+    00b_extract_oax.py's own Phase 1), not the raw OpenAlex authors dimension table -- so the
+    caller's own substring check (`o in candidate_orcid[a]`) is now comparing two bare strings,
+    not working around a prefix mismatch."""
     own_con = con is None
     con = con or duckdb.connect()
     try:
@@ -429,7 +433,8 @@ def fetch_candidate_orcids(cluster_ids: list[str], con: duckdb.DuckDBPyConnectio
             SELECT DISTINCT a.author_idx, a.orcid
             FROM read_parquet('{PROCESSED_DATA}/awards_cif.parquet') c,
                  UNNEST(c.oax_candidates) AS t(url)
-            JOIN read_parquet('{OPENALEX_DIR}/authors/*.parquet') a ON a.ids.openalex = t.url
+            JOIN read_parquet('{PROCESSED_DATA}/openalex_authors_prep.parquet') a
+                ON a.author_idx = TRY_CAST(regexp_extract(t.url, 'A(\\d+)', 1) AS BIGINT)
             WHERE c.cluster_id IN ({ids_sql})
         """).fetchdf()
         return dict(zip(df["author_idx"], df["orcid"]))
@@ -529,7 +534,7 @@ def channel_piles(
             pile_hep.update(work_hep.get(w, set()))
 
         orcid_match = any(
-            isinstance(candidate_orcid.get(a), str) and any(o in candidate_orcid[a] for o in arc_orcids)
+            candidate_orcid.get(a) in arc_orcids and candidate_orcid.get(a) is not None
             for a in pile_authors
         )
         hep_match = bool(acif_hep_codes & pile_hep)

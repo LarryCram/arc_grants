@@ -744,15 +744,18 @@ def apply_field_filter_stage3(
         con.execute("CREATE OR REPLACE TEMP TABLE _arc_orcids (cluster_id VARCHAR, orcid VARCHAR)")
         if arc_orcid_rows:
             con.executemany("INSERT INTO _arc_orcids VALUES (?, ?)", arc_orcid_rows)
-        # contains(), not exact equality -- OpenAlex's own orcid field is a full URL
-        # ("https://orcid.org/0000-..."), ARC's own orcids are bare -- same mismatch, same fix
-        # already used in work_piling.py's channel_piles().
+        # Plain equality, not contains() -- 00b_extract_oax.py strips the "https://orcid.org/"
+        # prefix once, early, when building openalex_authors_prep.parquet (its own Phase 1:
+        # `replace(au.orcid, 'https://orcid.org/', '') AS orcid`), so both sides here are
+        # already bare. Reading openalex_authors_prep.parquet (author_idx-keyed) rather than the
+        # raw OpenAlex authors dimension table also drops the need for a ids.openalex URL join.
         con.execute(f"""
             CREATE OR REPLACE TEMP TABLE _orcid_exempt_authors AS
             SELECT DISTINCT g.cluster_id, a.author_idx
             FROM _orcid_gate_candidates g
-            JOIN read_parquet('{OPENALEX_DIR}/authors/*.parquet') a ON a.ids.openalex = g.oax_url
-            JOIN _arc_orcids o ON o.cluster_id = g.cluster_id AND contains(a.orcid, o.orcid)
+            JOIN read_parquet('{PROCESSED_DATA}/openalex_authors_prep.parquet') a
+                ON a.author_idx = TRY_CAST(regexp_extract(g.oax_url, 'A(\\d+)', 1) AS BIGINT)
+            JOIN _arc_orcids o ON o.cluster_id = g.cluster_id AND a.orcid = o.orcid
         """)
         con.execute("CREATE OR REPLACE TEMP TABLE _small_pool (cluster_id VARCHAR)")
         if small_pool_rows:

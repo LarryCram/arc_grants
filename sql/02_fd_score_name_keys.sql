@@ -68,9 +68,18 @@ SELECT p.arc_id, p.author_idx,
 FROM data.blk_candidate_pairs p;
 
 -- ── Stage 3: the actual score-filtering CASE WHEN -- a separate step from block()'s own
---    blocking CASE, per the sequential design. ORCID (from block()'s match_reason) is the hard
---    signal; combined institution+subfield overlap is the soft one. Mirrors
---    sql/oax_priority_triage.sql's existing priority-tier convention. --------------------------
+--    blocking CASE, per the sequential design. This file scores institution+subfield FD
+--    overlap ONLY -- ORCID status is a different kind of signal (a direct identity check, not a
+--    frequency-distribution comparison) and already lives on data.blk_candidate_pairs.orcid_check
+--    (block()'s own Stage 6). It briefly appeared here too, as a top "orcid confirmed" priority
+--    tier folded into this table's own priority_level/reason -- removed 2026-09-15, user-caught:
+--    "the orcid score is not an fd_score() so why not leave it out" -- fd_score() re-surfacing a
+--    signal that belongs to a different stage is exactly the kind of two-places-computing-the-
+--    same-fact drift this project has repeatedly found and fixed elsewhere (it had also, for a
+--    few minutes, been re-derived slightly differently here than in block() itself -- see git
+--    history). A caller wanting both signals together joins blk_candidate_pairs.orcid_check
+--    against this table's own arc_id/author_idx, same as any other two-stage join in this
+--    pipeline -- fd_score() itself now only ever answers the FD-overlap question. ---------------
 
 CREATE OR REPLACE TABLE data.blk_fd_scores AS
 SELECT
@@ -80,13 +89,11 @@ SELECT
     CASE WHEN h.has_arc_inst AND h.has_oax_inst THEN COALESCE(io.overlap, 0.0) END AS institution_score,
     CASE WHEN h.has_arc_sf AND h.has_oax_sf THEN COALESCE(sfo.overlap, 0.0) END AS subfield_score,
     CASE
-        WHEN p.match_reason IN ('orcid_only', 'orcid+name_key') THEN 3
         WHEN COALESCE(io.overlap, 0.0) + COALESCE(sfo.overlap, 0.0) >= 0.7 THEN 2
         WHEN h.has_arc_inst AND h.has_oax_inst AND h.has_arc_sf AND h.has_oax_sf THEN 1
         ELSE 0
     END AS priority_level,
     CASE
-        WHEN p.match_reason IN ('orcid_only', 'orcid+name_key') THEN 'orcid confirmed'
         WHEN COALESCE(io.overlap, 0.0) + COALESCE(sfo.overlap, 0.0) >= 0.7 THEN 'inst+subfield >= 0.7'
         WHEN h.has_arc_inst AND h.has_oax_inst AND h.has_arc_sf AND h.has_oax_sf THEN 'inst+subfield < 0.7'
         ELSE 'no FD data to compare'
