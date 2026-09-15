@@ -29,6 +29,17 @@
 --   4. No more SELECT DISTINCT / GROUP BY ALL -- with no joins left, fd_pair_scores already has
 --      exactly one row per (arc_id, oax_id); those were only ever compensating for bug #1/#2's
 --      row multiplication.
+--   5. (2026-09-15) arc_orcid is now the ACIF's WHOLE orcids array, not just the first entry --
+--      04_filter_candidates.py's own list_extract(a.orcids, 1) was truncating a genuine,
+--      unresolved MULTI_ORCID conflict down to one arbitrary entry, which could both wrongly
+--      classify "orcid unequal" for a candidate matching a later entry and wrongly classify
+--      "orcid confirmed" for one only coincidentally matching the first. has_arc_orcid()/
+--      orcid_any_match() below check the whole array via list_filter, same idiom as
+--      00b_extract_oax.py's has_family_match() macro.
+
+CREATE OR REPLACE MACRO has_arc_orcid(arc_orcid) AS arc_orcid IS NOT NULL AND len(arc_orcid) > 0;
+CREATE OR REPLACE MACRO orcid_any_match(oax_orcid, arc_orcid) AS
+    len(list_filter(arc_orcid, x -> ends_with(oax_orcid, x))) > 0;
 
 ATTACH IF NOT EXISTS '/home/lc/k/WORKING_ARC_PROJECT/processed/oax_provenance.duckdb' AS data;
 
@@ -46,19 +57,19 @@ SELECT
     institution_score,
     subfield_score,
     CASE
-        WHEN arc_orcid IS NOT NULL AND oax_orcid IS NOT NULL
-             AND NOT ends_with(oax_orcid, arc_orcid) THEN 0
-        WHEN arc_orcid IS NOT NULL AND oax_orcid IS NOT NULL
-             AND ends_with(oax_orcid, arc_orcid) THEN 3
+        WHEN has_arc_orcid(arc_orcid) AND oax_orcid IS NOT NULL
+             AND NOT orcid_any_match(oax_orcid, arc_orcid) THEN 0
+        WHEN has_arc_orcid(arc_orcid) AND oax_orcid IS NOT NULL
+             AND orcid_any_match(oax_orcid, arc_orcid) THEN 3
         WHEN match_probability < 0.9 THEN 1
         WHEN COALESCE(institution_score, 0) + COALESCE(subfield_score, 0) < 0.7 THEN 2
         ELSE 3
     END AS priority_level,
     CASE
-        WHEN arc_orcid IS NOT NULL AND oax_orcid IS NOT NULL
-             AND NOT ends_with(oax_orcid, arc_orcid) THEN 'orcid unequal'
-        WHEN arc_orcid IS NOT NULL AND oax_orcid IS NOT NULL
-             AND ends_with(oax_orcid, arc_orcid) THEN 'orcid confirmed match'
+        WHEN has_arc_orcid(arc_orcid) AND oax_orcid IS NOT NULL
+             AND NOT orcid_any_match(oax_orcid, arc_orcid) THEN 'orcid unequal'
+        WHEN has_arc_orcid(arc_orcid) AND oax_orcid IS NOT NULL
+             AND orcid_any_match(oax_orcid, arc_orcid) THEN 'orcid confirmed match'
         WHEN match_probability < 0.9 THEN 'Match Prob < 0.9'
         WHEN COALESCE(institution_score, 0) + COALESCE(subfield_score, 0) < 0.7 THEN 'Inst + Subfield < 0.7'
         ELSE 'Match likely'

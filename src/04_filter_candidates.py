@@ -223,13 +223,18 @@ class FilterCandidates:
         # 2026-09-13: carry both sides' own orcid straight into fd_pair_scores, so a person
         # exploring this table can see match_probability/FD scores AND the orcid_veto() inputs
         # for the same pair without a separate join back to awards_cif_arc_only.parquet/
-        # authors/*.parquet each time. arc_orcid is the ACIF's own FIRST recorded orcid
-        # (list_extract(..., 1), matching score()'s own `cluster.orcids[0]` convention -- a
-        # MULTI_ORCID cluster's second+ orcid is still not used here, same known gap as score()
-        # itself); oax_orcid is the candidate's raw OpenAlex-recorded orcid (full URL form,
-        # unchanged/uncompared -- orcid_veto()'s own .endswith() logic still happens in Python,
-        # this table just persists the two raw values it operates on). works_count and
-        # n_candidates baked in too (user-directed: "will be even more efficient if the required
+        # authors/*.parquet each time. arc_orcid is now the ACIF's WHOLE orcids array (2026-09-15
+        # fix -- was list_extract(..., 1), the first entry only, matching score()'s own
+        # since-fixed cluster.orcids[0] convention; a MULTI_ORCID cluster's second+ orcid is a
+        # genuine, unresolved conflict, not a lower-priority alternative, so truncating to one
+        # entry could both wrongly veto a candidate matching a later entry and wrongly pass one
+        # only coincidentally matching the first -- see orcid_veto()'s own docstring).
+        # sql/oax_priority_triage.sql reads this array with a list_filter/ends_with check, not a
+        # scalar comparison, to match. oax_orcid is the candidate's raw OpenAlex-recorded orcid
+        # (full URL form, unchanged/uncompared -- orcid_veto()'s own .endswith() logic still
+        # happens in Python, this table just persists the two raw values it operates on).
+        # works_count and n_candidates baked in too (user-directed: "will be even more efficient
+        # if the required
         # columns... are made at create time rather than by joins") -- works_count is the
         # candidate's own global authors/*.parquet figure (same source _fetch_candidate_info()
         # uses), n_candidates is a genuine one-row-per-arc_id scalar (a real GROUP BY, not a
@@ -241,7 +246,7 @@ class FilterCandidates:
             CREATE OR REPLACE TEMP TABLE pairs AS
             SELECT l.arc_id, l.oax_id, l.match_probability,
                    TRY_CAST(regexp_extract(l.oax_id, 'A(\\d+)', 1) AS BIGINT) AS author_idx,
-                   list_extract(a.orcids, 1) AS arc_orcid,
+                   a.orcids AS arc_orcid,
                    au.orcid AS oax_orcid,
                    au.works_count AS works_count,
                    au.display_name AS oax_author_name
@@ -681,18 +686,31 @@ class FilterCandidates:
     # Disambiguation logic -- real pieces vs. stubs, per the algorithm above
     # ------------------------------------------------------------------
 
-    def orcid_veto(self, arc_orcid: str | None, oax_orcid: str | None) -> bool:
-        """True if this candidate must be rejected outright: both sides have a recorded ORCID
-        and they differ. OpenAlex's own orcid field is a full URL ("https://orcid.org/0000-...")
-        while ARC's is bare -- compare via .endswith(), the same fix already applied elsewhere in
-        this project (channel_piles(), oeuvre_build.py's Stage 3 ORCID gate,
-        test2_orcid_top_candidate_rates() above) for this exact mismatch. A null on either side is
-        NOT a veto -- absence of evidence isn't evidence of a different person, only a genuine,
-        confirmed mismatch is. Real, implemented (not a stub) -- the logic is fully specified and
-        doesn't need the FD-comparison utility."""
-        if not arc_orcid or oax_orcid is None or (isinstance(oax_orcid, float) and pd.isna(oax_orcid)):
+    def orcid_veto(self, arc_orcids: list[str] | str | None, oax_orcid: str | None) -> bool:
+        """True if this candidate must be rejected outright: the ACIF has >=1 recorded ORCID,
+        OAX has a recorded ORCID, and it matches NONE of the ACIF's own. OpenAlex's own orcid
+        field is a full URL ("https://orcid.org/0000-...") while ARC's is bare -- compare via
+        .endswith(), the same fix already applied elsewhere in this project (channel_piles(),
+        oeuvre_build.py's Stage 3 ORCID gate, test2_orcid_top_candidate_rates() above) for this
+        exact mismatch. A null on either side is NOT a veto -- absence of evidence isn't
+        evidence of a different person, only a genuine, confirmed mismatch is.
+
+        2026-09-15 fix: takes the ACIF's WHOLE orcids list now, not just orcids[0] -- there was
+        no principled reason to prefer the first entry specifically. A cluster only ever has
+        more than one recorded ORCID when orcid_status == MULTI_ORCID, i.e. ARC's own raw data
+        showed a genuine, UNRESOLVED conflict the pipeline couldn't split apart -- the list's
+        own order is an arbitrary artifact of collection, not a confidence ranking, so checking
+        only the first entry both wrongly vetoed a candidate matching a later entry and wrongly
+        passed one that only coincidentally matched the first. Costs nothing in the (dominant)
+        single-ORCID case, where a list of length 1 behaves identically either way. Accepts a
+        bare string too, for any caller not yet updated to pass the list."""
+        if isinstance(arc_orcids, str):
+            arc_orcids = [arc_orcids]
+        arc_orcids = [o for o in (arc_orcids or []) if o]
+        if not arc_orcids or oax_orcid is None or (isinstance(oax_orcid, float) and pd.isna(oax_orcid)):
             return False
-        return not str(oax_orcid).endswith(str(arc_orcid))
+        oax = str(oax_orcid)
+        return not any(oax.endswith(str(a)) for a in arc_orcids)
 
     @staticmethod
     def _hist_intersection(a: Counter, b: Counter) -> float | None:
@@ -835,7 +853,7 @@ class FilterCandidates:
         match_probability: fd_compare() only ever filters here, it never adds to the score
         (per its own docstring, it's 'the final arbiter for ejection,' not a triage signal)."""
         author_idx = self._author_idx(oax_id)
-        arc_orcid = cluster.orcids[0] if cluster.orcids else None
+        arc_orcid = cluster.orcids
         oax_orcid = self._oax_orcid(author_idx)
         if self.orcid_veto(arc_orcid, oax_orcid):
             return 0.0
@@ -1071,7 +1089,7 @@ class FilterCandidates:
         _, oax_orcid = info_by_id.get(self._author_idx(top_oid), (0, None))
         if pd.isna(oax_orcid):
             return "null"
-        return "match" if str(oax_orcid).endswith(c.orcids[0]) else "mismatch"
+        return "match" if any(str(oax_orcid).endswith(o) for o in c.orcids) else "mismatch"
 
     def test2_orcid_top_candidate_rates(self, by_size: dict[int, list]) -> dict:
         """design 04_ filter.md test 2: for every ACIF with >=1 deduped OAX candidate AND a
@@ -1141,7 +1159,7 @@ class FilterCandidates:
             if (c.cluster_id, top_oid) in done:
                 continue
             wc, oax_orcid = info_by_id.get(self._author_idx(top_oid), (0, None))
-            if not self.orcid_veto(c.orcids[0], oax_orcid):
+            if not self.orcid_veto(c.orcids, oax_orcid):
                 continue
             self.record_provenance(c.cluster_id, top_oid, wc, "drop", "orcid_mismatch", "orcid_veto")
             oax_sorted = sorted(c.oax_candidates, key=lambda o: -works_by_id.get(self._author_idx(o), 0))
@@ -1174,7 +1192,7 @@ class FilterCandidates:
             if (c.cluster_id, top_oid) in done:
                 continue
             wc, oax_orcid = info_by_id.get(self._author_idx(top_oid), (0, None))
-            if self.orcid_veto(c.orcids[0], oax_orcid):
+            if self.orcid_veto(c.orcids, oax_orcid):
                 self.record_provenance(c.cluster_id, top_oid, wc, "drop", "orcid_mismatch", "orcid_veto")
                 done.add((c.cluster_id, top_oid))
                 n_flagged += 1
@@ -1210,7 +1228,7 @@ class FilterCandidates:
                 continue
             wc, oax_orcid = info_by_id.get(self._author_idx(top_oid), (0, None))
 
-            if c.orcids and self.orcid_veto(c.orcids[0], oax_orcid):
+            if c.orcids and self.orcid_veto(c.orcids, oax_orcid):
                 self.record_provenance(c.cluster_id, top_oid, wc, "drop", "orcid_mismatch", "orcid_veto")
                 done.add((c.cluster_id, top_oid))
                 n_orcid += 1
@@ -1268,7 +1286,7 @@ class FilterCandidates:
                     continue
                 wc, oax_orcid = info_by_id.get(self._author_idx(top_oid), (0, None))
 
-                if c.orcids and self.orcid_veto(c.orcids[0], oax_orcid):
+                if c.orcids and self.orcid_veto(c.orcids, oax_orcid):
                     self.record_provenance(c.cluster_id, top_oid, wc, "drop", "orcid_mismatch", "orcid_veto")
                     counts["orcid_mismatch"] += 1
                     continue
@@ -1320,7 +1338,7 @@ class FilterCandidates:
             author_idx = self._author_idx(oax_id)
             wc, oax_orcid = info_by_id.get(author_idx, (0, None))
 
-            if cluster.orcids and self.orcid_veto(cluster.orcids[0], oax_orcid):
+            if cluster.orcids and self.orcid_veto(cluster.orcids, oax_orcid):
                 rows.append((cluster.cluster_id, oax_id, wc, "drop", "orcid_mismatch", "orcid_veto"))
                 continue
 
