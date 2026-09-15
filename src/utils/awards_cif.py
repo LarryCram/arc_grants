@@ -1106,7 +1106,13 @@ def cluster_items(
     for cluster_id, group_items in groups.items():
         cif = _build_awards_cif(cluster_id, group_items)
         cif.record_event("splink_cluster")
-        for it in group_items:
+        # Sorted by unique_id (2026-09-15 fix, same class of bug as compute_coawardees()'s own
+        # full_name_keys fix): group_items' own order comes from Splink's cluster_pairwise_
+        # predictions_at_threshold output row order, not guaranteed stable across runs --
+        # confirmed directly, the name_typo_correction/orcid_correction events below were
+        # appended in a different order run-to-run on real data (DP170104546_ChienMingWang's
+        # 3 orcid_correction events), same content, different order, from identical input.
+        for it in sorted(group_items, key=lambda x: x.unique_id):
             correction = corrections.get(it.unique_id)
             if correction is not None:
                 cif.record_event(
@@ -1281,7 +1287,9 @@ def merge_by_orcid(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
             continue
         canonical_id = min(ids)
         canonical = by_id[canonical_id]
-        absorbed = [by_id[cid] for cid in ids if cid != canonical_id]
+        # Sorted by cluster_id -- same class of ids-ordering non-determinism as
+        # merge_same_grant_coinvestigators()'s own fix (see that call site's comment).
+        absorbed = sorted((by_id[cid] for cid in ids if cid != canonical_id), key=lambda c: c.cluster_id)
         shared_orcids = sorted({o for cid in ids for o in by_id[cid].orcids})
         out.append(_merge_awards_cifs(canonical, absorbed, "orcid_merge", orcid=shared_orcids))
     return out
@@ -1599,7 +1607,9 @@ def merge_persons_by_orcid(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
             out.append(by_id[root])
             continue
         canonical = by_id[root]
-        absorbed = [by_id[cid] for cid in ids if cid != root]
+        # Sorted by cluster_id -- same class of ids-ordering non-determinism as
+        # merge_same_grant_coinvestigators()'s own fix (see that call site's comment).
+        absorbed = sorted((by_id[cid] for cid in ids if cid != root), key=lambda c: c.cluster_id)
         out.append(_merge_awards_cifs(canonical, absorbed, "post_enrichment_merge"))
     return out
 
@@ -1653,7 +1663,9 @@ def apply_manual_merges(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
             out.append(by_id[root])
             continue
         canonical = by_id[root]
-        absorbed = [by_id[cid] for cid in ids if cid != root]
+        # Sorted by cluster_id -- same class of ids-ordering non-determinism as
+        # merge_same_grant_coinvestigators()'s own fix (see that call site's comment).
+        absorbed = sorted((by_id[cid] for cid in ids if cid != root), key=lambda c: c.cluster_id)
         out.append(_merge_awards_cifs(canonical, absorbed, "manual_merge"))
     return out
 
@@ -1727,7 +1739,12 @@ def merge_same_grant_coinvestigators(clusters: list[AwardsCIF]) -> list[AwardsCI
             out.append(by_id[root])
             continue
         canonical = by_id[root]
-        absorbed = [by_id[cid] for cid in ids if cid != root]
+        # Sorted by cluster_id (2026-09-15 fix, same class of bug as compute_coawardees()'s own
+        # full_name_keys fix and cluster_items()'s provenance-event ordering fix): `ids`' own
+        # order comes from iterating `clusters` at merge_groups-build time above, not guaranteed
+        # stable -- confirmed directly, merged_from ended up in a different order run-to-run on
+        # real data (DP0210065_GaoLu's same_grant_merge event) from identical input.
+        absorbed = sorted((by_id[cid] for cid in ids if cid != root), key=lambda c: c.cluster_id)
         out.append(_merge_awards_cifs(canonical, absorbed, "same_grant_merge"))
     return out
 
@@ -2084,6 +2101,25 @@ def compute_coawardees(clusters: list[AwardsCIF], items: list[AwardCIFItem]) -> 
     check: DP0665337_JocelynCraig / DP0665337_JocelynLynCraig, a real candidate same-person
     split later confirmed via each side's own ORCID record -- see docs/pipeline_todo.md), not
     an error to hide by construction.
+
+    2026-09-15 fix -- a real, confirmed non-determinism bug: this used to keep only the FIRST
+    occurrence encountered for a given key (its own full parse, including full_name_keys), so
+    when the same real coawardee is recorded on 2+ grants with genuinely different name detail
+    (e.g. "Hua Liu" on one grant, "Hua Kun Liu" -- a real middle name -- on another, both
+    resolving to the same full_name_key "hua_liu"), WHICH occurrence's own detail got kept
+    depended on grant_investigators' iteration order -- not guaranteed stable, and confirmed to
+    actually vary run-to-run on real data (DE180100592_JIAWANG's "hua_liu" entry). Fixing only
+    the ordering (a stable sort) would still leave an arbitrary, if consistent, choice -- the
+    actual fix is to stop picking a single representative for the identity-bearing field at
+    all: full_name_keys is now the UNION of every occurrence's own already-computed
+    full_name_keys (each one a safe, per-occurrence cross-product). Deliberately NOT a union of
+    raw given_tokens/family_names re-crossed after pooling -- that manufactures a combination no
+    real occurrence ever asserted, the exact bug already found and fixed for OAX's own
+    full_name_keys (see ParsedName.full_name_keys' own docstring). The other, non-identity
+    fields (given_tokens, family_name_main, etc., kept for display) are sourced from a single,
+    stably-chosen representative occurrence (lowest unique_id) -- arbitrary in the same sense as
+    before, but now deterministic, and no longer masquerading as identity evidence now that
+    full_name_keys carries the real union.
     """
     grant_investigators: dict[str, list[tuple[str, ParsedName]]] = defaultdict(list)
     for it in items:
@@ -2093,24 +2129,36 @@ def compute_coawardees(clusters: list[AwardsCIF], items: list[AwardCIFItem]) -> 
     for c in clusters:
         own_ids = {it.unique_id for it in c.items}
         grant_codes = {it.grant_code for it in c.items}
-        tally: dict[str, dict] = {}
-        for gc in grant_codes:
+        # Collect every occurrence per key first -- the representative pick and the
+        # full_name_keys union are both computed from the SAME complete set afterward, not from
+        # whichever occurrence the loop happens to visit first.
+        occurrences: dict[str, list[tuple[str, ParsedName]]] = defaultdict(list)
+        for gc in sorted(grant_codes):
             for uid, parsed in grant_investigators.get(gc, []):
                 if uid in own_ids:
                     continue
                 key = parsed.full_name_key or parsed.full_name_key_raw
                 if not key:
                     continue
-                if key not in tally:
-                    d = asdict(parsed)
-                    d["given_tokens"] = list(d["given_tokens"])
-                    d["middle_tokens"] = list(d["middle_tokens"])
-                    d["nickname_tokens"] = list(d["nickname_tokens"])
-                    d["family_names"] = list(d["family_names"])
-                    d["full_name_keys"] = list(d["full_name_keys"])
-                    d["given_tokens_raw"] = list(d["given_tokens_raw"])
-                    tally[key] = {**d, "count": 0}
-                tally[key]["count"] += 1
+                occurrences[key].append((uid, parsed))
+
+        tally: dict[str, dict] = {}
+        for key, occs in occurrences.items():
+            occs_sorted = sorted(occs, key=lambda x: x[0])  # stable: lowest unique_id first
+            _, rep = occs_sorted[0]
+            d = asdict(rep)
+            d["given_tokens"] = list(d["given_tokens"])
+            d["middle_tokens"] = list(d["middle_tokens"])
+            d["nickname_tokens"] = list(d["nickname_tokens"])
+            d["family_names"] = list(d["family_names"])
+            d["given_tokens_raw"] = list(d["given_tokens_raw"])
+            merged_keys: dict[str, None] = {}
+            for _, parsed in occs_sorted:
+                for k in parsed.full_name_keys:
+                    merged_keys[k] = None
+            d["full_name_keys"] = list(merged_keys)
+            tally[key] = {**d, "count": len(occs_sorted)}
+
         c.coawardees = sorted(
             tally.values(), key=lambda x: (-x["count"], x.get("full_name_key") or "")
         )
@@ -2141,13 +2189,27 @@ def find_coawardee_self_collisions(clusters: list[AwardsCIF]) -> list[dict]:
         for it in c.items:
             if it.full_name_key:
                 own_keys.add(it.full_name_key)
-            if it.parsed is not None and it.parsed.full_name_key_raw:
-                own_keys.add(it.parsed.full_name_key_raw)
+            if it.parsed is not None:
+                if it.parsed.full_name_key_raw:
+                    own_keys.add(it.parsed.full_name_key_raw)
+                # full_name_keys, not just the two scalars -- 2026-09-15 fix: this function's
+                # own docstring warns against checking only the modal scalar and correctly
+                # avoids that on the ACIF's own side, but was making the identical mistake on
+                # the coawardee side below (co.get("full_name_key") alone) -- now that
+                # compute_coawardees() properly unions full_name_keys across every occurrence
+                # of a coawardee (rather than keeping only one representative's), a real
+                # collision can live on a non-primary key on EITHER side.
+                own_keys.update(it.parsed.full_name_keys)
         if not own_keys:
             continue
         for co in c.coawardees:
-            co_key = co.get("full_name_key") or co.get("full_name_key_raw")
-            if co_key and co_key in own_keys:
+            co_keys = set(co.get("full_name_keys") or [])
+            co_keys.add(co.get("full_name_key"))
+            co_keys.add(co.get("full_name_key_raw"))
+            co_keys.discard(None)
+            hit_keys = co_keys & own_keys
+            if hit_keys:
+                co_key = sorted(hit_keys)[0]
                 results.append({
                     "cluster_id": c.cluster_id,
                     "full_names": list(c.full_names),

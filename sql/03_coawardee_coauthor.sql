@@ -32,21 +32,24 @@ JOIN read_parquet('/home/lc/k/WORKING_ARC_PROJECT/processed/authorships_hep.parq
     ON a2.work_idx = a1.work_idx AND a2.author_idx != a1.author_idx;
 
 -- ── Stage 2: each ACIF's own coawardees, resolved to THEIR OWN candidate author_idx pool --
---    a coawardee's full_name_key is matched against arc_name_keys (the same lookup Stage 1
---    uses), not against OAX data directly -- this is ARC-person-to-ARC-person identity, exact
---    by construction (a coawardee IS another ACIF in this same population), never fuzzy. A
---    coawardee's own name colliding with 2+ ACIFs (a common name) is handled permissively --
---    every matched ACIF's own candidate pool contributes, since this is corroborating evidence,
---    not an identity determination. ------------------------------------------------------------
+--    a coawardee's full_name_keys (the whole unioned list, NOT the single full_name_key
+--    scalar -- 2026-09-15 fix: compute_coawardees() now unions full_name_keys across every
+--    occurrence of a coawardee, so a genuine identity match can live on a non-primary key; the
+--    scalar-only version used here originally would silently miss it) is matched against
+--    arc_name_keys (the same lookup Stage 1 uses), not against OAX data directly -- this is
+--    ARC-person-to-ARC-person identity, exact by construction (a coawardee IS another ACIF in
+--    this same population), never fuzzy. A coawardee's own name colliding with 2+ ACIFs (a
+--    common name) is handled permissively -- every matched ACIF's own candidate pool
+--    contributes, since this is corroborating evidence, not an identity determination. --------
 
 CREATE OR REPLACE TEMP TABLE arc_coawardee_keys AS
-SELECT DISTINCT cluster_id, co.full_name_key AS co_full_name_key
+SELECT DISTINCT cluster_id, unnest(co.full_name_keys) AS co_full_name_key
 FROM (
     SELECT cluster_id, unnest(coawardees) AS co
     FROM read_parquet('/home/lc/k/WORKING_ARC_PROJECT/processed/awards_cif_arc_only.parquet')
     WHERE excluded = FALSE AND len(coawardees) > 0
 )
-WHERE co.full_name_key IS NOT NULL;
+WHERE co.full_name_keys IS NOT NULL AND len(co.full_name_keys) > 0;
 
 CREATE OR REPLACE TEMP TABLE coawardee_to_acif AS
 SELECT DISTINCT ack.cluster_id, a.acif_id AS coawardee_acif_id
