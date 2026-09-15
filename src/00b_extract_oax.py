@@ -1,8 +1,22 @@
 """
-src/02_prepare_oax.py
+src/00b_extract_oax.py (renamed 2026-09-15 from 02_prepare_oax.py)
 
-Loader: prepares OpenAlex HEP-context authors for Splink linkage. Rebuild only when stale
-relative to authorships_hep.parquet/works_hep.parquet -- a few times a year, not every run.
+Standalone OAX-side prep, order-independent relative to 00a_extract_arc.py/01_prepare_arc.py
+(neither reads this script's output, and this script reads nothing of theirs) -- the "00"
+prefix marks it as outside the main sequential chain, not implying it runs "before" 01_ in any
+data-dependency sense. Rebuild only when stale relative to authorships_hep.parquet/
+works_hep.parquet -- a few times a year, not every run.
+
+Maximal precomputation lives here on purpose (2026-09-15 direction): anything that is a pure,
+deterministic function of the raw OAX population -- not scoped to whatever candidate set some
+downstream, actively-developed linking stage happens to need this week -- belongs in this rarely
+-run, freshness-gated script, not recomputed inside a class method every time that class reruns
+during iteration. Phase 4's FD tables are exactly this: previously computed only for the
+~50K author_idx some run's candidate pool happened to contain (04_filter_candidates.py's own
+_ensure_fd_tables()), now for the FULL ~2.78M-author population instead -- measured directly
+before making this change, not assumed cheap: 4.2s wall-clock for both tables combined, trivial
+against this script's own ~15-minute Phase 1/2 cost and clearly cheaper overall than repeatedly
+recomputing a scoped version on every iteration of active downstream development.
 
 Phase 1 – author_hep: group authorships_hep by author, aggregating institution
     IDs (from HEP authorships), field distribution with fractions (from HEP
@@ -16,6 +30,10 @@ Phase 3 – TF tables for Splink term-frequency adjustment.
     → oax_tf_family_name.parquet
     → oax_tf_first_name.parquet
     → oax_tf_full_name.parquet
+
+Phase 4 – full-population FD (frequency-distribution) tables, unscoped (see note above).
+    → oax_institution_fd.parquet
+    → oax_subfield_fd.parquet
 """
 
 import sys
@@ -172,7 +190,7 @@ def oax_name_arrays(display_name: str, alts: list[str]) -> dict:
     # too (e.g. "Björn" -> both "bjorn" and "bjoern" tokens, not just "bjorn"), matching ARC-side
     # exactly. A real, population-wide effect on Splink candidate generation is expected (more
     # given-name token variants -> more candidate pairs for anyone with a given-name diacritic) --
-    # 02_prepare_oax.py needs a full rerun (and 03_link_arc_oax.py after it) to measure the
+    # 00b_extract_oax.py needs a full rerun (and 03_link_arc_oax.py after it) to measure the
     # actual impact before this is trusted at scale, not assumed zero-impact.
     first_toks: dict[str, None] = {}
     nick_toks: dict[str, None] = {}
@@ -187,7 +205,7 @@ def oax_name_arrays(display_name: str, alts: list[str]) -> dict:
         # below and full_name_keys' per-occurrence union -- an earlier version of this fix
         # called _name_parser.parse(n) a second time in a separate loop to build full_name_keys,
         # silently doubling this function's total parsing cost across the whole ~2.78M-author
-        # population (measured live: a full 02_prepare_oax.py rerun ran for 13+ minutes without
+        # population (measured live: a full 00b_extract_oax.py rerun ran for 13+ minutes without
         # finishing where prior full runs completed well within that, and was killed once this
         # was traced -- confirmed as the cause before re-running, not assumed).
         parsed = _name_parser.parse(n)
@@ -273,7 +291,46 @@ def main():
 
     # ── Phase 1: Build author_hep ─────────────────────────────────────────────
 
-    print(f"[1/3] Building author_hep ({out_hep})...")
+    print(f"[1/4] Building author_hep ({out_hep})...")
+    # family_tok(): crude, deliberately cheap family-name extraction (comma-split or last-token)
+    # from display_name ONLY -- NOT the full HumanNameParser. display_name is OpenAlex's own
+    # curated "First Last"/"Last, First" field, so this positional extraction is trustworthy for
+    # the ANCHOR; it is NOT applied positionally to alternatives (see has_family_match() below).
+    #
+    # has_family_match(): does ANY word in a candidate string match the trusted family name --
+    # not a specific position -- so a genuine order-reversed alternative (confirmed real case,
+    # author_idx 5101895081 "Di Yan" / real name "Danhong Yan", alternative "Yan Di" with no
+    # comma) isn't wrongly dropped just because the family name isn't in the position a plain
+    # comma/last-token heuristic would assume. Length filter is > 1, not > 3 or > 2 as first
+    # tried -- a real short surname (e.g. "Tas", "Yan", "Li", "Wu", "Xu", "Ng" -- common, genuine
+    # 2-3 character East Asian surnames) must still be able to match ITSELF. > 3 was found, by
+    # direct test, to zero out Petr Tas's entire alternatives list including his own exact-match
+    # "Tas, Petr"/"Petr Tas" forms, and to hide the Yan reversal case too, since the trusted
+    # family token itself ("yan"/"tas") never qualified as a comparable candidate word under
+    # that stricter floor. > 1 (excluding only single-character bare initials -- the same
+    # convention already used for given_multichar elsewhere in this codebase) fixes both while
+    # still passing every contamination test below.
+    #
+    # Validated directly (2026-09-15) against a confirmed real contamination case: author_idx
+    # 5106421012 ("Alex Toldaiev") carries 'Taylor, Geoffrey Norman' as a flatly wrong
+    # alternative (a different real ATLAS-collaboration physicist, not a byline-parsing artifact
+    # of Toldaiev's own name) -- genuine variants of a record's own name (including a real
+    # accented form, "S. Tokár" for "Stano Tokar") score jaro_winkler_similarity 0.876-1.0
+    # against the trusted family name; every contaminant found across 4 real affected records
+    # scored 0.41-0.76 -- a clean, well-separated gap, not a coin-flip threshold. Runs entirely
+    # in DuckDB's native (vectorized) jaro_winkler_similarity() via list_filter/str_split, not a
+    # per-row Python UDF -- this table already processes 2.78M authors and a Python string-metric
+    # call per alternative would be far slower.
+    con.execute("""
+        CREATE OR REPLACE MACRO family_tok(s) AS
+            lower(CASE WHEN s LIKE '%,%' THEN trim(split_part(s, ',', 1))
+                        ELSE trim(split_part(s, ' ', -1)) END);
+        CREATE OR REPLACE MACRO has_family_match(s, family) AS
+            len(list_filter(
+                str_split(replace(s, ',', ' '), ' '),
+                w -> length(trim(w)) > 1 AND jaro_winkler_similarity(lower(trim(w)), family) >= 0.85
+            )) > 0;
+    """)
     con.execute(f"""
         COPY (
             WITH
@@ -323,28 +380,46 @@ def main():
                 FROM '{auth_hep}'
                 WHERE institution_idx IS NOT NULL
                 GROUP BY author_idx
+              ),
+              -- Contamination gate (see MACRO comments above): each alternative kept only if ANY
+              -- of its own words matches display_name's trusted family token -- computed once
+              -- here, not repeated per output column.
+              gated AS (
+                SELECT
+                  au.author_idx,
+                  au.display_name,
+                  au.orcid,
+                  au.topics,
+                  CASE
+                    WHEN au.full_name IS NOT NULL
+                         AND has_family_match(au.full_name, family_tok(au.display_name))
+                      THEN au.full_name
+                    ELSE au.display_name
+                  END AS full_name_trusted,
+                  list_filter(
+                    COALESCE(au.display_name_alternatives, []),
+                    alt -> has_family_match(alt, family_tok(au.display_name))
+                  ) AS alts_gated
+                FROM read_parquet('{OAX_AUTHORS}/*.parquet') au
               )
             SELECT
               sf.author_idx                                         AS author_idx,
-              au.display_name                                       AS author_name,
-              COALESCE(au.full_name, au.display_name)               AS full_name,
+              g.display_name                                        AS author_name,
+              g.full_name_trusted                                   AS full_name,
+              -- full_name appended to the (already gated) alternatives if not already present.
               CASE
-                WHEN au.full_name IS NULL THEN au.display_name_alternatives
-                WHEN au.display_name_alternatives IS NULL THEN [au.full_name]
-                WHEN list_contains(au.display_name_alternatives, au.full_name)
-                  THEN au.display_name_alternatives
-                ELSE list_append(au.display_name_alternatives, au.full_name)
+                WHEN list_contains(g.alts_gated, g.full_name_trusted) THEN g.alts_gated
+                ELSE list_append(g.alts_gated, g.full_name_trusted)
               END                                                    AS display_name_alternatives,
-              replace(au.orcid, 'https://orcid.org/', '')          AS orcid,
+              replace(g.orcid, 'https://orcid.org/', '')            AS orcid,
               COALESCE(ia.inst_ids, [])                            AS inst_ids,
-              list_transform(au.topics, x -> x.display_name)       AS topic_names,
-              list_transform(au.topics, x -> x.subfield.display_name) AS subfield_names,
+              list_transform(g.topics, x -> x.display_name)       AS topic_names,
+              list_transform(g.topics, x -> x.subfield.display_name) AS subfield_names,
               sf.works_count,
               sf.sorted_fields
             FROM sorted_fields sf
             LEFT JOIN inst_agg ia USING (author_idx)
-            JOIN read_parquet('{OAX_AUTHORS}/*.parquet') au
-              ON au.author_idx = sf.author_idx
+            JOIN gated g ON g.author_idx = sf.author_idx
         ) TO '{out_hep}' (FORMAT PARQUET)
     """)
     n_hep = con.execute(f"SELECT count(*) FROM '{out_hep}'").fetchone()[0]
@@ -352,7 +427,7 @@ def main():
 
     # ── Phase 2: Splink prep (name parsing) ───────────────────────────────────
 
-    print(f"[2/3] Parsing names → {out_oax}...")
+    print(f"[2/4] Parsing names → {out_oax}...")
     con.create_function("oax_names", oax_name_arrays,
                         ['VARCHAR', 'VARCHAR[]'],
                         'STRUCT(first_names VARCHAR[], family_names VARCHAR[], '
@@ -398,7 +473,7 @@ def main():
 
     # ── Phase 3: TF tables ────────────────────────────────────────────────────
 
-    print("[3/3] Building term-frequency tables...")
+    print("[3/4] Building term-frequency tables...")
     df = pd.read_parquet(out_oax)
     n = len(df)
 
@@ -478,6 +553,34 @@ def main():
     tf_variant["tf_family_name_variant"] = tf_variant["tf_family_name_variant"] / n
     tf_variant.to_parquet(PROCESSED_DATA / "oax_tf_family_name_variant.parquet", index=False)
     print(f"  oax_tf_family_name_variant.parquet: {len(tf_variant):,} unique values")
+
+    # ── Phase 4: full-population FD tables (unscoped -- see module docstring) ───────────────
+
+    print("[4/4] Building full-population FD tables...")
+    con.execute(f"""
+        COPY (
+            SELECT a.author_idx, w.subfield_name, COUNT(DISTINCT a.work_idx) AS n
+            FROM '{auth_hep}' a
+            JOIN '{works_hep}' w USING (work_idx)
+            WHERE w.subfield_name IS NOT NULL
+            GROUP BY a.author_idx, w.subfield_name
+        ) TO '{PROC / "oax_subfield_fd.parquet"}' (FORMAT PARQUET)
+    """)
+    n_sf = con.execute(f"SELECT count(*) FROM '{PROC / 'oax_subfield_fd.parquet'}'").fetchone()[0]
+    print(f"  oax_subfield_fd.parquet: {n_sf:,} rows")
+
+    con.execute(f"""
+        COPY (
+            SELECT a.author_idx,
+                   'https://openalex.org/I' || a.institution_idx::VARCHAR AS institution_id,
+                   COUNT(DISTINCT a.work_idx) AS n
+            FROM '{auth_hep}' a
+            WHERE a.institution_idx IS NOT NULL
+            GROUP BY a.author_idx, a.institution_idx
+        ) TO '{PROC / "oax_institution_fd.parquet"}' (FORMAT PARQUET)
+    """)
+    n_inst = con.execute(f"SELECT count(*) FROM '{PROC / 'oax_institution_fd.parquet'}'").fetchone()[0]
+    print(f"  oax_institution_fd.parquet: {n_inst:,} rows")
 
     print("OAX prep complete.")
 
