@@ -65,3 +65,38 @@ GROUP BY cg.cluster_id, cw.institution_id;
 -- owned by src/04_filter_candidates.py's own FilterCandidates class (its own, still-live,
 -- Splink-candidate-scoped tables), and this setup must not clobber them while both exist side
 -- by side during the redesign.
+
+-- ── Stage 3: arc_name_keys / oax_name_keys -- the flat (id, full_name_key) lookup tables
+--    sql/01_blocking_name_keys.sql and every stage after it read. Built once here, from
+--    already-persisted data, so they're finally reproducible -- until 2026-09-16 these two
+--    tables existed only as whatever an earlier ad hoc, uncommitted script happened to leave
+--    sitting in oax_provenance.duckdb, with no code anywhere in the repo that could rebuild
+--    them. That gap produced a real, confirmed bug: the table in use had collapsed each ACIF
+--    down to a single representative full_name_key (its own formal given name only), silently
+--    losing real alternate forms (e.g. an ORCID-sourced diminutive like "Bill" for "William")
+--    that awards_cif_arc_only.parquet's own full_name_keys column already correctly unions in
+--    (AwardsCIF's own field, plus 2026-09-16's widen_names_with_orcid_bulk_db() fix -- see that
+--    function's own docstring). Reading full_name_keys straight from that column, rather than
+--    re-deriving it here, means this table can never again drift from the one true source.
+--
+--    ARC side: orcid stays a LIST (VARCHAR[], an ACIF can carry a genuine unresolved
+--    MULTI_ORCID conflict) -- 01_blocking_name_keys.sql's own arc_orcid_scalar table unnests it.
+--    OAX side: orcid is already a bare scalar (00b_extract_oax.py's Phase 1 strips the
+--    "https://orcid.org/" prefix) -- carried straight through, no transformation needed.
+--    Both scoped to non-excluded/every author respectively; unnest() on an empty full_name_keys
+--    list correctly contributes zero rows for that id (an ACIF with nothing parseable, or an OAX
+--    author with no display_name at all), not a NULL placeholder row. -------------------------
+
+CREATE OR REPLACE TABLE data.arc_name_keys AS
+SELECT cluster_id AS acif_id, unnest(full_name_keys) AS full_name_key, orcids AS orcid
+FROM read_parquet('/home/lc/k/WORKING_ARC_PROJECT/processed/awards_cif_arc_only.parquet')
+WHERE excluded = FALSE;
+
+CREATE OR REPLACE TABLE data.oax_name_keys AS
+SELECT author_idx, unnest(full_name_keys) AS full_name_key, orcid
+FROM read_parquet('/home/lc/k/WORKING_ARC_PROJECT/processed/openalex_authors_prep.parquet');
+
+-- Example reads (not run by this file):
+--   SELECT COUNT(*), COUNT(DISTINCT acif_id) FROM data.arc_name_keys;
+--   SELECT COUNT(*), COUNT(DISTINCT author_idx) FROM data.oax_name_keys;
+--   SELECT full_name_key FROM data.arc_name_keys WHERE acif_id = 'DP0451643_WilliamPritchard';

@@ -2228,9 +2228,20 @@ def widen_names_with_orcid_bulk_db(clusters: list[AwardsCIF]) -> list[AwardsCIF]
     supersedes the older orcid_bulk_lookup.py/orcid_persons.parquet ~4.8M HQ-only snapshot,
     retired the same day -- see docs/pipeline_todo.md #19). For every cluster with >=1 resolved
     ORCID, fetches that ORCID's own self-reported `name` + `aliases` and unions their parsed
-    tokens into full_names/first_names/family_names -- never removes or overrides anything
-    already there, matching this project's established "more evidence, never fewer" pattern
-    (diacritic variants, family_names set-overlap blocking).
+    tokens into full_names/first_names/family_names/full_name_keys -- never removes or overrides
+    anything already there, matching this project's established "more evidence, never fewer"
+    pattern (diacritic variants, family_names set-overlap blocking).
+
+    Pulling a diminutive from a specific person's own ORCID record is a reliable, narrow signal
+    (2026-09-16 user direction) -- it's that person's own self-report, not a generic "any William
+    might be a Bill" dictionary applied population-wide, so it never risks the false-mismatch
+    class a bounded nickname-equivalence table would. Known, accepted residual: this only ever
+    recovers a diminutive if ORCID's own record actually lists it -- if someone's ORCID never
+    mentions "Bert" and OpenAlex's only recorded form for them IS "Bert", the match is still
+    structurally unreachable. Watch for the symptom (not yet built as a diagnostic): a
+    surprisingly low total OAX work-count for an otherwise-productive researcher can indicate
+    exactly this -- rare in practice (needs OAX to have captured someone's diminutive-only oeuvre
+    fragment with no formal-name form anywhere in it), but possible.
 
     Deliberately NOT a data-quality check (2026-08-25 direct user redirect, mid-build): an ad
     hoc pass comparing ARC's existing family name against the bulk record's own name for every
@@ -2267,6 +2278,7 @@ def widen_names_with_orcid_bulk_db(clusters: list[AwardsCIF]) -> list[AwardsCIF]
         new_full: set[str] = set()
         new_first: set[str] = set()
         new_family: set[str] = set()
+        new_keys: set[str] = set()
         for oid in c.orcids:
             for raw_name in bulk_names_by_orcid.get(oid, []):
                 # 2026-09-13: skip any name/alias string containing a comma outright, rather
@@ -2289,18 +2301,32 @@ def widen_names_with_orcid_bulk_db(clusters: list[AwardsCIF]) -> list[AwardsCIF]
                 if "," in raw_name:
                     continue
                 new_full.add(raw_name)
-                fn, fam = _name_forms(raw_name, "")
-                new_first.update(fn)
-                new_family.update(fam)
+                # Direct call, not _name_forms()'s narrowed (list, list) adapter -- that adapter
+                # discards full_name_key/full_name_keys entirely (see load_award_cif_items()'s
+                # own 2026-09-04 comment on the identical fix there). This function used to widen
+                # full_names/first_names/family_names from an ORCID-sourced name/alias but never
+                # full_name_keys -- the field block()/given_name_check actually depend on -- so an
+                # ORCID's own self-reported diminutive (e.g. "Bill Pritchard" on a record whose
+                # ARC-side forms are all "William") widened full_names/first_names correctly but
+                # left full_name_keys stuck without "bill_pritchard", confirmed 2026-09-16 via a
+                # real case with zero "Bill" anywhere in ARC's own raw investigator data. Fixed:
+                # parse the raw ORCID name directly and union its own full_name_keys in too, same
+                # given/nickname x family cross-product every other full_name_keys source uses.
+                parsed = _name_parser.parse(raw_name)
+                new_first.update(parsed.given_tokens)
+                new_family.update(parsed.family_names)
+                new_keys.update(parsed.full_name_keys)
         added = (
             (new_full - set(c.full_names))
             | (new_first - set(c.first_names))
             | (new_family - set(c.family_names))
+            | (new_keys - set(c.full_name_keys))
         )
         if added:
             c.full_names = sorted(set(c.full_names) | new_full)
             c.first_names = sorted(set(c.first_names) | new_first)
             c.family_names = sorted(set(c.family_names) | new_family)
+            c.full_name_keys = sorted(set(c.full_name_keys) | new_keys)
             n_widened += 1
 
     print(f"  ORCID bulk-DB name widening: {n_widened} clusters gained >=1 new name form "

@@ -57,12 +57,15 @@ class AcifOaxLinker:
         self._oax_subfield_fd_path = PROCESSED_DATA / "oax_subfield_fd.parquet"
         self._oax_institution_fd_path = PROCESSED_DATA / "oax_institution_fd.parquet"
 
-        # Name-key tables: already persisted (arc_name_keys/oax_name_keys, in oax_provenance.
-        # duckdb) -- built and kept fresh across this session's own work, not rebuilt here.
-        # AcifOaxLinker reads them as-is; refreshing them (when awards_cif_arc_only.parquet or
-        # openalex_authors_prep.parquet changes) is a separate, explicit step, not implicit in
-        # construction -- avoids an unexpected multi-second-to-minutes rebuild hiding inside
-        # what should be a cheap __init__.
+        # Name-key tables: arc_name_keys/oax_name_keys are now built by _SETUP_SQL itself
+        # (2026-09-16, Stage 3) -- until then they existed only as whatever an earlier ad hoc,
+        # uncommitted script had left in oax_provenance.duckdb, with no code anywhere able to
+        # reproduce them; that gap is exactly how a real bug (arc_name_keys missing ORCID-sourced
+        # diminutive forms like "Bill" for "William") went undetected. Measured cost of rebuilding
+        # both every __init__: ~1s combined (9.6M oax_name_keys rows from 2.78M authors, 52K
+        # arc_name_keys rows) -- well inside this class's existing ~2.6s total __init__ cost,
+        # not the "multi-second-to-minutes" concern that motivated NOT rebuilding these here
+        # originally.
 
         # ARC-only population itself, for later per-ACIF methods (coawardees, orcids, etc.) --
         # loaded once as a DataFrame, not re-read per call.

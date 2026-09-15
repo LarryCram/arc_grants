@@ -157,6 +157,43 @@ SELECT acif_id AS arc_id, min(orcid) AS orcid
 FROM arc_orcid_scalar
 GROUP BY acif_id;
 
+-- ── Stage 7: given_name_check -- a soft, order-agnostic given-name signal, computed here as
+--    evidence (not a gate -- user direction 2026-09-16: "rather than gate, the test could
+--    return not_applicable/match/mismatch and this can feed into scoring"). Motivation: the
+--    bare-initial rarity gate (Stage 4) only requires the FAMILY half to be rare -- it says
+--    nothing about whether the given names actually agree, so a pair like ARC "John K. Smith"
+--    vs OAX "A. James Smith" could both self-add a bare initial and share nothing else, yet
+--    still reach blk_candidate_pairs on family-name rarity alone.
+--
+--    Tokenize into given-name PARTS only (the family name is never part of this comparison),
+--    order-agnostic -- "Adam James" does not exclude "Fred Adam" or "James John" (shares "adam"/
+--    "james" respectively). Reuses full_name_key's own given half (split on the first "_") rather
+--    than a fresh tokenization -- full_name_keys already IS the given/nickname x family
+--    cartesian product (src/utils/names.py::HumanNameParser.parse()), so collecting the DISTINCT
+--    given half across every one of an id's own full_name_key rows already recovers its whole
+--    given/nickname token set. Bare single-letter initials are excluded (length > 1) -- same
+--    "self-added blocking initial carries no identifying information on its own" principle as
+--    cluster_checks.py::first_names_compatible(), here applied to the ARC<->OAX candidate pool
+--    rather than ARC-internal gap_candidates.
+--
+--    Three-valued, not a gate: 'not_applicable' when either side has no full (multi-character)
+--    given token at all to compare (a genuine ARC-source or OAX-source ambiguity, not evidence
+--    of anything); 'match' when the two sides' given-token sets intersect at all, regardless of
+--    position; 'mismatch' only when both sides have real given-name evidence and none of it
+--    overlaps. ---------------------------------------------------------------------------------
+
+CREATE OR REPLACE TEMP TABLE arc_given_full AS
+SELECT acif_id AS arc_id, list(DISTINCT given) AS given_tokens
+FROM (SELECT acif_id, split_part(full_name_key, '_', 1) AS given FROM data.arc_name_keys) sub
+WHERE length(given) > 1
+GROUP BY acif_id;
+
+CREATE OR REPLACE TEMP TABLE oax_given_full AS
+SELECT author_idx, list(DISTINCT given) AS given_tokens
+FROM (SELECT author_idx, split_part(full_name_key, '_', 1) AS given FROM data.oax_name_keys) sub
+WHERE length(given) > 1
+GROUP BY author_idx;
+
 CREATE OR REPLACE TABLE data.blk_candidate_pairs AS
 SELECT
     p.arc_id,
@@ -166,14 +203,23 @@ SELECT
         WHEN a.orcid IS NULL OR o.orcid IS NULL THEN 'unknown'
         WHEN a.orcid = o.orcid THEN 'match'
         ELSE 'mismatch'
-    END AS orcid_check
+    END AS orcid_check,
+    CASE
+        WHEN ag.given_tokens IS NULL OR len(ag.given_tokens) = 0
+          OR og.given_tokens IS NULL OR len(og.given_tokens) = 0 THEN 'not_applicable'
+        WHEN len(list_filter(ag.given_tokens, x -> list_contains(og.given_tokens, x))) > 0 THEN 'match'
+        ELSE 'mismatch'
+    END AS given_name_check
 FROM candidate_pairs_raw p
 LEFT JOIN arc_orcid_check a ON a.arc_id = p.arc_id
-LEFT JOIN oax_orcid_scalar o ON o.author_idx = p.author_idx;
+LEFT JOIN oax_orcid_scalar o ON o.author_idx = p.author_idx
+LEFT JOIN arc_given_full ag ON ag.arc_id = p.arc_id
+LEFT JOIN oax_given_full og ON og.author_idx = p.author_idx;
 
 -- Example reads (not run by this file):
 --   SELECT match_reason, COUNT(*) FROM data.blk_candidate_pairs GROUP BY 1 ORDER BY 1;
 --   SELECT orcid_check, COUNT(*) FROM data.blk_candidate_pairs GROUP BY 1 ORDER BY 1;
+--   SELECT given_name_check, COUNT(*) FROM data.blk_candidate_pairs GROUP BY 1 ORDER BY 1;
 --   SELECT COUNT(DISTINCT arc_id) FROM data.blk_candidate_pairs;
 --   SELECT * FROM data.blk_candidate_pairs WHERE arc_id = 'DP0989027_AndrewKillcross';
 --   SELECT COUNT(*) FROM data.blk_bare_initial_dropped;  -- pairs the rarity gate removed
