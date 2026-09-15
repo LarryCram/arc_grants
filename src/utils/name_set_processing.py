@@ -7,7 +7,7 @@ display_name vs display_name_alternatives -- and a single, canonical way to comp
 objects for Splink blocking/scoring/TF-adjustment. Meant to replace the several independent,
 ad hoc "pick one representative string from a set" implementations found scattered across this
 codebase (family_name_main/full_name_key/first_name_canonical in names.py, awards_cif.py,
-02_prepare_oax.py, orcid_processor.py -- see docs/pipeline_todo.md item #14 for the full
+00b_extract_oax.py, orcid_processor.py -- see docs/pipeline_todo.md item #14 for the full
 incident history this is responding to).
 
 Design, settled across a long back-and-forth (2026-09-07/08), not re-derived here:
@@ -107,7 +107,7 @@ class NameSetProcessing:
     display_name or one ARC grant record's own family_name field). This is free information a
     single parse already produces (ParsedName.family_names IS one origin group) -- it was
     previously discarded the moment multiple source strings got unioned into one set (e.g.
-    02_prepare_oax.py parsing display_name plus every display_name_alternative separately, then
+    00b_extract_oax.py parsing display_name plus every display_name_alternative separately, then
     dumping all their family_names tokens into one shared dict with no memory of which alternative
     produced which token). Tracking it here, since we already compute it for free, sharpens
     validation: members WITHIN one origin group never need a relatedness check (they're

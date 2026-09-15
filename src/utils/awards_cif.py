@@ -184,7 +184,7 @@ class AwardCIFItem:
     # HEP codes for every HEP-eligible organisation formally on this grant (2026-08-16) --
     # NOT just admin_org's own HEP. Resolved from grants_flat.parquet's eligible_orgs column
     # (Administering + Other Eligible + Collaborating Organisation roles -- see
-    # 00_extract_arc.py::extract_grant_flat()'s docstring for why those 3 and not the other 4
+    # 00a_extract_arc.py::extract_grant_flat()'s docstring for why those 3 and not the other 4
     # role names ARC records) via _load_hep_crosswalk(). Deduplicated, sorted; empty if none of
     # this grant's eligible orgs resolve to an Australian HEP (rare but real -- ~0.55% of
     # in-scope grants have a non-HEP admin_org, e.g. medical research institutes).
@@ -204,7 +204,7 @@ class AwardCIFItem:
     inst_ids: list[str] = field(default_factory=list)
 
     # ARC's own raw isFellowship flag for THIS person on THIS grant (investigators_raw.parquet's
-    # is_fellowship column, extracted directly in 00_extract_arc.py) -- added 2026-08-24. Was
+    # is_fellowship column, extracted directly in 00a_extract_arc.py) -- added 2026-08-24. Was
     # previously absent from AwardCIFItem entirely, even though a downstream Dossier-reporting
     # consumer (analysis/utils/dossier.py's AwardContext) already declared a same-named field
     # that nothing ever populated.
@@ -1890,7 +1890,7 @@ def _oax_names_compat(oax_ids: list[str], oax_full_name_keys: dict) -> bool:
 
     2026-09-09 fix: checked via genuine exact-string overlap on each candidate's own
     full_name_keys (every given/nickname x family combination that candidate's own
-    display_name + alternatives produce -- see 02_prepare_oax.py::oax_name_arrays()), not the
+    display_name + alternatives produce -- see 00b_extract_oax.py::oax_name_arrays()), not the
     old single-scalar first_name/family_name_main + 3-char-prefix heuristic. That heuristic
     only ever compared first names >=4 characters long and returned True by default whenever
     fewer than 2 candidates had one -- confirmed on a real case (DE120100315_BenjaminIsakhan,

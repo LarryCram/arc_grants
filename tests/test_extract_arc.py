@@ -1,5 +1,5 @@
 """
-Tests for src/00_extract_arc.py's extract_grant_flat() -- pure function, no file I/O.
+Tests for src/00a_extract_arc.py's extract_grant_flat() -- pure function, no file I/O.
 
 Covers the 2026-08-16 eligible_orgs addition: n_eligible_orgs keeps its original 2-role scope
 (Administering + Other Eligible Organisation) since it's load-bearing downstream
@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from importlib import import_module
 
-_extract = import_module("src.00_extract_arc")
+_extract = import_module("src.00a_extract_arc")
 extract_grant_flat = _extract.extract_grant_flat
 
 

@@ -103,7 +103,7 @@ class FilterCandidates:
         # recomputed from scratch on every single process start -- measured 6.6s
         # (_build_for_subfield_dict, a FIXED 213-entry taxonomy enumeration that basically never
         # changes) + 4.7s (load_grant_for2020_codes, resolving all 30,475 grants' FOR entries,
-        # which only changes after a real 00_extract_arc.py rerun) = ~11s of pure setup cost on
+        # which only changes after a real 00a_extract_arc.py rerun) = ~11s of pure setup cost on
         # every interactive call, dwarfing load_clusters_by_size()'s own 2s. Cached in
         # oax_provenance.duckdb, same pattern as acif_oax_candidates -- pass
         # force_rebuild_caches=True after raw ARC data or the FOR taxonomy actually changes (no
@@ -504,7 +504,7 @@ class FilterCandidates:
     def _ensure_grant_for2020_cache(self, force_rebuild: bool = False) -> dict[str, list[dict]]:
         """grant_for2020_cache table -- caches load_grant_for2020_codes()'s output (4.7s to
         recompute, resolving every one of 30,475 grants' FOR entries; only changes after a real
-        00_extract_arc.py rerun on fresh ARC data). Nested STRUCT-list column persisted via a
+        00a_extract_arc.py rerun on fresh ARC data). Nested STRUCT-list column persisted via a
         registered pandas DataFrame, not executemany (DuckDB's Python executemany doesn't
         reliably bind nested list[dict] parameters the way a DataFrame->Arrow insert does)."""
         self.con.execute("""

@@ -191,7 +191,7 @@ def _prep_arc(con: duckdb.DuckDBPyConnection, path: Path) -> pd.DataFrame:
 
 
 def _prep_oax(con: duckdb.DuckDBPyConnection, path: Path) -> pd.DataFrame:
-    # HumanName-parsed columns are persisted by 02_prepare_oax.py — no re-parsing needed.
+    # HumanName-parsed columns are persisted by 00b_extract_oax.py — no re-parsing needed.
     # Blocks on the FULL family_names (display_name + display_name_alternatives combined), not
     # just the display-only half -- reversed 2026-08-25 after direct pushback on an earlier,
     # overcautious version that excluded alternatives entirely over contamination risk (the
@@ -253,8 +253,8 @@ def main():
     # expensive to rebuild (minutes, 2.78M authors) and only needs updating a few times a year --
     # when the OpenAlex snapshot changes, not on every unrelated source-code edit. So this checks
     # it against authorships_hep.parquet/works_hep.parquet (the real snapshot-derived sources),
-    # matching 02_prepare_oax.py's own ensure_fresh() policy exactly -- NOT against
-    # 02_prepare_oax.py's own source file, which would (and did) fire on every cosmetic edit to
+    # matching 00b_extract_oax.py's own ensure_fresh() policy exactly -- NOT against
+    # 00b_extract_oax.py's own source file, which would (and did) fire on every cosmetic edit to
     # that script, contradicting ensure_fresh()'s own deliberate choice to ignore exactly that.
     assert_fresh(
         "03_link_arc_oax (openalex_authors_prep.parquet)",
