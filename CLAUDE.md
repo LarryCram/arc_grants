@@ -2010,6 +2010,180 @@ resolved: should a high-confidence/many-grant match be vetoed the same way as a 
 single-grant one? No further cases run pending that decision. Full detail:
 `docs/pipeline_todo.md` item #28's latest status update.
 
+## `AcifOaxLinker` block()/fd_score() continued: orcid_check, given_name_check, and a real ORCID-widening bug that lost `full_name_keys` (2026-09-15/16)
+
+Direct continuation of the `AcifOaxLinker` rebuild (see "`04_resolve_links.py`'s disambiguation
+cascade found structurally broken..." above for the class's own origin story and Stage 1-3
+history). This session's work all sits inside `block()`/`fd_score()`, still Stage 1/2 of that
+class -- `coawardee_corroborate()` (Stage 3) and the rating/`resolve()` layer are unchanged and
+still not built.
+
+### `orcid_check` added to `block()`, OAX orcid prefix-stripping traced upstream, downstream
+consumers cleaned up (2026-09-15)
+
+`data.blk_candidate_pairs` gained `orcid_check` (`match`/`mismatch`/`unknown`) -- a direct
+ACIF-scalar-orcid vs. OAX-candidate-scalar-orcid comparison, distinct from `orcid_veto()`'s "any
+of a list" question (an ACIF has NULL or exactly one orcid; so does an OAX `author_idx`). Both
+sides compare as plain bare strings: confirmed directly that `00b_extract_oax.py`'s own Phase 1
+already strips the `https://orcid.org/` prefix building `openalex_authors_prep.parquet` -- no
+`ends_with()` workaround needed once you read from that file rather than the raw OpenAlex authors
+dimension table.
+
+Refactored every downstream consumer still reading the raw OpenAlex authors table and defensively
+handling the URL prefix (`.endswith()`/`contains()`/substring-`in`) to read
+`openalex_authors_prep.parquet` instead and compare with plain equality:
+`src/04_filter_candidates.py` (`pairs`/`_oax_orcid`/`_fetch_candidate_info`/`orcid_veto`/
+`_top_candidate_orcid_bucket`), `oeuvre_build.py`'s Stage 3 ORCID gate, `work_piling.py`'s
+`channel_piles()` ORCID check, `oax_priority_triage.sql`'s `orcid_any_match()` macro. Removed the
+now-dead `AUTHORS`/`OAX_AUTHORS` constant from `04_filter_candidates.py`.
+
+`fd_score()` briefly grew its own "orcid confirmed" priority tier, re-deriving ORCID-match status
+from `match_reason` (built from an ACIF's full, unnested orcid array) rather than reading
+`block()`'s own `orcid_check` (built from a `MIN`-collapsed scalar) -- two independent
+computations of the same fact that could disagree on a rare `MULTI_ORCID` conflict. **Removed
+outright, not fixed to reference `orcid_check`** (user: "the orcid score is not an fd_score() so
+why not leave it out") -- ORCID status isn't a frequency-distribution score and already lives on
+`blk_candidate_pairs`; `fd_score()` now only ever scores institution/subfield FD overlap.
+
+Verified against a full `00b_extract_oax.py` rerun and the full test suite (418/418) throughout.
+
+### `given_name_check` added; traced to a real, confirmed bug in ORCID-based name widening, not a
+nickname-inference gap (2026-09-16)
+
+User-directed design: tokenize into given-name parts only (family name excluded), test
+order-agnostic set overlap across ALL orderings -- "Adam James does not exclude Fred Adam or
+James John" -- returning `not_applicable`/`match`/`mismatch` to **feed scoring, not gate**
+candidate generation (explicit user correction to an earlier, gate-shaped proposal). Reuses
+`full_name_key`'s own given half (`split_part(key, '_', 1)`) rather than a fresh tokenization --
+collecting the DISTINCT given half across every one of an id's own `full_name_key` rows already
+recovers its whole given/nickname token set. Added to `sql/01_blocking_name_keys.sql` Stage 7.
+Population: `match` 274,177 / `mismatch` 20,451 / `not_applicable` 2,504 (after the fix below).
+
+**Real bug found and fixed, not a nickname-inference gap**: cross-tabbing `orcid_check='match'`
+(definitely the same real person) against `given_name_check='mismatch'` surfaced 212 pairs.
+Sampling found the "same person, different given-name token" cases were mostly things like ARC
+`full_names=['Bill Pritchard', 'William Pritchard']` vs. an `arc_name_keys` entry containing only
+`william_pritchard`/`w_pritchard` -- with **zero "Bill" anywhere in ARC's own raw
+`investigators_raw.parquet`** (checked exhaustively across all 18 real "Pritchard" records).
+Traced precisely: `widen_names_with_orcid_bulk_db()` (`awards_cif.py`) additively widens an
+ORCID-resolved cluster's `full_names`/`first_names`/`family_names` from that ORCID's own
+self-reported name/aliases (William Pritchard's real ORCID record lists "Bill Pritchard" as an
+alias) -- but never updated `full_name_keys`, the field everything else actually matches on, and
+built its given/family tokens via `_name_forms()`'s narrowed adapter, which discards
+`full_name_keys` entirely. **Fixed**: parse the ORCID-sourced name directly (`_name_parser.parse()`,
+not `_name_forms()`) and union its own `full_name_keys` in too, same as every other source of
+this field. User's own framing of why pulling a diminutive from ORCID like this is fine despite
+"hating surprises": it's that specific person's own self-report, not a generic "any William might
+be a Bill" dictionary applied population-wide -- reliable and narrow, unlike a bounded
+nickname-equivalence table (a Wiktionary diminutives list was floated as a source for one, then
+paused mid-fetch pending further thought -- not built, not decided either way).
+**Accepted residual risk, not fixed**: if someone's ORCID never lists a diminutive OAX's only
+recorded form uses, the match is still structurally unreachable -- watch for a surprisingly low
+total OAX work-count on an otherwise-productive researcher as the symptom (not built as a
+diagnostic).
+
+Verified: full `01_prepare_arc.py` rerun (22,888 AwardsCIF, clean), population-wide
+orcid-confirmed-but-given-name-mismatch count dropped **212 → 48** afterward. 418/418 tests.
+
+### `arc_name_keys`/`oax_name_keys` finally get a real, committed builder (2026-09-16)
+
+Both tables (the flat `(id, full_name_key)` lookups `block()` and everything after it reads) had
+**no builder anywhere in the repo** -- they existed only as whatever an earlier ad hoc,
+uncommitted script had left sitting in `oax_provenance.duckdb`. This is exactly how the
+`full_name_keys`-loses-ORCID-widening bug above went undetected: `arc_name_keys` for the Pritchard
+case only ever had 2 rows (bare initial + one full given name, always the formal one, never the
+diminutive) -- the signature of a single-representative pick, not a union, and nothing could
+rebuild or audit it. Verified `oax_name_keys` is NOT similarly bugged (191,510-author sample
+against `openalex_authors_prep.parquet.full_name_keys` directly: zero missing keys) -- the
+asymmetry is real and ARC-only, not a general problem with the mechanism.
+
+**Fixed**: `sql/04_acif_linker_setup.sql` gained Stage 3, building both tables directly from
+`awards_cif_arc_only.parquet.full_name_keys` / `openalex_authors_prep.parquet.full_name_keys` --
+reading the field straight from its one true source rather than re-deriving it, so this table can
+never again drift from it. Measured cost: ~1s combined (9.6M `oax_name_keys` rows from 2.78M
+authors, 52K `arc_name_keys` rows), folded into `AcifOaxLinker.__init__()`'s existing ~2.6s total
+-- the old code's own comment claiming this would be "an unexpected multi-second-to-minutes
+rebuild" was wrong and has been corrected.
+
+Population effect of both fixes together: `block()`'s total candidate pairs 271,427 → 297,132
+(recovering real name-key matches previously reachable only via ORCID rescue, not just a
+scoring-accuracy fix); `orcid_only` pairs correspondingly dropped 235 → 91.
+
+Committed in `0f589b1`.
+
+### `given_name_check` mismatch population investigated case-by-case; a real third-party-library
+bug found and fixed; several categories identified, none fully closed (2026-09-16, session end)
+
+Pulled the full 48-row `orcid_check='match'` + `given_name_check='mismatch'` list and investigated
+each. Findings, several confirmed real bugs distinct from the ORCID-widening fix above:
+
+- **`nameparser`'s own built-in `CONSTANTS.titles` contains "wing"** (from military ranks like
+  "Wing Commander") -- a real, confirmed collision with "Wing" as a genuine Chinese/Cantonese
+  given name. `HumanName("Wing Kong Chiu")` silently parsed `{'title': 'Wing', 'first': 'Kong', ...}`,
+  losing "Wing" from `given_tokens`/`full_name_keys` entirely -- not a tokenization nuance, a
+  real given-name loss. **Fixed**: `CONSTANTS.titles.remove("wing")` in `names.py`, alongside the
+  existing `suffix_acronyms` customization. No competing legitimate use exists in this project's
+  data (ARC/OAX names are never "Wing Commander Jane Smith"-shaped). Other entries in
+  `nameparser`'s titles set may collide with real given names the same way and are **not
+  audited** -- fix as found, not pre-emptively.
+- **`"A. M. See"` (bare initials only) wrongly flagged `mismatch` instead of `not_applicable`**:
+  `_split_bare_initials()`'s vowel heuristic doesn't split "am" (contains a vowel) into "a"/"m",
+  so a 2-letter concatenated-initials token slips through the `length > 1` "is this a full name"
+  filter as if it were a real given name. **Not fixed.**
+- **`"Å. Ferrier"` (bare initial) similarly wrongly flagged**: `diacritic_variants()` widens the
+  bare initial "Å" to `{a, aa}` (the same bare/digraph cartesian product used for real multi-letter
+  names) -- "aa" is 2 characters, so it also slips through the same `length > 1` filter as a
+  "full" given name. Same root symptom as `See`, different mechanism (initials-concatenation vs.
+  diacritic-widening) both defeating a filter that assumes "length > 1 implies a real name."
+  **Not fixed.**
+- **`"WEI Shuge"` misparsed backwards**: an all-caps-surname-first citation convention ("SURNAME
+  Givenname") gets read as given="wei"/family="shuge" by `nameparser`'s default First-Last
+  assumption -- inverted from the correct family=Wei/given=Shuge. Blocking still finds this pair
+  correctly via `01_blocking_name_keys.sql`'s existing bidirectional swapped-key match (Stage 1),
+  but `given_name_check` doesn't apply the same order-swap check, so it wrongly flags a real match
+  as `mismatch`. **Not fixed** -- `given_name_check` needs a swapped-comparison fallback
+  mirroring the blocking logic it sits downstream of.
+- **`"Elisabetta Barberio"`/`"Dario Barberis"`**: not a typo -- OAX's own `display_name_alternatives`
+  for author `A5105788331` (Dario Barberis) already literally contains an "E./L. Barberio" form.
+  Same OAX-side `display_name_alternatives` contamination pattern already documented for Geoffrey
+  Taylor (ATLAS-collaboration co-author-name bleed), now confirmed on a second case.
+- **Formatting/spelling variants, not data errors** (real people, tokenization just misses them):
+  `Hangwei Hu`/`Hang-Wei Hu`, `Sungyoung Shin`/`Sung-young Shin`, `Xiaolei Shi`/`Xiao‐Lei Shi`
+  (×3, one using a non-ASCII U+2010 hyphen) -- all hyphen-boundary token splits; `Phillip J
+  Newton`/`Philip Newton`, `Xiaolin Wang`/`Xiaoling Wang` -- one-letter spelling variants; `Petrus
+  van Heijster`/`Peter van Heijster` -- Latin/Dutch formal-form variant.
+- **Real nicknames** (the already-accepted, not-automatable residual): `Sam`/`Samantha Stehbens`,
+  `James`/`Jamie Kirkpatrick` (×2), `Deborah Anne`/`Debbie Scott`, `Kathleen`/`Kathy Ellem`,
+  `Terence`/`Terry Spithill`, `Rajagopal`/`Raj Gururajan`.
+- **Checked directly, user's own hypothesis (HEP/mega-author-collaboration contamination)
+  confirmed real but NOT a general explanation**: `max_coauthors` (largest author count on any
+  single work) for each of the 48 candidates spans 7,382 down to 1 with no natural cutoff. Only 7
+  stand out as plausible mega-collaboration contamination (Takashi Kubota 7,382; Kevin Varvell
+  3,784; Elisabetta Barberio 3,503; Hua Kun Liu 3,090; Rajagopal Gururajan 1,925; Geoffrey Taylor
+  355 -- the already-documented ATLAS case; Claire Gordon 100); everything else sits under 80,
+  most under 20. A size-based filter would only ever catch that top handful, not the bulk of the
+  list -- **not built**, and confirmed not a general fix for this population.
+- **Remaining, still-unexplained "complete mismatch" cases** (no plausible relationship found by
+  any of the above categories, likely genuine wrong ORCID-bulk-DB matches): Adeel Razi/Akshay
+  Nair, D.A. Driscoll/G. Alexander Heard, Carolyn Philpott/Maria Grenfell, Dinh Thai Hoang/Phai Vu
+  Dinh, G Zhao/Xiantong Zhao, Ji Lu/Jianhua Guo, I.E. Shparlinski/Sary Drappeau, Kristopher
+  Kilian/Giulia Silvani, Lan Du/Baosheng Yu, Laura Mackay/P. Foley, M Cook/Myles Russell Cook, P C
+  Hagan/Bruce Hebblewhite (already flagged as a suspected wrong-ORCID case in this file's own
+  2026-08-19/20 "ORCID Public API integration" entry above), Penghao Wang/Ping Wang, Peter
+  Miller/Kathryn Graham, Rebecca Gravina/Filippo Giustozzi, Seth Cheetham/Theodore E. Leonard,
+  Shinichi Nakagawa/Alexandra R Davidson, Stuart Howden/Mark Howden, Sue Webb/Marcella Milana,
+  Susan Harris Rimmer/Elise Stephenson, Xiao Dong Chen/Xiaofan Chen.
+
+**Pending, next session**: fix the `See`/`Ferrier` bare-initial-slips-through-length>1-filter bug
+(likely needs the "is this genuinely a multi-character NAME, not an initial-derived artifact"
+check to happen before diacritic-widening/initials-concatenation, not after); add a swapped-order
+fallback to `given_name_check` for the `Shuge`-style case; decide whether/how to act on the
+remaining ~20 likely-wrong-ORCID "complete mismatch" cases (a review/exclusion queue was discussed
+but not built -- see the conversation immediately preceding this entry). Everything else in this
+entry (the `orcid_check`/OAX-orcid-prefix cleanup, `fd_score()`'s orcid-tier removal,
+`given_name_check` itself, the `widen_names_with_orcid_bulk_db()` full_name_keys fix, the
+`arc_name_keys`/`oax_name_keys` builder, and the `Wing`-titles fix) is committed as of this entry.
+
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
 

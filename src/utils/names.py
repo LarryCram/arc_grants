@@ -51,6 +51,19 @@ _POSTNOMINAL_ACRONYMS = (
 for _pn in _POSTNOMINAL_ACRONYMS:
     CONSTANTS.suffix_acronyms.add(_pn)
 
+# nameparser's own built-in CONSTANTS.titles includes "wing" (from military ranks like "Wing
+# Commander") -- a real, confirmed collision with "Wing" as a genuine Chinese/Cantonese given
+# name (found 2026-09-16, OpenAlex author "Wing Kong Chiu": HumanName("Wing Kong Chiu") silently
+# drops "Wing" into .title, leaving only "Kong" in .first -- .as_dict() shows
+# {'title': 'Wing', 'first': 'Kong', ...} -- so "wing" never reaches given_tokens/full_name_keys
+# at all, a real given-name loss, not a tokenization nuance). Discarded from the titles set
+# entirely -- this project has no legitimate use for parsing a rank/title prefix off anyone's
+# name (ARC/OAX author strings are never "Wing Commander Jane Smith"-shaped), so there's no
+# competing case this could break. Other entries in nameparser's own titles set may collide with
+# real given names the same way and haven't been audited -- fix them as found, same as this one,
+# rather than trying to pre-empt the whole list.
+CONSTANTS.titles.remove("wing")
+
 
 def strip_parens(s: str) -> str:
     """Remove parenthetical expressions: 'Murphy (née Paton-Walsh)' → 'Murphy'."""
