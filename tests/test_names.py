@@ -183,6 +183,24 @@ class TestHumanNameParser:
     def test_diacritic_variants_exposed_standalone(self):
         assert self.p.diacritic_variants("Müller") == ("muller", "mueller")
 
+    def test_bare_diacritic_initial_not_digraph_expanded(self):
+        # A bare single-letter initial with a diacritic mark ("Å", strip_diacriticals -> "a",
+        # one character) must not be cartesian-expanded into a multi-character digraph artifact
+        # ("aa") that would then look like real given-name evidence downstream -- confirmed real
+        # via the "Å. Ferrier" given_name_check false-mismatch case (2026-09-16). Only the bare
+        # ASCII letter survives.
+        r = self.p.parse("Å Ferrier")
+        assert r.given_tokens == ("a",)
+        assert r.full_name_keys == ("a_ferrier",)
+
+    def test_genuine_multichar_diacritic_name_still_digraph_expanded(self):
+        # The guard above must not suppress real digraph widening for an actual multi-character
+        # given name -- "Björn" still needs both "bjorn" and "bjoern" to bridge ARC/OAX spelling
+        # conventions.
+        r = self.p.parse("Björn Nansen")
+        assert "bjorn" in r.given_tokens
+        assert "bjoern" in r.given_tokens
+
 
 class TestNicknameTokens:
     """nickname_tokens (2026-09-08): a quoted/parenthesized nickname, kept as its own field --

@@ -59,10 +59,47 @@ for _pn in _POSTNOMINAL_ACRONYMS:
 # at all, a real given-name loss, not a tokenization nuance). Discarded from the titles set
 # entirely -- this project has no legitimate use for parsing a rank/title prefix off anyone's
 # name (ARC/OAX author strings are never "Wing Commander Jane Smith"-shaped), so there's no
-# competing case this could break. Other entries in nameparser's own titles set may collide with
-# real given names the same way and haven't been audited -- fix them as found, same as this one,
-# rather than trying to pre-empt the whole list.
-CONSTANTS.titles.remove("wing")
+# competing case this could break.
+#
+# 2026-09-16 (same day, follow-on): "wing" was not a one-off. nameparser's titles list has 619
+# words in it. Some of those words are ALSO real given names in cultures this project hadn't
+# specifically checked against before -- when one of those words is the first word of someone's
+# name, nameparser throws it away as a "title" instead of keeping it as their given name.
+#
+# Checking this against OpenAlex alone isn't enough to justify a fix, though -- the actual job is
+# matching ARC investigators to OpenAlex authors, so a word only matters here if some real ARC
+# investigator actually has it as their given name (otherwise there's no ARC person for the fixed
+# OpenAlex record to ever match against, so fixing it changes nothing for this project). Checked
+# every word from the OpenAlex side that looked like a real given name against ARC's own raw
+# investigator names (investigators_raw.parquet) before deciding. Only kept the ones that are
+# BOTH a real given name being thrown away on the OpenAlex side AND actually used by a real ARC
+# investigator:
+#   mahdi       4 ARC investigators (Mahdi Jalili, Disfani, Parsa, Fahmideh)
+#   sultan      1 ARC investigator  (Sultan Mia)
+#   do          1 ARC investigator  (Do Hau)
+#   tirthankar  1 ARC investigator  (Tirthankar Bandyopadhyay)
+#   king        4 ARC investigators (King Fung Wong, King Lai, King Yuk Chan, King Yang)
+#   sheikh      2 ARC investigators (Sheikh Mohammad Fazle Rabbi, Sheikh Rahman)
+#
+# Several other words (prince, gen, imam, sultana, lama, guru, princess, baba, se) also turned out
+# to be real given names being thrown away on the OpenAlex side, sometimes for many more people
+# (e.g. "prince" hit 83 real OpenAlex authors) -- but zero ARC investigators use any of these as
+# their given name, so fixing them wouldn't create a single new correct match here. Left alone,
+# not because they're wrong, but because there's no payoff for this project right now.
+#
+# Also checked and deliberately left alone: "sa"/"ab" -- every real example on the OpenAlex side
+# is just two letters used as initials ("S.A. McIlveen"), not an actual name. "shehu"/"pir" --
+# real religious titles where the person's actual given name is usually still there right after
+# the title, so removing these wouldn't recover much either way.
+#
+# Everything else in the 619-word list (Dr, Mr, Professor, Colonel, and ~150 more words that also
+# showed up on real OpenAlex authors) is a genuine title being stripped correctly -- left alone.
+# Not all 619 words were checked this closely, only the ones with enough real OpenAlex occurrences
+# to be worth checking -- another one could still turn out to be a hidden case like this. Fix more
+# as they're found and confirmed against a real ARC investigator the same way.
+_TITLE_COLLISIONS_REMOVED = ("wing", "mahdi", "sultan", "do", "tirthankar", "king", "sheikh")
+for _tc in _TITLE_COLLISIONS_REMOVED:
+    CONSTANTS.titles.remove(_tc)
 
 
 def strip_parens(s: str) -> str:
@@ -254,6 +291,36 @@ class HumanNameParser:
         (shortest-first, matching diacritic_variants()'s own contract)."""
         return tuple(diacritic_variants(s))
 
+    def _given_name_diacritic_variants(self, s: str) -> tuple[str, ...]:
+        """Diacritic widening for a given-name token, guarded against a bare single-letter
+        initial being cartesian-expanded into a multi-character digraph artifact that then
+        looks like real given-name evidence downstream (a real, confirmed case: "Å" -- itself
+        a single letter, strip_diacriticals("Å") == "a" -- widens via diacritic_variants() to
+        {"a", "aa"}, since "aa" is the genuine Scandinavian digraph transliteration; that
+        expansion does real, needed work for a genuine multi-character name like "Björn" ->
+        {"bjorn", "bjoern"}, but "aa" derived from a bare initial carries exactly as little
+        identifying information as the "a" it was derived from -- confirmed directly
+        (2026-09-16 investigation, "Å. Ferrier" case): both survive into given_tokens/
+        full_name_keys correctly, but downstream comparisons that treat any length>1 given
+        token as real evidence (see sql/01_blocking_name_keys.sql's given_name_check) have no
+        way to tell "aa" apart from a genuine short name once it's a bare string, wrongly
+        counting it as substantial.
+
+        The fix is structural, not a rarity/frequency threshold: was the token ALREADY just
+        one character before any diacritic widening? That question was tested empirically
+        against oax_tf_first_name.parquet's full given-name-token frequency distribution before
+        settling on this approach -- rejected, because a real, protected short given name ("Mo",
+        138 real ARC occurrences, tf=6.2e-5) sits statistically BETWEEN the suspected-initials
+        cluster ("aw" 2.8e-5, "aa"/"am" ~6-12e-5) with no separating threshold, so any
+        frequency-based cutoff that catches "aa" would also wrongly catch "Mo". This check has
+        no such collision risk: "Mo" was never a single character at any point, so it never hits
+        the guard below, while "Å" genuinely was.
+        """
+        stripped = strip_diacriticals(s) if s else ""
+        if len(stripped) <= 1:
+            return (stripped,) if stripped else ()
+        return self.diacritic_variants(s)
+
     def _structural(self, raw_name: str) -> HumanName | None:
         """canonicalize -> HumanName parse (postnominal suffixes handled natively via the
         CONSTANTS.suffix_acronyms registration above, no pre-stripping) -> single-token-name
@@ -328,10 +395,10 @@ class HumanNameParser:
         # Splink's primary blocking key (family_name_main + first_initial, per this file's own
         # documented convention below).
         first_tokens = [
-            tok for variant in self.diacritic_variants(hn.first) for tok in name_part_tokens(variant)
+            tok for variant in self._given_name_diacritic_variants(hn.first) for tok in name_part_tokens(variant)
         ] if hn.first else []
         middle_tokens = [
-            tok for variant in self.diacritic_variants(hn.middle) for tok in name_part_tokens(variant)
+            tok for variant in self._given_name_diacritic_variants(hn.middle) for tok in name_part_tokens(variant)
         ] if hn.middle else []
         given_ascii = first_tokens + middle_tokens
         family_names = self.diacritic_variants(hn.last) if hn.last else ()

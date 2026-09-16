@@ -77,14 +77,24 @@ JOIN oax_orcid_scalar o USING (orcid);
 --    this population) that the OR form counts once and this UNION ALL counts twice; harmless,
 --    since every downstream step already GROUP BY/DISTINCTs on (arc_id, author_idx). ──────────
 
+-- via_swap: FALSE for the direct join (OAX's own full_name_key assumed correctly parsed), TRUE
+-- for the swapped join (this pair only matched because OAX's given/family halves are inverted,
+-- e.g. a surname-first citation form like "WEI Shuge" parsed as given=wei/family=shuge). Rolled
+-- up per pair below so Stage 7's given_name_check can know, for THIS specific pair, whether to
+-- trust OAX's own given-half or treat its family-half as the true given name instead -- a
+-- targeted, per-pair reinterpretation, not a blanket union of every OAX author's given+family
+-- tokens (which would risk a coincidental collision, e.g. a real given name "Wei" matching an
+-- unrelated different person's real surname "Wei").
 CREATE OR REPLACE TEMP TABLE name_key_matches_raw AS
 SELECT a.acif_id AS arc_id, o.author_idx, a.full_name_key AS matched_key,
-       length(split_part(a.full_name_key, '_', 1)) > 1 AS is_multichar
+       length(split_part(a.full_name_key, '_', 1)) > 1 AS is_multichar,
+       FALSE AS via_swap
 FROM data.arc_name_keys a
 JOIN oax_keys_swapped o ON a.full_name_key = o.full_name_key
 UNION ALL
 SELECT a.acif_id AS arc_id, o.author_idx, a.full_name_key AS matched_key,
-       length(split_part(a.full_name_key, '_', 1)) > 1 AS is_multichar
+       length(split_part(a.full_name_key, '_', 1)) > 1 AS is_multichar,
+       TRUE AS via_swap
 FROM data.arc_name_keys a
 JOIN oax_keys_swapped o ON a.full_name_key = o.full_name_key_swapped;
 
@@ -92,7 +102,8 @@ JOIN oax_keys_swapped o ON a.full_name_key = o.full_name_key_swapped;
 --    bare_initial_only_pairs need the matched key's FAMILY half to be rare. ────────────────────
 
 CREATE OR REPLACE TEMP TABLE pair_rollup AS
-SELECT arc_id, author_idx, bool_or(is_multichar) AS has_multichar_match
+SELECT arc_id, author_idx, bool_or(is_multichar) AS has_multichar_match,
+       bool_or(via_swap) AS any_swap_match
 FROM name_key_matches_raw
 GROUP BY arc_id, author_idx;
 
@@ -129,17 +140,28 @@ SELECT arc_id, author_idx FROM bare_initial_only_pairs;
 --    strongest, name-independent signal) is distinguishable from 'name_key_only' and from
 --    pairs found both ways. ─────────────────────────────────────────────────────────────────
 
+-- any_swap_match carried through from pair_rollup (name-key-matched pairs only -- an
+-- orcid_only pair has no name-key match at all, so via_swap is meaningless for it;
+-- coalesce to FALSE rather than leaving NULL, since Stage 7 needs a concrete boolean).
 CREATE OR REPLACE TEMP TABLE candidate_pairs_raw AS
 SELECT
-    arc_id,
-    author_idx,
-    CASE
-        WHEN n.arc_id IS NOT NULL AND o.arc_id IS NOT NULL THEN 'orcid+name_key'
-        WHEN o.arc_id IS NOT NULL THEN 'orcid_only'
-        ELSE 'name_key_only'
-    END AS match_reason
-FROM name_key_pairs n
-FULL OUTER JOIN orcid_pairs o USING (arc_id, author_idx);
+    c.arc_id,
+    c.author_idx,
+    c.match_reason,
+    coalesce(pr.any_swap_match, FALSE) AS any_swap_match
+FROM (
+    SELECT
+        arc_id,
+        author_idx,
+        CASE
+            WHEN n.arc_id IS NOT NULL AND o.arc_id IS NOT NULL THEN 'orcid+name_key'
+            WHEN o.arc_id IS NOT NULL THEN 'orcid_only'
+            ELSE 'name_key_only'
+        END AS match_reason
+    FROM name_key_pairs n
+    FULL OUTER JOIN orcid_pairs o USING (arc_id, author_idx)
+) c
+LEFT JOIN pair_rollup pr USING (arc_id, author_idx);
 
 -- ── Stage 6: orcid_check -- an ARC-recorded orcid vs. a given OAX candidate's own orcid,
 --    each a genuine scalar (an ACIF has NULL or exactly one orcid; an OAX author_idx has NULL
@@ -194,27 +216,60 @@ FROM (SELECT author_idx, split_part(full_name_key, '_', 1) AS given FROM data.oa
 WHERE length(given) > 1
 GROUP BY author_idx;
 
+-- oax_given_full_swapped: same shape as oax_given_full, but from the FAMILY half of
+-- oax_name_keys.full_name_key instead of the given half -- OAX's true given name, for a pair
+-- that only matched via the swapped-key join (any_swap_match=TRUE), is believed to sit in the
+-- family slot (e.g. "WEI Shuge" parsed given=wei/family=shuge -- "shuge" is the real given
+-- name). Only ARC gets a swap-mirrored table, matching Stage 1's own oax_keys_swapped design
+-- (which only ever swaps the OAX side, never the ARC side -- ARC's own parsing is assumed
+-- correct throughout this file).
+CREATE OR REPLACE TEMP TABLE oax_given_full_swapped AS
+SELECT author_idx, list(DISTINCT given) AS given_tokens
+FROM (SELECT author_idx, split_part(full_name_key, '_', 2) AS given FROM data.oax_name_keys) sub
+WHERE length(given) > 1
+GROUP BY author_idx;
+
+-- effective_oax_given picks, per PAIR (not per bare OAX author_idx), which of OAX's own
+-- token sets to compare ARC's given tokens against -- the swapped set only for a pair that
+-- actually matched via the swap join, never as a blanket substitution for every candidate
+-- pairing that author_idx happens to appear in (a real, different OAX author elsewhere in the
+-- same candidate pool, matched via a normal non-swapped join, must still be compared normally).
 CREATE OR REPLACE TABLE data.blk_candidate_pairs AS
+WITH effective AS (
+    SELECT
+        p.arc_id,
+        p.author_idx,
+        p.match_reason,
+        a.orcid AS arc_orcid,
+        o.orcid AS oax_orcid,
+        ag.given_tokens AS arc_given_tokens,
+        CASE WHEN p.any_swap_match THEN ogs.given_tokens ELSE og.given_tokens END
+            AS effective_oax_given_tokens
+    FROM candidate_pairs_raw p
+    LEFT JOIN arc_orcid_check a ON a.arc_id = p.arc_id
+    LEFT JOIN oax_orcid_scalar o ON o.author_idx = p.author_idx
+    LEFT JOIN arc_given_full ag ON ag.arc_id = p.arc_id
+    LEFT JOIN oax_given_full og ON og.author_idx = p.author_idx
+    LEFT JOIN oax_given_full_swapped ogs ON ogs.author_idx = p.author_idx
+)
 SELECT
-    p.arc_id,
-    p.author_idx,
-    p.match_reason,
+    arc_id,
+    author_idx,
+    match_reason,
     CASE
-        WHEN a.orcid IS NULL OR o.orcid IS NULL THEN 'unknown'
-        WHEN a.orcid = o.orcid THEN 'match'
+        WHEN arc_orcid IS NULL OR oax_orcid IS NULL THEN 'unknown'
+        WHEN arc_orcid = oax_orcid THEN 'match'
         ELSE 'mismatch'
     END AS orcid_check,
     CASE
-        WHEN ag.given_tokens IS NULL OR len(ag.given_tokens) = 0
-          OR og.given_tokens IS NULL OR len(og.given_tokens) = 0 THEN 'not_applicable'
-        WHEN len(list_filter(ag.given_tokens, x -> list_contains(og.given_tokens, x))) > 0 THEN 'match'
+        WHEN arc_given_tokens IS NULL OR len(arc_given_tokens) = 0
+          OR effective_oax_given_tokens IS NULL OR len(effective_oax_given_tokens) = 0
+            THEN 'not_applicable'
+        WHEN len(list_filter(arc_given_tokens, x -> list_contains(effective_oax_given_tokens, x))) > 0
+            THEN 'match'
         ELSE 'mismatch'
     END AS given_name_check
-FROM candidate_pairs_raw p
-LEFT JOIN arc_orcid_check a ON a.arc_id = p.arc_id
-LEFT JOIN oax_orcid_scalar o ON o.author_idx = p.author_idx
-LEFT JOIN arc_given_full ag ON ag.arc_id = p.arc_id
-LEFT JOIN oax_given_full og ON og.author_idx = p.author_idx;
+FROM effective;
 
 -- Example reads (not run by this file):
 --   SELECT match_reason, COUNT(*) FROM data.blk_candidate_pairs GROUP BY 1 ORDER BY 1;
