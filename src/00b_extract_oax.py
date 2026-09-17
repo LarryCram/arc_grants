@@ -20,7 +20,18 @@ recomputing a scoped version on every iteration of active downstream development
 
 Phase 1 – author_hep: group authorships_hep by author, aggregating institution
     IDs (from HEP authorships), field distribution with fractions (from HEP
-    works), and name/ORCID/topic data (from authors entity).
+    works), and name/ORCID/cited_by_count/h_index/topic data (from authors entity;
+    cited_by_count/h_index added 2026-09-17 so downstream report-building code has no reason
+    to reach around this file and read the raw OAX_AUTHORS dimension table directly). Also
+    carries three distinct works-count fields, not to be confused with each other: works_count
+    (this file's own pre-existing field -- DISTINCT works in the HEP-context population, i.e.
+    works with at least one HEP-affiliated co-author, counted for EVERY author on that work
+    regardless of their own affiliation -- see AUTHORSHIPS_HEP.md), works_count_global (2026-09-17,
+    the raw author entity's own total lifetime works_count, unfiltered/worldwide, same
+    straight-passthrough treatment as cited_by_count/h_index), and works_count_au (2026-09-17,
+    DISTINCT works where THIS author's own authorship row -- not some co-author's -- carries
+    country_code='AU'). works_count_global - works_count_au is a direct overseas-vs-Australian
+    output signal for a candidate.
     → author_hep.parquet
 
 Phase 2 – Splink prep: parse names via oax_name_arrays UDF.
@@ -369,6 +380,21 @@ def main():
                 FROM field_fracs
                 GROUP BY author_idx, works_count
               ),
+              -- Per-author AU-affiliation work count (2026-09-17): DISTINCT works where THIS
+              -- author's own authorship row (not just some co-author's) carries an Australian
+              -- institution -- authorships_hep includes every author on any work that has AT
+              -- LEAST ONE HEP-affiliated author (see AUTHORSHIPS_HEP.md), so a plain works_count
+              -- over it counts a purely-overseas collaborator's works too. country_code='AU' is
+              -- the raw per-authorship signal already present, deliberately not narrowed to the
+              -- HEP institution list specifically -- "AU" here means "physically/institutionally
+              -- in Australia", the broader, more direct signal for the overseas-location
+              -- comparison this field exists for.
+              au_works AS (
+                SELECT author_idx, count(DISTINCT work_idx) AS works_count_au
+                FROM '{auth_hep}'
+                WHERE country_code = 'AU'
+                GROUP BY author_idx
+              ),
               -- institution IDs per author from HEP authorships → full OAX URLs
               inst_agg AS (
                 SELECT
@@ -389,6 +415,9 @@ def main():
                   au.author_idx,
                   au.display_name,
                   au.orcid,
+                  au.cited_by_count,
+                  au.h_index,
+                  au.works_count                                       AS works_count_global,
                   au.topics,
                   CASE
                     WHEN au.full_name IS NOT NULL
@@ -412,6 +441,10 @@ def main():
                 ELSE list_append(g.alts_gated, g.full_name_trusted)
               END                                                    AS display_name_alternatives,
               replace(g.orcid, 'https://orcid.org/', '')            AS orcid,
+              g.cited_by_count                                      AS cited_by_count,
+              g.h_index                                              AS h_index,
+              g.works_count_global                                   AS works_count_global,
+              COALESCE(aw.works_count_au, 0)                        AS works_count_au,
               COALESCE(ia.inst_ids, [])                            AS inst_ids,
               list_transform(g.topics, x -> x.display_name)       AS topic_names,
               list_transform(g.topics, x -> x.subfield.display_name) AS subfield_names,
@@ -419,6 +452,7 @@ def main():
               sf.sorted_fields
             FROM sorted_fields sf
             LEFT JOIN inst_agg ia USING (author_idx)
+            LEFT JOIN au_works aw USING (author_idx)
             JOIN gated g ON g.author_idx = sf.author_idx
         ) TO '{out_hep}' (FORMAT PARQUET)
     """)
@@ -443,6 +477,10 @@ def main():
                     full_name,
                     oax_names(author_name, display_name_alternatives) AS parsed,
                     orcid,
+                    cited_by_count,
+                    h_index,
+                    works_count_global,
+                    works_count_au,
                     inst_ids,
                     topic_names,
                     subfield_names,
@@ -462,6 +500,10 @@ def main():
                 parsed.family_names_alt                                     AS family_names_alt,
                 parsed.full_name_keys                                       AS full_name_keys,
                 orcid,
+                cited_by_count,
+                h_index,
+                works_count_global,
+                works_count_au,
                 inst_ids,
                 topic_names,
                 subfield_names,
