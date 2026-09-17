@@ -8,8 +8,14 @@ DuckDB schema, not a dataclass -- results.db IS the report's data source, not an
 object something else renders.
 
 Three tables so far, per direct project direction (2026-09-17):
-  - title: one row per ACIF -- the report header. ARC-recorded orcid(s), which OAX identity is
-    currently "selected" for this person, and when this row was last (re)built.
+  - title: one row per ACIF -- the report header. ARC-recorded orcid(s), the top 3 FOR2020
+    fields across all this ACIF's grants (by declared-entry count, with each one's fraction of
+    the total -- counted at whatever granularity awards_cif_arc_only.parquet's own for2020_codes
+    already dedupes to: one entry per (grant, resolved FOR2020 group)), the OAX-side analog --
+    the top 3 OAX subfields (by work count, with fraction) for whichever OAX identity is
+    currently "selected" (old pipeline) for this person, sourced from oax_subfield_fd.parquet
+    (the same population-wide table fd_score()'s subfield_score reads) -- and when this row was
+    last (re)built.
   - arc: one row per (ACIF, grant) -- grant code, role, fellowship flag, funding amount,
     HEP code (not scheme_name or the raw admin_org institution name -- dropped/recoded per
     direct 2026-09-17 instruction; institution is coded as its short hep_code, matching the
@@ -57,6 +63,7 @@ from src.utils.awards_cif import _load_hep_crosswalk
 
 ARC_ONLY_PARQUET = PROCESSED_DATA / "awards_cif_arc_only.parquet"
 OAX_PREP = PROCESSED_DATA / "openalex_authors_prep.parquet"
+OAX_SUBFIELD_FD = PROCESSED_DATA / "oax_subfield_fd.parquet"
 GRANTS_FLAT = PROCESSED_DATA / "grants_flat.parquet"
 INVESTIGATORS_RAW = PROCESSED_DATA / "investigators_raw.parquet"
 PROVENANCE_DB = PROCESSED_DATA / "oax_provenance.duckdb"
@@ -89,6 +96,37 @@ def build_title_table(con: duckdb.DuckDBPyConnection) -> int:
             FROM prov.acif_oax_candidates
             GROUP BY cluster_id
         ),
+        for_counts AS (
+            SELECT cluster_id, entry.code AS for_code, entry."name" AS for_name, COUNT(*) AS n
+            FROM (
+                SELECT cluster_id, unnest(for2020_codes) AS entry
+                FROM read_parquet('{ARC_ONLY_PARQUET}')
+                WHERE excluded = FALSE
+            )
+            GROUP BY cluster_id, entry.code, entry."name"
+        ),
+        for_totals AS (
+            SELECT cluster_id, SUM(n) AS total_n FROM for_counts GROUP BY cluster_id
+        ),
+        for_ranked AS (
+            SELECT fc.cluster_id, fc.for_name, fc.n, ft.total_n,
+                   -- ORDER BY n DESC alone is non-deterministic on ties (confirmed real,
+                   -- 2026-09-18: 5 FOR fields tied at n=1 for one ACIF produced a different
+                   -- top-3 pick across two consecutive rebuilds) -- name ASC as a deterministic
+                   -- tiebreak, same discipline as this project's other non-determinism fixes.
+                   row_number() OVER (
+                       PARTITION BY fc.cluster_id ORDER BY fc.n DESC, fc.for_name ASC
+                   ) AS rn
+            FROM for_counts fc JOIN for_totals ft USING (cluster_id)
+        ),
+        top_for AS (
+            SELECT cluster_id,
+                   list({{'name': for_name, 'fraction': round(n * 1.0 / total_n, 3)}}
+                        ORDER BY rn) AS top_for_codes
+            FROM for_ranked
+            WHERE rn <= 3
+            GROUP BY cluster_id
+        ),
         keeps AS (
             SELECT p.cluster_id, p.oax_id, p.works_count,
                    row_number() OVER (
@@ -99,8 +137,32 @@ def build_title_table(con: duckdb.DuckDBPyConnection) -> int:
             WHERE p.status = 'keep'
         ),
         selected AS (
-            SELECT cluster_id, oax_id, works_count AS oax_works_count, n_keep
+            SELECT cluster_id, oax_id, works_count AS oax_works_count, n_keep,
+                   try_cast(regexp_extract(oax_id, '[0-9]+$') AS BIGINT) AS author_idx
             FROM keeps WHERE rn = 1
+        ),
+        oax_sf_counts AS (
+            SELECT s.cluster_id, f.subfield_name, f.n
+            FROM selected s
+            JOIN read_parquet('{OAX_SUBFIELD_FD}') f ON f.author_idx = s.author_idx
+        ),
+        oax_sf_totals AS (
+            SELECT cluster_id, SUM(n) AS total_n FROM oax_sf_counts GROUP BY cluster_id
+        ),
+        oax_sf_ranked AS (
+            SELECT c.cluster_id, c.subfield_name, c.n, t.total_n,
+                   row_number() OVER (
+                       PARTITION BY c.cluster_id ORDER BY c.n DESC, c.subfield_name ASC
+                   ) AS rn
+            FROM oax_sf_counts c JOIN oax_sf_totals t USING (cluster_id)
+        ),
+        top_oax_sf AS (
+            SELECT cluster_id,
+                   list({{'name': subfield_name, 'fraction': round(n * 1.0 / total_n, 3)}}
+                        ORDER BY rn) AS top_oax_subfields
+            FROM oax_sf_ranked
+            WHERE rn <= 3
+            GROUP BY cluster_id
         )
         SELECT
             a.cluster_id,
@@ -108,11 +170,13 @@ def build_title_table(con: duckdb.DuckDBPyConnection) -> int:
             a.resolution_status,
             a.n_grants,
             a.orcids,
+            tf.top_for_codes,
             coalesce(c.n_oax_candidates, 0) AS n_oax_candidates,
             coalesce(s.n_keep, 0) AS n_keep_candidates,
             s.oax_id,
             oax.full_name AS oax_full_name,
             s.oax_works_count,
+            tsf.top_oax_subfields,
             CASE
                 WHEN s.oax_id IS NOT NULL THEN 'selected'
                 WHEN coalesce(c.n_oax_candidates, 0) = 0 THEN 'no_candidates'
@@ -120,8 +184,10 @@ def build_title_table(con: duckdb.DuckDBPyConnection) -> int:
             END AS selection_status,
             TIMESTAMP '{now}' AS report_generated_at
         FROM acifs a
+        LEFT JOIN top_for tf USING (cluster_id)
         LEFT JOIN candidate_counts c USING (cluster_id)
         LEFT JOIN selected s USING (cluster_id)
+        LEFT JOIN top_oax_sf tsf USING (cluster_id)
         LEFT JOIN read_parquet('{OAX_PREP}') oax
             ON oax.author_idx = try_cast(regexp_extract(s.oax_id, '[0-9]+$') AS BIGINT)
     """)

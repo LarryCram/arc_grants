@@ -18,8 +18,23 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import duckdb
+import numpy as np
 import pandas as pd
 from tabulate import tabulate
+
+
+def _as_list(x) -> list:
+    """DuckDB LIST(STRUCT) columns come back from fetchdf() as numpy.ndarray when populated,
+    but a NULL (e.g. a LEFT JOIN that matched nothing) comes back as a bare NA scalar (None or
+    pd.NA) -- neither is a plain Python list, so `isinstance(x, list)` is wrong for BOTH cases
+    (found 2026-09-18: an earlier fix that only handled the NA case broke the populated case,
+    silently rendering real data as "(none)" everywhere). This normalizes both to a plain list,
+    empty for the missing case."""
+    if isinstance(x, np.ndarray):
+        return list(x)
+    if isinstance(x, list):
+        return x
+    return []
 
 
 def category_summary(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
@@ -104,6 +119,13 @@ def render_acif_markdown(con: duckdb.DuckDBPyConnection, cluster_id: str) -> str
             f"total recorded funding ${total:,.0f}"
         )
         lines.append(f"- Reliability tier: {t['reliability_tier']}  /  resolution status: {t['resolution_status']}")
+    top_for = _as_list(t["top_for_codes"])
+    if len(top_for) > 0:
+        for_str = ", ".join(f"{e['name']} ({e['fraction']*100:.0f}%)" for e in top_for)
+    else:
+        for_str = "(none)"
+    lines.append(f"- Top FOR fields: {for_str}")
+    if not grants.empty:
         lines.append("")
         display = pd.DataFrame({
             "Year": grants["funding_commence_year"].apply(
@@ -134,6 +156,12 @@ def render_acif_markdown(con: duckdb.DuckDBPyConnection, cluster_id: str) -> str
     # exact candidate table's 4 rows, since block()'s own full_name_key blocking caught a
     # candidate Splink blocking never found at all).
     lines.append(f"- {len(candidates)} candidate(s) in AcifOaxLinker's block() pool")
+    top_oax_sf = _as_list(t["top_oax_subfields"])
+    if len(top_oax_sf) > 0:
+        sf_str = ", ".join(f"{e['name']} ({e['fraction']*100:.0f}%)" for e in top_oax_sf)
+    else:
+        sf_str = "(none)"
+    lines.append(f"- Top OAX subfields (old pipeline's selected identity): {sf_str}")
     if not candidates.empty:
         lines.append("")
         display = pd.DataFrame({
