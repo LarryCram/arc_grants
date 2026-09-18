@@ -7,15 +7,25 @@ dossier.py/dossier_build.py's data-model/construction split, but the model here 
 DuckDB schema, not a dataclass -- results.db IS the report's data source, not an intermediate
 object something else renders.
 
-Three tables so far, per direct project direction (2026-09-17):
+Four tables, built in dependency order (oax_candidates -> oax_resolve -> title -> arc; see
+build_results_db()):
+  - oax_candidates: one row per (ACIF, OAX candidate author_idx) -- every candidate
+    AcifOaxLinker.block() found for this ACIF (src/utils/acif_oax_linker.py,
+    sql/01_blocking_name_keys.sql), with works_count/works_count_global/works_count_au/
+    cited_by_count/h_index and evidence columns (orcid, subfield_fd, institution_fd,
+    n_corroborating_coauthors, given_name_check, provenance/match_reason). Grain is
+    per-candidate, not per-ACIF: a report showing only one identity can't answer "was this a
+    close call" -- that needs the whole pool.
+  - oax_resolve: one row per (ACIF, candidate) -- the 6-point scoring/acceptance step over
+    oax_candidates (see build_oax_resolve_table()'s own docstring for the exact formula and the
+    hard ORCID-mismatch veto). Ejected rows are kept, not filtered out, so rejections stay
+    inspectable.
   - title: one row per ACIF -- the report header. ARC-recorded orcid(s), the top 3 FOR2020
     fields across all this ACIF's grants (by declared-entry count, with each one's fraction of
-    the total -- counted at whatever granularity awards_cif_arc_only.parquet's own for2020_codes
-    already dedupes to: one entry per (grant, resolved FOR2020 group)), the OAX-side analog --
-    the top 3 OAX subfields (by work count, with fraction) for whichever OAX identity is
-    currently "selected" (old pipeline) for this person, sourced from oax_subfield_fd.parquet
-    (the same population-wide table fd_score()'s subfield_score reads) -- and when this row was
-    last (re)built.
+    the total), the OAX-side analog -- the top 3 OAX subfields (by work count, with fraction)
+    for the single highest-scoring ACCEPTED candidate from oax_resolve (a summary view only;
+    the full accepted set, which can be 0/1/2+ candidates, is what the report's own `## Works`
+    section renders from oax_resolve directly) -- and when this row was last (re)built.
   - arc: one row per (ACIF, grant) -- grant code, role, fellowship flag, funding amount,
     HEP code (not scheme_name or the raw admin_org institution name -- dropped/recoded per
     direct 2026-09-17 instruction; institution is coded as its short hep_code, matching the
@@ -23,30 +33,25 @@ Three tables so far, per direct project direction (2026-09-17):
     AwardsCIF.hep_codes). Grain is per-grant, not per-ACIF, because a person can hold several
     grants and each has its own year/amount -- collapsing to one row per ACIF would either
     lose grants or force a lossy aggregate no report should be built on.
-  - oax_candidates: one row per (ACIF, OAX candidate author_idx) -- every candidate seen for
-    this ACIF (not just the selected one), with its own works_count/cited_by_count/h_index and
-    oax_provenance status (keep/drop/unscored). Grain is per-candidate for the same reason arc
-    is per-grant: a report showing only the single selected identity can't answer "was this a
-    close call" -- that needs the whole pool.
 
 All tables key on cluster_id (the ACIF's own id, see CLAUDE.md on why this stays the
-human-readable string rather than a surrogate key). None compute anything new -- all are thin
-joins over already-persisted pipeline outputs (awards_cif_arc_only.parquet,
-oax_provenance.duckdb, grants_flat.parquet, investigators_raw.parquet,
-openalex_authors_prep.parquet, the raw OpenAlex authors dimension table). Rebuilding results.db
-never re-runs upstream resolution -- it only reads whatever those files currently say. The
-report tool (analysis/12_acif_report.py) in turn only ever reads results.db, never these
-upstream files directly -- everything a report needs must be written into these tables first,
-not joined live at render time (direct 2026-09-17 instruction).
+human-readable string rather than a surrogate key). None compute anything new beyond the
+oax_resolve scoring itself -- everything else is a thin join over already-persisted pipeline
+outputs (awards_cif_arc_only.parquet, oax_provenance.duckdb's AcifOaxLinker tables,
+grants_flat.parquet, investigators_raw.parquet, openalex_authors_prep.parquet). Rebuilding
+results.db never re-runs upstream resolution -- it only reads whatever those files currently
+say. The report tool (analysis/12_acif_report.py) in turn only ever reads results.db, never
+these upstream files directly -- everything a report needs must be written into these tables
+first, not joined live at render time (direct 2026-09-17 instruction).
 
-"Selected" OAX identity (title.oax_id/oax_full_name): oax_provenance.duckdb's 'keep' rows are
-the current output of FilterCandidates.resolve() (src/04_filter_candidates.py) -- an ACIF can
-have 0 keep rows (nothing survived orcid_veto()/fd_compare(), or never resolved at all), 1
-(the ordinary case), or 2+ (fragment-merged identity, e.g. a split OpenAlex author_idx).
-Per direct 2026-09-17 decision: select the highest-works_count keep row as the single
-displayed identity for now -- a provisional single-name view over what may be a multi-fragment
-truth, not a claim that the other keep rows are wrong (they're preserved in n_keep_candidates
-for anyone who needs to know there was a choice made here).
+2026-09-18: this module no longer reads the old 03_link_arc_oax.py/04_filter_candidates.py
+pipeline's own oax_provenance.duckdb tables (acif_oax_candidates, oax_provenance) at all --
+both scripts archived to ZARCHIVE/src_archive_20260918/, both tables dropped from
+oax_provenance.duckdb (see that session's CLAUDE.md entry for the full dependency trace:
+AcifOaxLinker itself turned out to quietly depend on two of FilterCandidates' own cache
+tables, for_subfield_dict/grant_for2020_cache, which had no other builder anywhere -- ported
+into AcifOaxLinker.__init__() before archiving, not left orphaned). Every "selected identity"
+concept in this file is now AcifOaxLinker's own oax_resolve, not the old pipeline's.
 """
 
 import sys
@@ -76,9 +81,10 @@ def _attach_provenance(con: duckdb.DuckDBPyConnection) -> None:
 
 def build_title_table(con: duckdb.DuckDBPyConnection) -> int:
     """(Re)build the `title` table: one row per non-excluded ACIF -- report header fields
-    (selected OAX identity, tier/status for category filtering) plus the timestamp this row
-    was generated. Returns the row count."""
-    _attach_provenance(con)
+    (primary accepted OAX identity, tier/status for category filtering) plus the timestamp this
+    row was generated. Requires oax_candidates/oax_resolve to already exist in `con` (build
+    those first) -- reads them directly as local tables, not via the old pipeline. Returns the
+    row count."""
     now = datetime.now(timezone.utc).isoformat()
 
     con.execute(f"""
@@ -89,11 +95,8 @@ def build_title_table(con: duckdb.DuckDBPyConnection) -> int:
             WHERE excluded = FALSE
         ),
         candidate_counts AS (
-            -- awards_cif_arc_only.parquet's own oax_candidates column is always empty (never
-            -- populated pre-OAX-linking) -- the real deduped candidate pool lives in
-            -- acif_oax_candidates, built by FilterCandidates.load_clusters_by_size().
             SELECT cluster_id, count(*) AS n_oax_candidates
-            FROM prov.acif_oax_candidates
+            FROM oax_candidates
             GROUP BY cluster_id
         ),
         for_counts AS (
@@ -127,24 +130,29 @@ def build_title_table(con: duckdb.DuckDBPyConnection) -> int:
             WHERE rn <= 3
             GROUP BY cluster_id
         ),
-        keeps AS (
-            SELECT p.cluster_id, p.oax_id, p.works_count,
+        accepted AS (
+            -- The best ACCEPTED candidate per ACIF (oax_resolve.status='accepted'), highest
+            -- total_score first, full_name ASC as a deterministic tiebreak -- NOT "the resolved
+            -- identity" in the old sense: AcifOaxLinker has no single-winner concept (an ACIF
+            -- can have 0, 1, or several accepted candidates, see oax_resolve/the Baohua Jia
+            -- fragment-merge case) -- this is a single-identity SUMMARY for the header/title
+            -- only. The full set is what `## Works` renders from oax_resolve directly.
+            SELECT cluster_id, author_idx, full_name, total_score,
                    row_number() OVER (
-                       PARTITION BY p.cluster_id ORDER BY p.works_count DESC NULLS LAST
+                       PARTITION BY cluster_id ORDER BY total_score DESC, full_name ASC
                    ) AS rn,
-                   count(*) OVER (PARTITION BY p.cluster_id) AS n_keep
-            FROM prov.oax_provenance p
-            WHERE p.status = 'keep'
+                   count(*) OVER (PARTITION BY cluster_id) AS n_accepted
+            FROM oax_resolve
+            WHERE status = 'accepted'
         ),
-        selected AS (
-            SELECT cluster_id, oax_id, works_count AS oax_works_count, n_keep,
-                   try_cast(regexp_extract(oax_id, '[0-9]+$') AS BIGINT) AS author_idx
-            FROM keeps WHERE rn = 1
+        primary_candidate AS (
+            SELECT cluster_id, author_idx, full_name AS oax_full_name, n_accepted
+            FROM accepted WHERE rn = 1
         ),
         oax_sf_counts AS (
-            SELECT s.cluster_id, f.subfield_name, f.n
-            FROM selected s
-            JOIN read_parquet('{OAX_SUBFIELD_FD}') f ON f.author_idx = s.author_idx
+            SELECT p.cluster_id, f.subfield_name, f.n
+            FROM primary_candidate p
+            JOIN read_parquet('{OAX_SUBFIELD_FD}') f ON f.author_idx = p.author_idx
         ),
         oax_sf_totals AS (
             SELECT cluster_id, SUM(n) AS total_n FROM oax_sf_counts GROUP BY cluster_id
@@ -172,24 +180,22 @@ def build_title_table(con: duckdb.DuckDBPyConnection) -> int:
             a.orcids,
             tf.top_for_codes,
             coalesce(c.n_oax_candidates, 0) AS n_oax_candidates,
-            coalesce(s.n_keep, 0) AS n_keep_candidates,
-            s.oax_id,
-            oax.full_name AS oax_full_name,
-            s.oax_works_count,
+            coalesce(p.n_accepted, 0) AS n_accepted_candidates,
+            CASE WHEN p.author_idx IS NOT NULL
+                 THEN 'https://openalex.org/A' || p.author_idx END AS oax_id,
+            p.oax_full_name,
             tsf.top_oax_subfields,
             CASE
-                WHEN s.oax_id IS NOT NULL THEN 'selected'
+                WHEN p.author_idx IS NOT NULL THEN 'accepted'
                 WHEN coalesce(c.n_oax_candidates, 0) = 0 THEN 'no_candidates'
-                ELSE 'unresolved_no_keep'
+                ELSE 'no_accepted'
             END AS selection_status,
             TIMESTAMP '{now}' AS report_generated_at
         FROM acifs a
         LEFT JOIN top_for tf USING (cluster_id)
         LEFT JOIN candidate_counts c USING (cluster_id)
-        LEFT JOIN selected s USING (cluster_id)
+        LEFT JOIN primary_candidate p USING (cluster_id)
         LEFT JOIN top_oax_sf tsf USING (cluster_id)
-        LEFT JOIN read_parquet('{OAX_PREP}') oax
-            ON oax.author_idx = try_cast(regexp_extract(s.oax_id, '[0-9]+$') AS BIGINT)
     """)
     con.execute("ALTER TABLE title ADD PRIMARY KEY (cluster_id)")
     return con.execute("SELECT count(*) FROM title").fetchone()[0]
@@ -433,18 +439,21 @@ def build_arc_table(con: duckdb.DuckDBPyConnection) -> int:
 
 def build_results_db() -> dict:
     """Rebuild results.db from scratch (all tables). Never touches any upstream pipeline
-    file -- pure read+join. Returns {table_name: row_count}."""
+    file -- pure read+join. Order matters: oax_candidates and oax_resolve must build before
+    title, since title's "primary accepted identity" columns now read oax_resolve directly
+    (2026-09-18 -- title no longer touches the old pipeline's oax_provenance/
+    acif_oax_candidates tables at all). Returns {table_name: row_count}."""
     con = duckdb.connect(str(RESULTS_DB))
     try:
-        n_title = build_title_table(con)
-        n_arc = build_arc_table(con)
         n_oax_candidates = build_oax_candidates_table(con)
         n_oax_resolve = build_oax_resolve_table(con)
+        n_title = build_title_table(con)
+        n_arc = build_arc_table(con)
     finally:
         con.close()
     return {
-        "title": n_title, "arc": n_arc,
         "oax_candidates": n_oax_candidates, "oax_resolve": n_oax_resolve,
+        "title": n_title, "arc": n_arc,
     }
 
 

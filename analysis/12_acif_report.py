@@ -45,7 +45,7 @@ def main() -> None:
     ap.add_argument("--status", help="Filter by resolution_status (RESOLVED/UNRESOLVED)")
     ap.add_argument(
         "--selection-status",
-        help="Filter by selection_status (selected/unresolved_no_keep/no_candidates)",
+        help="Filter by selection_status (accepted/no_accepted/no_candidates)",
     )
     ap.add_argument("--sample", type=int, help="Render this many sample reports from the filtered category")
     ap.add_argument("--limit", type=int, help="Cap how many cluster_ids --tier/--status lists")

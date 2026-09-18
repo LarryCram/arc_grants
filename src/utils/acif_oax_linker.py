@@ -30,6 +30,8 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from config.settings import PROCESSED_DATA
+from src.utils.awards_cif import load_grant_for2020_codes
+from src.utils.for_resolve import for2020_group_name, oax_subfield_name
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PROVENANCE_DB = PROCESSED_DATA / "oax_provenance.duckdb"
@@ -40,14 +42,24 @@ _COAWARDEE_SQL = _REPO_ROOT / "sql" / "03_coawardee_coauthor.sql"
 
 
 class AcifOaxLinker:
-    def __init__(self, con: duckdb.DuckDBPyConnection | None = None):
+    def __init__(self, con: duckdb.DuckDBPyConnection | None = None,
+                 force_rebuild_caches: bool = False):
         self.con = con or duckdb.connect()
         self.con.execute(f"ATTACH IF NOT EXISTS '{_PROVENANCE_DB}' AS data")
 
+        # Ported from FilterCandidates (src/04_filter_candidates.py, archived 2026-09-18) --
+        # _SETUP_SQL's own Stage 2 (arc_subfield_fd_v2) JOINs against data.for_subfield_dict/
+        # data.grant_for2020_cache, but had no code of ITS OWN anywhere in this class to build
+        # them; it only ever worked because FilterCandidates happened to have been run earlier
+        # in a separate process, leaving those two tables sitting in oax_provenance.duckdb.
+        # MUST run before _SETUP_SQL, not after -- that's the actual bug this ordering fixes,
+        # not just a relocation.
+        self._ensure_for_subfield_cache(force_rebuild_caches)
+        self._ensure_grant_for2020_cache(force_rebuild_caches)
+
         # Run the population-wide setup SQL once -- institution crosswalk (in-session TEMP
         # tables) + ARC-side subfield/institution FD (persisted as data.arc_subfield_fd_v2/
-        # arc_institution_fd_v2, the _v2 suffix deliberately not colliding with
-        # FilterCandidates' own still-live tables of a similar name).
+        # arc_institution_fd_v2).
         self.con.execute(_SETUP_SQL.read_text())
 
         # OAX-side FD: read directly, no computation -- 00b_extract_oax.py's own Phase 4 already
@@ -70,6 +82,60 @@ class AcifOaxLinker:
         # ARC-only population itself, for later per-ACIF methods (coawardees, orcids, etc.) --
         # loaded once as a DataFrame, not re-read per call.
         self.arc = pd.read_parquet(PROCESSED_DATA / "awards_cif_arc_only.parquet")
+
+    # ------------------------------------------------------------------
+    # FOR2020/subfield caches -- ported from FilterCandidates (2026-09-18), see __init__'s own
+    # comment for why these must exist before _SETUP_SQL runs.
+    # ------------------------------------------------------------------
+
+    def _build_for_subfield_dict(self) -> dict[str, str]:
+        """{FOR2020 4-digit group code -> OAX subfield name}, every valid group, built once.
+        Enumerated by brute-force testing the code space through for_resolve.py (the package's
+        Resolver() has no bulk-listing method) -- confirmed 213 valid codes, all 213 resolve to
+        a real OAX subfield, 0 failures."""
+        out = {}
+        for div in range(1, 100):
+            for grp in range(1, 100):
+                code = f"{div:02d}{grp:02d}"
+                if for2020_group_name(code) is not None:
+                    out[code] = oax_subfield_name(code)
+        return out
+
+    def _ensure_for_subfield_cache(self, force_rebuild: bool = False) -> None:
+        """data.for_subfield_dict table -- caches _build_for_subfield_dict()'s output (6.6s to
+        recompute, a fixed 213-entry taxonomy enumeration that only changes if the
+        research_classification package itself is upgraded)."""
+        self.con.execute("""
+            CREATE TABLE IF NOT EXISTS data.for_subfield_dict (
+                code VARCHAR PRIMARY KEY, subfield VARCHAR
+            )
+        """)
+        n = self.con.execute("SELECT COUNT(*) FROM data.for_subfield_dict").fetchone()[0]
+        if force_rebuild or n == 0:
+            out = self._build_for_subfield_dict()
+            self.con.execute("DELETE FROM data.for_subfield_dict")
+            self.con.executemany(
+                "INSERT INTO data.for_subfield_dict VALUES (?, ?)", list(out.items())
+            )
+
+    def _ensure_grant_for2020_cache(self, force_rebuild: bool = False) -> None:
+        """data.grant_for2020_cache table -- caches load_grant_for2020_codes()'s output (4.7s to
+        recompute, resolving every grant's FOR entries; only changes after a real
+        00a_extract_arc.py rerun on fresh ARC data)."""
+        self.con.execute("""
+            CREATE TABLE IF NOT EXISTS data.grant_for2020_cache (
+                grant_code VARCHAR PRIMARY KEY,
+                codes STRUCT(code VARCHAR, "name" VARCHAR, is_primary BOOLEAN, confidence DOUBLE)[]
+            )
+        """)
+        n = self.con.execute("SELECT COUNT(*) FROM data.grant_for2020_cache").fetchone()[0]
+        if force_rebuild or n == 0:
+            out = load_grant_for2020_codes()
+            self.con.execute("DELETE FROM data.grant_for2020_cache")
+            df = pd.DataFrame([{"grant_code": g, "codes": codes} for g, codes in out.items()])
+            self.con.register("_g4020_df", df)
+            self.con.execute("INSERT INTO data.grant_for2020_cache SELECT * FROM _g4020_df")
+            self.con.unregister("_g4020_df")
 
     def print_diagnostics(self) -> dict:
         """Report what actually got loaded -- row counts and basic coverage, not a claim of

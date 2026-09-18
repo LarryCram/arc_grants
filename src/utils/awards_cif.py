@@ -1821,244 +1821,6 @@ def set_aside_indigenous_research(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     return clusters
 
 
-# ── construction: populate_oax_candidates ───────────────────────────────────────
-
-OAX_CANDIDATE_THRESHOLD = 0.5  # = 03_link_arc_oax.py's PREDICT_THRESHOLD -- the floor already
-                                # stored in arc_oax_links.parquet, not a new Splink run.
-
-
-def populate_oax_candidates(
-    clusters: list[AwardsCIF],
-    con: duckdb.DuckDBPyConnection | None = None,
-) -> list[AwardsCIF]:
-    """Populate oax_candidates as one undifferentiated set -- deliberately reading
-    arc_oax_links.parquet (03_link_arc_oax.py's own output, which already retains every
-    candidate pair >= OAX_CANDIDATE_THRESHOLD) directly, NOT arc_oax_resolved.parquet's
-    oax_id/secondary_oax_ids (04_resolve_links.py's output). This is the resolution of the
-    under-inclusion investigation in the plan file: 04's unique_hc path hardcodes
-    secondary_oax_ids to [] regardless of what else scored 0.5-0.89 for that person (confirmed
-    at 27% of the unique_hc bucket, 5,901 hidden pairs) -- reading 03's own output instead
-    closes that gap by construction, without touching 03 or 04 themselves. Every candidate
-    >= threshold is treated as equally possible; no primary/secondary distinction, per the
-    Aim's "set, not a pointer" design. 03/04 themselves are NOT rerun or modified -- this only
-    changes what populate_oax_candidates() reads, consistent with "Splink reused unchanged as
-    a tool." Expected (not yet verified, since the later work-scoring step that would filter
-    candidates down doesn't exist yet): a small increase in total candidates, with most of the
-    previously-correctly-dropped ones still needing to be dropped once that step is built --
-    this is a guess pending that tooling, not a confirmed outcome.
-    """
-    own_con = con is None
-    con = con or duckdb.connect()
-    try:
-        con.execute("SET enable_progress_bar = false")
-        links = con.execute(f"""
-            SELECT arc_id, oax_id
-            FROM read_parquet('{PROCESSED_DATA}/arc_oax_links.parquet')
-            WHERE match_probability >= {OAX_CANDIDATE_THRESHOLD}
-        """).fetchall()
-    finally:
-        if own_con:
-            con.close()
-
-    candidates_by_arc_id: dict[str, list[str]] = defaultdict(list)
-    for arc_id, oax_id in links:
-        candidates_by_arc_id[arc_id].append(oax_id)
-
-    n_matched = 0
-    for c in clusters:
-        found = candidates_by_arc_id.get(c.cluster_id)
-        if found:
-            n_matched += 1
-            c.oax_candidates = sorted(set(found))
-            c.record_event(
-                "oax_candidates_populated",
-                n_candidates=len(c.oax_candidates),
-                threshold=OAX_CANDIDATE_THRESHOLD,
-            )
-
-    return clusters
-
-
-def _load_manual_unlinks(clusters: list[AwardsCIF]) -> dict[str, set[str]]:
-    """arc_id -> set of oax_ids a human has confirmed are NOT this person, from
-    data_persisted/manual_resolutions.csv's "unlink" rows. Pure noise removal -- can only
-    remove a confirmed-wrong candidate, never risks discarding a genuine one, unlike a
-    "resolve" row (see the plan file for why "resolve" is deliberately NOT applied here).
-
-    Each row's arc_id is resolved via resolve_cluster_id() before use -- raises
-    StaleClusterIdError rather than silently no-op'ing when a row's arc_id has drifted or
-    can no longer be found (see that function's docstring)."""
-    if not _MANUAL_RESOLUTIONS_CSV.exists():
-        return {}
-    df = pd.read_csv(_MANUAL_RESOLUTIONS_CSV).dropna(subset=["arc_id"])
-    out: dict[str, set[str]] = defaultdict(set)
-    for _, row in df[df["action"] == "unlink"].iterrows():
-        oax_id = row.get("oax_id")
-        if pd.notna(oax_id) and oax_id:
-            cid = resolve_cluster_id(row["arc_id"], clusters)
-            out[cid].add(oax_id)
-    return dict(out)
-
-
-def _oax_names_compat(oax_ids: list[str], oax_full_name_keys: dict) -> bool:
-    """True when every OAX candidate in a group could plausibly be the same person --
-    guards the split-record dedup below against collapsing genuinely different people who
-    happen to share a topic.
-
-    2026-09-09 fix: checked via genuine exact-string overlap on each candidate's own
-    full_name_keys (every given/nickname x family combination that candidate's own
-    display_name + alternatives produce -- see 00b_extract_oax.py::oax_name_arrays()), not the
-    old single-scalar first_name/family_name_main + 3-char-prefix heuristic. That heuristic
-    only ever compared first names >=4 characters long and returned True by default whenever
-    fewer than 2 candidates had one -- confirmed on a real case (DE120100315_BenjaminIsakhan,
-    "ben" vs "benjamin"): "ben" is 3 characters, so it was silently dropped from the
-    comparison entirely and the function returned True without ever really testing anything --
-    it happened to reach the right answer, but not because it verified any real relationship
-    between "ben" and "benjamin" (there isn't a shared exact full_name_key between them either;
-    see the module's own open-question note on nickname/short-form matching).
-
-    full_name_keys itself stays complete/unfiltered (NameProcessor's own output contract --
-    see oax_name_arrays()'s docstring) -- the bare-initial exclusion below is local to THIS
-    comparison's own needs, not baked into the shared field. A full_name_key whose given-side
-    is a single character (e.g. "b_isakhan") is excluded here because it carries no identifying
-    information on its own: every given-name token self-adds its own first letter (needed for
-    Splink's family+first_initial blocking key), so "Ben"/"Barbara"/"Bruce" all reduce to "b" --
-    a shared bare-initial key is exactly as consistent with two different people as with one.
-
-    Requires EVERY pair of candidates to share >=1 (informative) full_name_keys string, not just
-    that all candidates share one common string across the whole group -- avoids the same
-    false-chain-bridging risk found elsewhere this project (piling's DBSCAN mega-pools): A/B and
-    B/C sharing a key each doesn't mean A and C are the same person if A and C themselves share
-    nothing. Returns False (does not merge) if any candidate has no informative full_name_keys
-    at all -- insufficient evidence should leave both candidates for the later disambiguation
-    cascade to sort out, not default to merging them."""
-    def _informative(keys):
-        out = set()
-        for k in keys:
-            given, _, family = k.partition("_")
-            if len(given) > 1 and family:
-                out.add(k)
-        return out
-
-    keysets = [_informative(oax_full_name_keys.get(oid) or []) for oid in oax_ids]
-    if any(not ks for ks in keysets):
-        return False
-    return all(
-        keysets[i] & keysets[j]
-        for i in range(len(keysets)) for j in range(i + 1, len(keysets))
-    )
-
-
-def dedup_oax_candidates(
-    clusters: list[AwardsCIF],
-    con: duckdb.DuckDBPyConnection | None = None,
-) -> list[AwardsCIF]:
-    """Stage-1 cleanup of oax_candidates: pure noise removal, never a choice between distinct
-    real people (see the plan file's "waterfall" design). Two operations, both ported from
-    04_resolve_links.py:
-
-    1. Manual unlink -- remove any candidate a human has directly confirmed is not this
-       person (data_persisted/manual_resolutions.csv). Deliberately NOT applying "resolve"
-       rows here -- see _load_manual_unlinks()'s docstring.
-    2. OAX-side split-record dedup (04's Steps 0/0b) -- when 2+ candidates for one AwardsCIF
-       share an ORCID, or share a specific topic AND are name-compatible, they are almost
-       certainly split records of ONE real OpenAlex author, not competing different people.
-       Collapse to the one holding the dominant share of combined works_count (> TOP_CUT);
-       leave the group untouched if no single record dominates.
-
-    Everything past this point in the existing 04 cascade (name-character filter, ORCID-
-    match-based selection, institution/field-score narrowing, works-count dominance, unique-
-    highest-probability) picks between candidates believed to be different real people --
-    deliberately NOT ported here, deferred to the not-yet-built work-level scoring step.
-    """
-    unlinks = _load_manual_unlinks(clusters)
-    for c in clusters:
-        blocked = unlinks.get(c.cluster_id)
-        if blocked and c.oax_candidates:
-            before = set(c.oax_candidates)
-            after = sorted(before - blocked)
-            if after != c.oax_candidates:
-                c.record_event("manual_unlink", removed=sorted(before - set(after)))
-                c.oax_candidates = after
-
-    all_oax_ids = sorted({oid for c in clusters for oid in c.oax_candidates})
-    if not all_oax_ids:
-        return clusters
-
-    own_con = con is None
-    con = con or duckdb.connect()
-    try:
-        con.execute("SET enable_progress_bar = false")
-        con.execute("CREATE OR REPLACE TEMP TABLE _cand_ids AS SELECT UNNEST(?) AS oax_id", [all_oax_ids])
-        rows = con.execute(f"""
-            SELECT o.author_idx, o.orcid, o.topic_names, o.full_name_keys
-            FROM read_parquet('{PROCESSED_DATA}/openalex_authors_prep.parquet') o
-            JOIN _cand_ids c
-              ON TRY_CAST(regexp_replace(c.oax_id, 'https://openalex.org/A', '') AS BIGINT) = o.author_idx
-        """).fetchall()
-        oax_orcid, oax_topics, oax_full_name_keys = {}, {}, {}
-        for author_idx, orcid, topics, full_name_keys in rows:
-            uid = f"https://openalex.org/A{author_idx}"
-            oax_orcid[uid] = orcid
-            oax_topics[uid] = list(topics) if topics is not None else []
-            oax_full_name_keys[uid] = list(full_name_keys) if full_name_keys is not None else []
-
-        idx_sql = ", ".join(i.replace("https://openalex.org/A", "") for i in all_oax_ids)
-        wc_rows = con.execute(f"""
-            SELECT author_idx, works_count FROM read_parquet('{OAX_AUTHORS}/*.parquet')
-            WHERE author_idx IN ({idx_sql})
-        """).fetchall()
-        oax_works = {f"https://openalex.org/A{idx}": wc for idx, wc in wc_rows}
-    finally:
-        if own_con:
-            con.close()
-
-    for c in clusters:
-        if len(c.oax_candidates) < 2:
-            continue
-        # sorted, not set() -- set() iteration order is randomized per-process
-        # (PYTHONHASHSEED), and this feeds max(wcs, key=wcs.get) below, whose tie-break (two
-        # candidates with equal works_count) would otherwise silently differ across runs. Same
-        # class of bug found and fixed 2026-08-23 in _name_forms() (see that function's
-        # docstring); dedup itself doesn't need any particular order, just a stable one.
-        group = sorted(set(c.oax_candidates))
-        removed: set[str] = set()
-
-        orcid_to_ids: dict[str, list[str]] = defaultdict(list)
-        for oid in group:
-            orcid = oax_orcid.get(oid)
-            if orcid:
-                orcid_to_ids[orcid].append(oid)
-        for ids in orcid_to_ids.values():
-            if len(ids) > 1:
-                wcs = {oid: oax_works.get(oid, 0) for oid in ids}
-                total = sum(wcs.values())
-                best = max(wcs, key=wcs.get)
-                if total > 0 and wcs[best] / total > TOP_CUT:
-                    removed.update(oid for oid in ids if oid != best)
-
-        remaining = [oid for oid in group if oid not in removed]  # list, not set - to keep this same order-preserving
-        topic_to_ids: dict[str, list[str]] = defaultdict(list)
-        for oid in remaining:
-            for t in oax_topics.get(oid, []):
-                topic_to_ids[t].append(oid)
-        orcid_protected = {oid for oid in remaining if oax_orcid.get(oid)}
-        for ids in topic_to_ids.values():
-            if len(ids) > 1 and _oax_names_compat(ids, oax_full_name_keys):
-                wcs = {oid: oax_works.get(oid, 0) for oid in ids}
-                best = max(wcs, key=wcs.get)
-                removed.update(
-                    oid for oid in ids
-                    if oid != best and oid not in orcid_protected
-                )
-
-        if removed:
-            c.oax_candidates = sorted(oid for oid in group if oid not in removed)
-            c.record_event("oax_split_record_dedup", removed=sorted(removed))
-
-    return clusters
-
-
 # ── reliability: compute_reliability ────────────────────────────────────────────
 # Division-mismatch/is_suspicious logic itself now lives in src/utils/cluster_checks.py
 # (for2020_primary_fields, division_mismatch_for2020[_pairwise], is_suspicious_for2020),
@@ -2732,17 +2494,21 @@ def compute_reliability(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     return clusters
 
 
-# ── population-level construction: build_arc_only_population, enrich_with_oax_candidates,
-#    persistence ─────────────────────────────────────────────────────────────────────────
+# ── population-level construction: build_arc_only_population, persistence ────────────────
 #
 # 2026-08-21: split from a single build_awards_cif_population() after a real architectural
 # bug was found -- that one function bundled two genuinely different concerns (ARC/ORCID-only
-# identity resolution, and OAX-candidate population that reads arc_oax_links.parquet, i.e.
-# 03_link_arc_oax.py's OWN output) into one call, so "01_prepare_arc.py" (meant to produce
-# checkable, OAX-independent output) was silently depending on 03 having already run. The two
-# halves below are genuinely sequential (build_arc_only_population's output is 03's input;
-# enrich_with_oax_candidates needs 03's output), never bundled again. See CLAUDE.md's
-# "Bind them together..." session notes for the full incident.
+# identity resolution, and an OAX-candidate-population half that used to read
+# arc_oax_links.parquet, i.e. 03_link_arc_oax.py's own output) into one call, so
+# "01_prepare_arc.py" (meant to produce checkable, OAX-independent output) was silently
+# depending on 03 having already run. See CLAUDE.md's "Bind them together..." session notes
+# for the full incident. The OAX-dependent half (enrich_with_oax_candidates(),
+# populate_oax_candidates(), dedup_oax_candidates()) was removed outright 2026-09-18 once
+# 03_link_arc_oax.py/04_filter_candidates.py were archived and AcifOaxLinker's own
+# block()/oax_resolve (see src/utils/acif_oax_linker.py, sql/01_blocking_name_keys.sql)
+# confirmed as the sole remaining caller-free path -- not superseded in place, genuinely dead
+# (traced: enrich_with_oax_candidates()'s only two callers were themselves both already
+# archived scripts).
 
 AWARDS_CIF_PARQUET = PROCESSED_DATA / "awards_cif.parquet"
 ARC_ONLY_PARQUET = PROCESSED_DATA / "awards_cif_arc_only.parquet"
@@ -2790,25 +2556,6 @@ def build_arc_only_population(
     finally:
         if own_con:
             con.close()
-    return clusters
-
-
-def enrich_with_oax_candidates(
-    clusters: list[AwardsCIF],
-    con: duckdb.DuckDBPyConnection | None = None,
-) -> list[AwardsCIF]:
-    """The genuinely OAX-dependent half: populates oax_candidates by reading
-    arc_oax_links.parquet (03_link_arc_oax.py's own output) and cleans it up. Must run AFTER
-    03_link_arc_oax.py, on the ARC-only population build_arc_only_population() produced (either
-    freshly built, or reloaded via load_awards_cif(ARC_ONLY_PARQUET) -- both populate_oax_candidates
-    and dedup_oax_candidates only ever touch cluster_id/family_names/oax_candidates/provenance,
-    all of which round-trip correctly through persist/load, so a loaded, items-less population is
-    a valid input here).
-
-    populate_oax_candidates -> dedup_oax_candidates
-    """
-    clusters = populate_oax_candidates(clusters, con)
-    clusters = dedup_oax_candidates(clusters, con)
     return clusters
 
 

@@ -143,25 +143,15 @@ def render_acif_markdown(con: duckdb.DuckDBPyConnection, cluster_id: str) -> str
     lines.append("")
 
     lines.append("## ARC-OAX link")
-    if t["selection_status"] == "selected":
-        lines.append(f"- OpenAlex identity (old pipeline): [{t['oax_id']}]({t['oax_id']}) -- {t['oax_works_count']} works")
-    elif t["selection_status"] == "unresolved_no_keep":
-        lines.append("- OpenAlex identity (old pipeline): unresolved, none accepted")
-    else:
-        lines.append("- OpenAlex identity (old pipeline): no candidates found")
-    # Candidate count sourced from THIS table's own pool (AcifOaxLinker.block()), not the old
-    # pipeline's acif_oax_candidates -- so this line and the table below always agree by
-    # construction, never two independently-counted numbers that can silently drift apart
-    # (2026-09-17, found via a real case: the old pipeline's "3 total seen" undercounted this
-    # exact candidate table's 4 rows, since block()'s own full_name_key blocking caught a
-    # candidate Splink blocking never found at all).
+    # Candidate count sourced from THIS table's own pool (AcifOaxLinker.block()) -- always
+    # agrees with the table below by construction, since both come from the same query.
     lines.append(f"- {len(candidates)} candidate(s) in AcifOaxLinker's block() pool")
     top_oax_sf = _as_list(t["top_oax_subfields"])
     if len(top_oax_sf) > 0:
         sf_str = ", ".join(f"{e['name']} ({e['fraction']*100:.0f}%)" for e in top_oax_sf)
     else:
         sf_str = "(none)"
-    lines.append(f"- Top OAX subfields (old pipeline's selected identity): {sf_str}")
+    lines.append(f"- Top OAX subfields (highest-scoring accepted candidate): {sf_str}")
     if not candidates.empty:
         lines.append("")
         display = pd.DataFrame({

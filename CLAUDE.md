@@ -2184,6 +2184,130 @@ entry (the `orcid_check`/OAX-orcid-prefix cleanup, `fd_score()`'s orcid-tier rem
 `given_name_check` itself, the `widen_names_with_orcid_bulk_db()` full_name_keys fix, the
 `arc_name_keys`/`oax_name_keys` builder, and the `Wing`-titles fix) is committed as of this entry.
 
+## `results.db` output pipeline built; `03_link_arc_oax.py`/`04_filter_candidates.py` archived, a real hidden dependency found and fixed first (2026-09-17/18)
+
+Direct continuation of the `AcifOaxLinker` build (`block()`/`fd_score()`/`coawardee_corroborate()`,
+see the "`AcifOaxLinker` block()/fd_score() continued" entry above) -- this session shifted focus
+to actually *using* that output: a new, output-facing `results.db` (DuckDB, `PROCESSED_DATA/results.db`)
+built via `analysis/utils/results_db.py`/`analysis/11_build_results_db.py`, and a markdown CLI
+reporting tool (`analysis/utils/acif_report.py`/`analysis/12_acif_report.py`) over the top of it --
+per direct user direction to move the whole project to "an intense focus on output," reporting one
+ACIF (or a filtered category/sample of ACIFs) at a time, iterated column-by-column with the user
+confirming each addition before the next. `analysis/utils/dossier.py`/`dossier_build.py` (the
+previous per-researcher reporting attempt) was named as the starting model but never actually
+touched or archived this session -- results.db grew as its own thing instead; that migration
+decision is still open.
+
+**`results.db` schema, four tables, built in dependency order** (`oax_candidates` -> `oax_resolve`
+-> `title` -> `arc`): `oax_candidates` (one row per ACIF x candidate `author_idx`, from
+`AcifOaxLinker.block()`'s own `blk_candidate_pairs` -- works_count/works_count_global/
+works_count_au/cited_by_count/h_index, ORCID match display, subfield/institution FD scores,
+coawardee corroboration count, given_name_check, blocking provenance); `oax_resolve` (a NEW
+6-point scoring/acceptance step built this session over `oax_candidates` -- orcid match,
+given-name match, coawardee>=2, subfield_fd>0.75, institution_fd>0.3, works_au>5, accept at
+total>=4, with a HARD veto on a confirmed ORCID mismatch overriding the score regardless --
+ejected rows kept, not filtered out, specifically so ejections stay inspectable, direct user
+requirement); `title` (report header -- ARC orcid(s), top-3 FOR2020 fields with fraction, the
+OAX-side analog for the single highest-scoring accepted candidate, category-filter fields);
+`arc` (one row per ACIF x grant -- role/fellowship/amount/HEP code, scheme_name and full
+admin_org name deliberately dropped/recoded per direct instruction). `works_count_global`/
+`works_count_au` themselves required extending `00b_extract_oax.py`'s own Phase 1/2 with two
+new fields (plus `cited_by_count`/`h_index`, straight passthroughs from the raw OpenAlex authors
+table) -- confirmed via three real cases (Georges Aad, an ATLAS-collaboration physicist with
+1,202 "AU works" but 0 of them personally his own vs. 1,769 lifetime works; Ian Paulsen, 330/338;
+Ajay Narendra, 97/97) that the *existing* `works_count` field means "works in the HEP-context
+population" (works with at least one HEP co-author, counted for every author on that work
+regardless of their own affiliation -- see `AUTHORSHIPS_HEP.md`), not "this author's own AU
+output" -- a real, previously-undocumented distinction the user pushed on directly ("I don't
+understand the current works_count. Give me an example") before accepting the fix.
+
+**Two real bugs found and fixed while building this, both from direct user "are you sure?"-style
+pushback, not self-caught**: (1) a 5-way FOR-field tie at n=1 produced a *different* top-3 pick
+across two consecutive `results.db` rebuilds -- `ORDER BY n DESC` with no tiebreak is genuinely
+non-deterministic in DuckDB; fixed with `name ASC` as a secondary sort on both the FOR and OAX-
+subfield rankings, verified with two more consecutive rebuilds landing byte-identical. (2)
+`fetchdf()` returns a populated `LIST(STRUCT)` column as `numpy.ndarray`, not a Python `list` --
+an earlier fix aimed only at a genuine `NA`-scalar crash (a zero-candidate ACIF) checked
+`isinstance(x, list)`, which is `False` for BOTH the null case and the populated case, so it
+silently rendered real FOR/subfield data as "(none)" for every ACIF, not just the null one, until
+caught by the user re-checking a case that should have had real data. New `_as_list()` helper in
+`acif_report.py` normalizes both `ndarray` and `list`, treating anything else as empty.
+
+### A real, hidden dependency found before archiving: `AcifOaxLinker` was silently relying on `FilterCandidates`
+
+Prompted by a direct user question ("is there any remaining reason not to move the old 03_ and
+04_ to ZARCHIVE?") -- checked by reading the actual code, not assumed. Found: `sql/
+04_acif_linker_setup.sql` (run by `AcifOaxLinker.__init__()`) JOINs against `data.for_subfield_dict`/
+`data.grant_for2020_cache` but has no code of its own anywhere that builds them -- the *only*
+code in the whole repo that could was `FilterCandidates._ensure_for_subfield_cache()`/
+`_ensure_grant_for2020_cache()` (`04_filter_candidates.py`). It only ever worked because
+`FilterCandidates` happened to have been run earlier in a separate process, leaving those two
+tables sitting in `oax_provenance.duckdb`. Archiving `04_filter_candidates.py` without fixing
+this would have left `AcifOaxLinker` unable to rebuild itself from a clean `oax_provenance.duckdb`.
+
+**Fixed properly, not patched around**: `_build_for_subfield_dict()`/`_ensure_for_subfield_cache()`/
+`_ensure_grant_for2020_cache()` ported into `AcifOaxLinker` itself (table refs changed to the
+`data.` alias `AcifOaxLinker` actually attaches under, unlike `FilterCandidates`'s own unaliased
+connection), and moved to run *before* `_SETUP_SQL` in `__init__()`, not after -- the real ordering
+bug this fix corrects, not just a relocation. Verified with a forced rebuild (`force_rebuild_caches=True`),
+not just "doesn't crash because the table already exists": `for_subfield_dict` 213 rows,
+`grant_for2020_cache` 30,475 rows, matching the old `FilterCandidates`-built tables exactly. Full
+`block()`/`fd_score()`/`coawardee_corroborate()` pipeline re-run end to end afterward, clean
+(297,243 pairs, consistent with the pre-fix count).
+
+### Archival and cleanup, once the dependency above was closed
+
+`src/03_link_arc_oax.py`, `src/04_filter_candidates.py`, and `sql/oax_priority_triage.sql`
+(a standalone `FilterCandidates`-era triage script, never part of `AcifOaxLinker`'s own SQL chain)
+all moved to `ZARCHIVE/src_archive_20260918/`. Confirmed via grep across the entire active
+codebase (excluding ZARCHIVE) before moving anything: nothing imports either script as a Python
+module; every remaining textual reference to either filename is a comment/docstring mention, not
+a live dependency.
+
+**`arc_oax_links.parquet` (03_'s sole output file) needed a sharper check** -- a first grep pass
+wrongly suggested it was still a live input to `oeuvre_build.py` (via `awards_cif.py`'s
+`populate_oax_candidates()`/`dedup_oax_candidates()`), which would have made deleting it a real
+regression. Verified properly per direct user instruction ("put a raise SystemExit to replace the
+file call and delete it") rather than trusting the grep: replaced the actual `read_parquet(...
+arc_oax_links.parquet)` call inside `populate_oax_candidates()` with `raise SystemExit(...)`, ran
+the full test suite (420/420 passed -- nothing hit the trap), then traced every real call site of
+`populate_oax_candidates()`/`dedup_oax_candidates()`/their sole wrapper `enrich_with_oax_candidates()`
+by exact function-call grep (not name mentions) -- found `enrich_with_oax_candidates()`'s only two
+real callers were `03b_enrich_awards_cif.py` and `04_resolve_links.py`, **both already archived**
+in earlier sessions (2026-08-25, 2026-09-09). The `oeuvre_build.py`/test-file hits from the first
+pass were all comment/docstring mentions, not calls -- confirmed by grepping for the literal
+`function_name(` call syntax, not just the bare name. `arc_oax_links.parquet` had zero live
+readers anywhere in the active codebase.
+
+**Removed outright** (not left as dead code behind a trap): `populate_oax_candidates()`,
+`dedup_oax_candidates()`, `enrich_with_oax_candidates()`, and their two private helpers
+(`_load_manual_unlinks()`, `_oax_names_compat()`) from `src/utils/awards_cif.py` --
+`OAX_CANDIDATE_THRESHOLD` too, its only use. `arc_oax_links.parquet` itself deleted. Nine
+confirmed-dead tables dropped from `oax_provenance.duckdb` (`FilterCandidates`'s own caches/
+verdicts, none referenced anywhere once the above landed): `acif_oax_candidates`, `oax_provenance`,
+`fd_pair_scores`, `_fd_cache_meta`, `arc_institution_fd`/`arc_subfield_fd` (the un-suffixed
+originals -- `_v2` are `AcifOaxLinker`'s own, kept), `oax_priority_triage`, plus two stray,
+apparently-abandoned duplicate tables (`oax_subfield_fd`, `oax_institution_fd`) shadowing the real
+population-wide *parquet files* of the same base name with no code anywhere reading the table
+form. `run_pipeline.sh`'s own already-broken step comments (it referenced the 2026-09-09-archived
+`04_resolve_links.py`) updated to reflect both archivals rather than left half-stale.
+
+**`results.db`'s `title` table itself no longer touches the old pipeline's tables at all** --
+rewired to read `oax_resolve` (built earlier in the same `con`, dependency order enforced in
+`build_results_db()`) for its "primary identity" summary fields, replacing the old
+`oax_provenance`/`acif_oax_candidates`-sourced `selected`/`unresolved_no_keep`/`no_candidates`
+`selection_status` values with `accepted`/`no_accepted`/`no_candidates` (population: 14,057
+accepted / 8,457 no_accepted / 270 no_candidates, of 22,784 non-excluded ACIFs). The report's
+`## ARC-OAX link` section's old `"OpenAlex identity (old pipeline): ..."` bullet removed outright
+(redundant with `## Works`'s own accepted-candidate table, which already shows the same
+information sourced correctly) rather than relabelled -- direct user framing: "you have mixed
+them together and it is already concerning."
+
+Verified end to end after every step: full `results.db` rebuild, full report render (Ajay
+Narendra and others), 420/420 tests passing throughout -- including a final run with
+`arc_oax_links.parquet` actually gone from disk, not just trapped, confirming the SystemExit
+never fires and nothing regressed.
+
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
 
