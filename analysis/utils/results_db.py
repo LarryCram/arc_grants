@@ -20,11 +20,13 @@ build_results_db()):
     oax_candidates (see build_oax_resolve_table()'s own docstring for the exact formula and the
     hard ORCID-mismatch veto). Ejected rows are kept, not filtered out, so rejections stay
     inspectable.
-  - title: one row per ACIF -- the report header. ARC-recorded orcid(s), the top 3 FOR2020
-    fields across all this ACIF's grants (by declared-entry count, with each one's fraction of
-    the total), the OAX-side analog -- the top 3 OAX subfields (by work count, with fraction)
-    for the single highest-scoring ACCEPTED candidate from oax_resolve (a summary view only;
-    the full accepted set, which can be 0/1/2+ candidates, is what the report's own `## Works`
+  - title: one row per ACIF -- the report header. ARC-recorded orcid(s), arc_full_name (the
+    first of AwardsCIF's own full_names -- the report's H1 fallback whenever no OAX identity is
+    accepted, so the heading is never blank), the top 3 FOR2020 fields across all this ACIF's
+    grants (by declared-entry count, with each one's fraction of the total), the OAX-side
+    analog -- the top 3 OAX subfields (by work count, with fraction) for the single
+    highest-scoring ACCEPTED candidate from oax_resolve (a summary view only; the full accepted
+    set, which can be 0/1/2+ candidates, is what the report's own `## Works`
     section renders from oax_resolve directly) -- and when this row was last (re)built.
   - arc: one row per (ACIF, grant) -- grant code, role, fellowship flag, funding_announced
     (the original announced budget; NOT funding_current -- switched 2026-09-18, see below),
@@ -103,7 +105,8 @@ def build_title_table(con: duckdb.DuckDBPyConnection) -> int:
     con.execute(f"""
         CREATE OR REPLACE TABLE title AS
         WITH acifs AS (
-            SELECT cluster_id, reliability_tier, resolution_status, n_grants, orcids
+            SELECT cluster_id, reliability_tier, resolution_status, n_grants, orcids,
+                   full_names[1] AS arc_full_name
             FROM read_parquet('{ARC_ONLY_PARQUET}')
             WHERE excluded = FALSE
         ),
@@ -191,6 +194,7 @@ def build_title_table(con: duckdb.DuckDBPyConnection) -> int:
             a.resolution_status,
             a.n_grants,
             a.orcids,
+            a.arc_full_name,
             tf.top_for_codes,
             coalesce(c.n_oax_candidates, 0) AS n_oax_candidates,
             coalesce(p.n_accepted, 0) AS n_accepted_candidates,

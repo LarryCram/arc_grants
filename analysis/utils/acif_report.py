@@ -90,7 +90,7 @@ def render_acif_markdown(con: duckdb.DuckDBPyConnection, cluster_id: str) -> str
         "SELECT * FROM arc WHERE cluster_id = ? ORDER BY funding_commence_year", [cluster_id]
     ).fetchdf()
     candidates = con.execute(
-        "SELECT * FROM oax_candidates WHERE cluster_id = ? ORDER BY works_count DESC NULLS LAST",
+        "SELECT * FROM oax_candidates WHERE cluster_id = ? ORDER BY works_count_au DESC NULLS LAST",
         [cluster_id],
     ).fetchdf()
     accepted = con.execute(
@@ -104,37 +104,35 @@ def render_acif_markdown(con: duckdb.DuckDBPyConnection, cluster_id: str) -> str
         [cluster_id],
     ).fetchdf()
 
-    lines = []
-    if t["oax_full_name"]:
-        lines.append(f"# {t['oax_full_name']}")
-        lines.append("")
-    lines.append(f"- ACIF: `{t['cluster_id']}`")
-    lines.append(f"- Report generated: {t['report_generated_at']}")
+    # Fixed template (direct 2026-09-18 instruction): every ACIF's report has the SAME
+    # sections/headings/tables in the SAME order, always -- no section is ever omitted or
+    # swapped for a different one based on whether data happens to be present. Missing data
+    # renders as an empty table (markdown_table()'s own "(none)" fallback) or a "(none)"/
+    # "(none recorded)" placeholder value, never as a different code path or a skipped heading.
+    display_name = t["oax_full_name"] or t["arc_full_name"] or t["cluster_id"]
     orcids = list(t["orcids"]) if t["orcids"] is not None else []
-    lines.append(f"- ORCID: {', '.join(orcids) if orcids else '(none recorded)'}")
-    lines.append("")
-
-    lines.append("## ARC awards")
-    if grants.empty:
-        lines.append("(no grants on record)")
-        lines.append(f"- Reliability tier: {t['reliability_tier']}  /  resolution status: {t['resolution_status']}")
-    else:
-        total = grants["funding_announced"].sum(skipna=True)
-        n_fellowships = int(grants["is_fellowship"].fillna(False).sum())
-        lines.append(
-            f"- {len(grants)} grant(s), {n_fellowships} fellowship award(s), "
-            f"total recorded funding ${total:,.0f}"
-        )
-        lines.append(f"- Reliability tier: {t['reliability_tier']}  /  resolution status: {t['resolution_status']}")
+    total_funding = grants["funding_announced"].sum(skipna=True)
+    n_fellowships = int(grants["is_fellowship"].fillna(False).sum())
     top_for = _as_list(t["top_for_codes"])
-    if len(top_for) > 0:
-        for_str = ", ".join(f"{e['name']} ({e['fraction']*100:.0f}%)" for e in top_for)
-    else:
-        for_str = "(none)"
-    lines.append(f"- Top FOR fields: {for_str}")
-    if not grants.empty:
-        lines.append("")
-        display = pd.DataFrame({
+    top_oax_sf = _as_list(t["top_oax_subfields"])
+    arc_orcid_str = ", ".join(orcids) if orcids else "(none recorded)"
+
+    lines = [
+        f"# {display_name}",
+        "",
+        f"- ACIF: `{t['cluster_id']}`",
+        f"- Report generated: {t['report_generated_at']}",
+        f"- ORCID: {arc_orcid_str}",
+        "",
+        "## ARC awards",
+        f"- {len(grants)} grant(s), {n_fellowships} fellowship award(s), "
+        f"total recorded funding ${total_funding:,.0f}",
+        f"- Reliability tier: {t['reliability_tier']}  /  resolution status: {t['resolution_status']}",
+        "- Top FOR fields: " + (
+            ", ".join(f"{e['name']} ({e['fraction']*100:.0f}%)" for e in top_for) or "(none)"
+        ),
+        "",
+        markdown_table(pd.DataFrame({
             "Year": grants["funding_commence_year"].apply(
                 lambda v: str(int(v)) if pd.notna(v) else "?"
             ),
@@ -145,49 +143,46 @@ def render_acif_markdown(con: duckdb.DuckDBPyConnection, cluster_id: str) -> str
                 lambda v: f"${v:,.0f}" if pd.notna(v) else "?"
             ),
             "HEP": grants["hep_code"],
-        })
-        lines.append(markdown_table(display))
-    lines.append("")
+        })),
+        "",
+        "## ARC-OAX link",
+        # Candidate count sourced from THIS table's own pool (AcifOaxLinker.block()) -- always
+        # agrees with the table below by construction, since both come from the same query.
+        f"- {len(candidates)} candidate(s) in AcifOaxLinker's block() pool",
+        "- Top OAX subfields (highest-scoring accepted candidate): " + (
+            ", ".join(f"{e['name']} ({e['fraction']*100:.0f}%)" for e in top_oax_sf) or "(none)"
+        ),
+        "",
+    ]
 
-    lines.append("## ARC-OAX link")
-    # Candidate count sourced from THIS table's own pool (AcifOaxLinker.block()) -- always
-    # agrees with the table below by construction, since both come from the same query.
-    lines.append(f"- {len(candidates)} candidate(s) in AcifOaxLinker's block() pool")
-    top_oax_sf = _as_list(t["top_oax_subfields"])
-    if len(top_oax_sf) > 0:
-        sf_str = ", ".join(f"{e['name']} ({e['fraction']*100:.0f}%)" for e in top_oax_sf)
-    else:
-        sf_str = "(none)"
-    lines.append(f"- Top OAX subfields (highest-scoring accepted candidate): {sf_str}")
-    if not candidates.empty:
-        lines.append("")
-        display = pd.DataFrame({
-            "author_idx": candidates["author_idx"],
-            "Full name": candidates["full_name"],
-            "Works (Global)": candidates["works_count_global"],
-            "Works (AU)": candidates["works_count_au"],
-            "Cited by": candidates["cited_by_count"],
-            "H-index": candidates["h_index"],
-            "ORCID": candidates["orcid"],
-            "Subfield FD": candidates["subfield_fd"],
-            "Institution FD": candidates["institution_fd"],
-            "Coawardee": candidates["n_corroborating_coauthors"],
-            "Given name": candidates["given_name_check"],
-            "Provenance": candidates["provenance"],
-        })
-        # Per-column float format, by name (not trailing position -- fragile once non-FD columns
-        # get appended after the FD ones): only the two FD columns need fixed 2 decimals, "g"
-        # (tabulate's own default) everywhere else so integer-typed columns aren't affected if a
-        # NULL upcasts one of them to float.
-        fd_cols = {"Subfield FD", "Institution FD"}
-        floatfmt = tuple(".2f" if c in fd_cols else "g" for c in display.columns)
-        lines.append(markdown_table(display, floatfmt=floatfmt, missingval="n/a"))
+    candidates_display = pd.DataFrame({
+        "author_idx": candidates["author_idx"],
+        "Full name": candidates["full_name"],
+        "Works (Global)": candidates["works_count_global"],
+        "Works (AU)": candidates["works_count_au"],
+        "Cited by": candidates["cited_by_count"],
+        "H-index": candidates["h_index"],
+        "ORCID": candidates["orcid"],
+        "Subfield FD": candidates["subfield_fd"],
+        "Institution FD": candidates["institution_fd"],
+        "Coawardee": candidates["n_corroborating_coauthors"],
+        "Given name": candidates["given_name_check"],
+        "Provenance": candidates["provenance"],
+    })
+    # Per-column float format, by name (not trailing position -- fragile once non-FD columns get
+    # appended after the FD ones): only the two FD columns need fixed 2 decimals, "g" (tabulate's
+    # own default) everywhere else so integer-typed columns aren't affected if a NULL upcasts one
+    # of them to float.
+    fd_cols = {"Subfield FD", "Institution FD"}
+    floatfmt = tuple(".2f" if c in fd_cols else "g" for c in candidates_display.columns)
+    lines.append(markdown_table(candidates_display, floatfmt=floatfmt, missingval="n/a"))
     lines.append("")
 
     lines.append("## Works")
-    lines.append(f"- {len(accepted)} accepted candidate(s) (oax_resolve, score >= 4/6; sorted by works_count_au DESC)")
-    arc_orcids = list(t["orcids"]) if t["orcids"] is not None else []
-    arc_orcid_str = ", ".join(arc_orcids) if arc_orcids else "(none recorded)"
+    lines.append(
+        f"- {len(accepted)} accepted candidate(s) (oax_resolve, score >= 4/6; "
+        f"sorted by works_count_au DESC)"
+    )
     for _, row in accepted[accepted["orcid_mismatch"] == True].iterrows():  # noqa: E712
         candidate_orcid = str(row["candidate_orcid"]).rstrip("*")
         lines.append(
@@ -195,11 +190,10 @@ def render_acif_markdown(con: duckdb.DuckDBPyConnection, cluster_id: str) -> str
             f"({row['author_idx']}) -- ARC: {arc_orcid_str} vs OAX: {candidate_orcid}"
         )
     lines.append("")
-    if not accepted.empty:
-        lines.append(markdown_table(accepted[["author_idx", "full_name", "total_score"]].rename(columns={
-            "full_name": "Full name", "total_score": "Score",
-        })))
-        lines.append("")
+    lines.append(markdown_table(accepted[["author_idx", "full_name", "total_score"]].rename(columns={
+        "full_name": "Full name", "total_score": "Score",
+    })))
+    lines.append("")
     lines.append("- (oeuvre works themselves still pending)")
     lines.append("")
 
