@@ -99,13 +99,15 @@ def render_acif_markdown(con: duckdb.DuckDBPyConnection, cluster_id: str) -> str
         FROM oax_resolve r
         JOIN oax_candidates c ON c.cluster_id = r.cluster_id AND c.author_idx = r.author_idx
         WHERE r.cluster_id = ? AND r.status = 'accepted'
-        ORDER BY c.works_count_global DESC
+        ORDER BY c.works_count_au DESC
         """,
         [cluster_id],
     ).fetchdf()
 
-    name = t["oax_full_name"] or "(OpenAlex identity unresolved)"
-    lines = [f"# {name}", ""]
+    lines = []
+    if t["oax_full_name"]:
+        lines.append(f"# {t['oax_full_name']}")
+        lines.append("")
     lines.append(f"- ACIF: `{t['cluster_id']}`")
     lines.append(f"- Report generated: {t['report_generated_at']}")
     orcids = list(t["orcids"]) if t["orcids"] is not None else []
@@ -183,7 +185,7 @@ def render_acif_markdown(con: duckdb.DuckDBPyConnection, cluster_id: str) -> str
     lines.append("")
 
     lines.append("## Works")
-    lines.append(f"- {len(accepted)} accepted candidate(s) (oax_resolve, score >= 4/6; sorted by works_count DESC)")
+    lines.append(f"- {len(accepted)} accepted candidate(s) (oax_resolve, score >= 4/6; sorted by works_count_au DESC)")
     arc_orcids = list(t["orcids"]) if t["orcids"] is not None else []
     arc_orcid_str = ", ".join(arc_orcids) if arc_orcids else "(none recorded)"
     for _, row in accepted[accepted["orcid_mismatch"] == True].iterrows():  # noqa: E712
