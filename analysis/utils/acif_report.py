@@ -119,7 +119,7 @@ def render_acif_markdown(con: duckdb.DuckDBPyConnection, cluster_id: str) -> str
         lines.append("(no grants on record)")
         lines.append(f"- Reliability tier: {t['reliability_tier']}  /  resolution status: {t['resolution_status']}")
     else:
-        total = grants["funding_current"].sum(skipna=True)
+        total = grants["funding_announced"].sum(skipna=True)
         n_fellowships = int(grants["is_fellowship"].fillna(False).sum())
         lines.append(
             f"- {len(grants)} grant(s), {n_fellowships} fellowship award(s), "
@@ -141,7 +141,7 @@ def render_acif_markdown(con: duckdb.DuckDBPyConnection, cluster_id: str) -> str
             "Grant": grants["grant_code"],
             "Role": grants["role_code"],
             "Fellowship": grants["is_fellowship"].apply(lambda v: "yes" if v else ""),
-            "Amount": grants["funding_current"].apply(
+            "Amount": grants["funding_announced"].apply(
                 lambda v: f"${v:,.0f}" if pd.notna(v) else "?"
             ),
             "HEP": grants["hep_code"],

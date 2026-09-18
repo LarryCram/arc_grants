@@ -26,13 +26,26 @@ build_results_db()):
     for the single highest-scoring ACCEPTED candidate from oax_resolve (a summary view only;
     the full accepted set, which can be 0/1/2+ candidates, is what the report's own `## Works`
     section renders from oax_resolve directly) -- and when this row was last (re)built.
-  - arc: one row per (ACIF, grant) -- grant code, role, fellowship flag, funding amount,
+  - arc: one row per (ACIF, grant) -- grant code, role, fellowship flag, funding_announced
+    (the original announced budget; NOT funding_current -- switched 2026-09-18, see below),
     HEP code (not scheme_name or the raw admin_org institution name -- dropped/recoded per
     direct 2026-09-17 instruction; institution is coded as its short hep_code, matching the
     HEP-codes-not-full-names convention already used elsewhere in this project, e.g.
     AwardsCIF.hep_codes). Grain is per-grant, not per-ACIF, because a person can hold several
     grants and each has its own year/amount -- collapsing to one row per ACIF would either
     lose grants or force a lossy aggregate no report should be built on.
+
+    funding_current vs funding_announced (2026-09-18): originally built on funding_current (a
+    direct user decision at the time), but confirmed by reading ARC's own raw NCGP JSON
+    directly (raw_json.csv, not just grants_flat.parquet) that funding-current is NOT a
+    point-in-time "what's actually been paid" figure -- for DE120100390 (Natalie Keirstead,
+    status Closed) it reads a flat 0.0 while funding-at-announcement reads a real $375,000.
+    Population-wide: 629/33,650 grants (1.9%) show funding_current=0 with funding_announced>0,
+    616 of those (98%) status Closed -- but NOT a clean status-based rule (13 are Active, and
+    the reverse -- some Closed grants keep a real nonzero funding_current -- also occurs), so
+    "Closed implies 0" is a strong pattern, not something safe to special-case on. Switched the
+    whole column to funding_announced, which stays stable regardless of a grant's current
+    status.
 
 All tables key on cluster_id (the ACIF's own id, see CLAUDE.md on why this stays the
 human-readable string rather than a surrogate key). None compute anything new beyond the
@@ -436,7 +449,7 @@ def build_arc_table(con: duckdb.DuckDBPyConnection) -> int:
             pg.role_code,
             pg.is_fellowship,
             gf.funding_commence_year,
-            gf.funding_current,
+            gf.funding_announced,
             hc.hep_code
         FROM per_grant pg
         LEFT JOIN read_parquet('{GRANTS_FLAT}') gf ON gf.grant_code = pg.grant_code
