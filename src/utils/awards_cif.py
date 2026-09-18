@@ -27,6 +27,7 @@ import json
 import re
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field, replace
+from itertools import combinations
 from pathlib import Path
 
 import diskcache
@@ -1678,7 +1679,11 @@ def merge_same_grant_coinvestigators(clusters: list[AwardsCIF]) -> list[AwardsCI
     DP0345157_HansMuhlhaus in the ARC<->OAX linking blocking rule, applicable here too since a
     cluster's aggregated family_names can genuinely hold 2+ distinct ARC-side spellings) +
     first_initial on that grant are the same person. Skips pairs whose clusters already carry
-    distinct non-empty ORCIDs."""
+    distinct non-empty ORCIDs, or whose full given names first_names_compatible() rules out
+    (added 2026-09-18: confirmed real false merge, DP0666463_YXiang absorbing
+    DP0773446_YongXiang -- "Yang Xiang" and "Yong Xiang" are two different, real co-investigators
+    on the same grant (DP1095498), not an announcement/current name-snapshot pair; the blocking
+    key here is only the first LETTER, so nothing previously distinguished them)."""
     grants = pd.read_parquet(PROCESSED_DATA / "grants_flat.parquet")
     if "n_eligible_orgs" not in grants.columns:
         return clusters
@@ -1726,6 +1731,11 @@ def merge_same_grant_coinvestigators(clusters: list[AwardsCIF]) -> list[AwardsCI
             shared = set.intersection(*non_empty)
             if len(union_all) > len(shared):
                 continue  # ORCID conflict -- skip this group
+        if any(
+            not first_names_compatible(by_id[a].first_names, by_id[b].first_names)
+            for a, b in combinations(ids, 2)
+        ):
+            continue  # given-name conflict -- skip this group (e.g. Yang Xiang / Yong Xiang)
         for cid in ids[1:]:
             union(ids[0], cid)
 

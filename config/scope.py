@@ -8,7 +8,8 @@ Edit here to change which schemes and roles are included in analysis.
 # and non-investigator roles (PI, NP, OI, IC, AC, TCD, MEN, HD, SUP, CD, etc.)
 KEEP_ROLES = frozenset({
     "CI",       # Chief Investigator
-    "CI-DORA",  # CI — Declaration on Research Assessment
+    "CI-DORA",  # CI — Discovery Outstanding Researcher Award — corrected 2026-09-18, was
+                #   mislabeled "Declaration on Research Assessment"; user-confirmed early-career.
     "DECRA",    # Discovery Early Career Researcher Award
     "FT",       # Future Fellow
     "FL",       # Laureate Fellow
@@ -26,14 +27,34 @@ KEEP_ROLES = frozenset({
                 #   was mislabeled "Industry Research Fellowship"
 })
 
-# Early-career fellowship cohort (analysis/07_analyse_ecr_fellowships.py, analysis/01_fetch_oeuvres.py --ecr).
-# APF is deliberately excluded despite the similar code -- confirmed via ARC's own role_name
-# field 2026-08-08 that APF is "Australian Professorial Fellowship" (senior), not postdoctoral.
-ECR_ROLES = frozenset({
-    "DECRA",    # Discovery Early Career Researcher Award
-    "APD",      # Australian Postdoctoral Fellowship
-    "APDI",     # Australian Postdoctoral Fellowship (Industry)
-})
+# Fellowship career-stage classification -- single canonical source, user-confirmed 2026-09-18.
+# Every fellowship role_code in KEEP_ROLES appears exactly once here; CI itself is not a
+# fellowship and has no tier. Built as one object (not three independently-maintained sets)
+# specifically to avoid the duplicate-hardcoded-list drift this project has repeatedly found
+# and had to fix elsewhere (e.g. 01a_diagnose.py's own SCHEMES_OF_INTEREST list silently
+# drifting from this same file's KEEP_SCHEMES).
+FELLOWSHIP_TIER: dict[str, str] = {
+    "DECRA":   "Early-career",
+    "APD":     "Early-career",
+    "APDI":    "Early-career",
+    "CI-DORA": "Early-career",  # Discovery Outstanding Researcher Award
+    "IRF":     "Early-career",  # Indigenous Research(er) Fellowship
+    "DAATSIA": "Early-career",
+    "FT":      "Mid-career",    # Future Fellow
+    "QEII":    "Mid-career",
+    "ARF":     "Mid-career",
+    "ARFI":    "Mid-career",    # Australian Research Fellowship (Indigenous)
+    "FF":      "Senior",        # Federation Fellow
+    "FL":      "Senior",        # Laureate Fellow
+    "APF":     "Senior",        # Australian Professorial Fellowship -- confirmed senior
+                                 #   2026-08-08, not postdoctoral despite the similar code.
+}
+
+# Derived sets, kept for callers that want a plain frozenset rather than the tier dict itself
+# (analysis/07_analyse_ecr_fellowships.py, analysis/01_fetch_oeuvres.py --ecr).
+ECR_ROLES = frozenset(c for c, t in FELLOWSHIP_TIER.items() if t == "Early-career")
+MCR_ROLES = frozenset(c for c, t in FELLOWSHIP_TIER.items() if t == "Mid-career")
+SRF_ROLES = frozenset(c for c, t in FELLOWSHIP_TIER.items() if t == "Senior")
 
 # Grant scheme codes to retain (first two characters of grant_code).
 # Excludes equipment/infrastructure (LE, IE), international mobility (LX, IN, IL),

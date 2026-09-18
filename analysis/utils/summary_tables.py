@@ -3,8 +3,9 @@ analysis/utils/summary_tables.py
 
 Population-level summary tables for publication -- distinct from analysis/utils/acif_report.py
 (one ACIF at a time). Reads only results.db's `arc` table (one row per ACIF x grant, already
-deduped -- see analysis/utils/results_db.py), same "results.db is the sole source" discipline
-as the per-ACIF report.
+deduped) and `title` table (one row per ACIF, carries reliability_tier) -- see
+analysis/utils/results_db.py -- same "results.db is the sole source" discipline as the
+per-ACIF report.
 
 CI/F terminology (2026-09-18, direct instruction -- established project usage, not invented
 here): "CI/F" = the whole in-scope ACIF population, Chief Investigator OR Fellow -- literally
@@ -19,14 +20,15 @@ KEEP_ROLES, which is exactly {CI} union {every fellowship role_code}, so CI/F, C
 Fellow-only are the natural three-way split of this population, not three independent
 categories that happen to overlap by coincidence.
 
-Fellowship tier mapping (early/middle/senior) is only confidently derivable from this project's
-own already-established documentation for a subset of the 13 KEEP_ROLES fellowship codes:
-  - Early:  DECRA, APD, APDI      (config/scope.py's own ECR_ROLES)
-  - Middle: FT                     (CLAUDE.md repeatedly calls Future Fellowship "mid-career")
-  - Senior: FL, FF, APF            (Laureate/Federation/Professorial -- all senior per CLAUDE.md)
-The remaining fellowship codes (ARF, QEII, CI-DORA, DAATSIA, IRF, ARFI) have no equivalent
-documented tier anywhere in this project -- rather than guess, they're kept in their own
-"Other fellowship (tier not classified)" bucket, not forced into early/middle/senior.
+Fellowship tier mapping (early/mid/senior) is sourced directly from config/scope.py's own
+FELLOWSHIP_TIER -- the single canonical classification, user-confirmed 2026-09-18, covering
+every one of KEEP_ROLES' 12 fellowship codes (nothing left unclassified):
+  - Early:  DECRA, APD, APDI, CI-DORA, IRF, DAATSIA
+  - Mid:    FT, QEII, ARF, ARFI
+  - Senior: FF, FL, APF
+Built FROM config/scope.py, not duplicated by hand here -- the same drift this project has
+repeatedly found and fixed elsewhere (e.g. 01a_diagnose.py's own stale SCHEMES_OF_INTEREST
+copy) is exactly what sourcing from the one canonical dict avoids.
 """
 
 import sys
@@ -38,15 +40,25 @@ import duckdb
 import pandas as pd
 from tabulate import tabulate
 
-_TIER_CASE = """
-    CASE
-        WHEN NOT is_fellowship THEN 'Chief Investigator (non-fellowship)'
-        WHEN role_code IN ('DECRA', 'APD', 'APDI') THEN 'Early-career fellowship'
-        WHEN role_code = 'FT' THEN 'Mid-career fellowship'
-        WHEN role_code IN ('FL', 'FF', 'APF') THEN 'Senior fellowship'
-        ELSE 'Other fellowship (tier not classified)'
-    END
-"""
+from config.scope import FELLOWSHIP_TIER
+
+
+def _build_tier_case() -> str:
+    """SQL CASE built from config.scope.FELLOWSHIP_TIER -- every fellowship role_code in
+    KEEP_ROLES is covered by construction, so the ELSE branch is purely defensive (fires only
+    if a future role_code is added to KEEP_ROLES without an accompanying FELLOWSHIP_TIER entry,
+    not a gap that exists today)."""
+    lines = ["CASE", "    WHEN NOT is_fellowship THEN 'Chief Investigator (non-fellowship)'"]
+    for tier in ("Early-career", "Mid-career", "Senior"):
+        codes = sorted(c for c, t in FELLOWSHIP_TIER.items() if t == tier)
+        code_list = ", ".join(f"'{c}'" for c in codes)
+        lines.append(f"    WHEN role_code IN ({code_list}) THEN '{tier} fellowship'")
+    lines.append("    ELSE 'Other fellowship (tier not classified)'")
+    lines.append("END")
+    return "\n".join(lines)
+
+
+_TIER_CASE = _build_tier_case()
 
 _TIER_ORDER = [
     "Early-career fellowship",
@@ -55,6 +67,13 @@ _TIER_ORDER = [
     "Other fellowship (tier not classified)",
     "Chief Investigator (non-fellowship)",
 ]
+
+# reliability_tier is a per-ACIF (per-cluster_id) field, not a per-award one -- it grades how
+# strong the evidence is that a given ACIF's own ARC-side deduplication (Splink clustering +
+# ORCID-based merge/split rules + manually-verified overrides, see CLAUDE.md) really is one
+# real person. 1a = strongest (own ORCID, always consistent); 4/4u = weakest. Canonical order
+# per CLAUDE.md's own documentation of the tier ladder.
+_RELIABILITY_TIER_ORDER = ["1a", "1b", "1c", "2", "3", "4", "4u"]
 
 
 def _table(df: pd.DataFrame) -> str:
@@ -83,13 +102,28 @@ def build_summary_report(con: duckdb.DuckDBPyConnection) -> str:
     )
     by_scheme = by_scheme.sort_values("Scheme code")
 
+    by_reliability_raw = con.execute("""
+        SELECT t.reliability_tier AS tier, COUNT(*) AS awards, COUNT(DISTINCT a.cluster_id) AS persons
+        FROM arc a
+        JOIN title t ON t.cluster_id = a.cluster_id
+        GROUP BY t.reliability_tier
+    """).fetchdf()
+    by_reliability = (
+        by_reliability_raw.set_index("tier").reindex(_RELIABILITY_TIER_ORDER)
+        .fillna(0).astype(int).reset_index()
+        .rename(columns={"tier": "Reliability tier"})
+    )
+
     by_tier_raw = con.execute(f"""
         SELECT {_TIER_CASE} AS tier, COUNT(*) AS awards, COUNT(DISTINCT cluster_id) AS persons
         FROM arc
         GROUP BY tier
     """).fetchdf()
+    # reindex can introduce a row with no matching data (e.g. "Other fellowship" now that every
+    # KEEP_ROLES fellowship code has a real tier) -- fillna(0) keeps the table showing a clean
+    # 0 rather than tabulate's default "nan" rendering.
     by_tier = (
-        by_tier_raw.set_index("tier").reindex(_TIER_ORDER).reset_index()
+        by_tier_raw.set_index("tier").reindex(_TIER_ORDER).fillna(0).astype(int).reset_index()
         .rename(columns={"tier": "Fellowship tier"})
     )
 
@@ -127,15 +161,23 @@ def build_summary_report(con: duckdb.DuckDBPyConnection) -> str:
             "Count": [total_awards, total_persons],
         })),
         "",
+        "## By reliability tier",
+        "",
+        "reliability_tier is a per-ACIF measure of how well-evidenced that ACIF's own identity "
+        "is (ARC-internal deduplication: Splink clustering + ORCID-based merge/split rules + "
+        "manually-verified overrides) -- NOT a measure of the ARC-OAX OpenAlex link. "
+        "1a = strongest (own ORCID, always consistent) down to 4/4u = weakest.",
+        "",
+        _table(by_reliability.rename(columns={"awards": "Awards", "persons": "Persons (distinct)"})),
+        "",
         "## By scheme code",
         "",
         _table(by_scheme.rename(columns={"awards": "Awards", "persons": "Persons (distinct)"})),
         "",
         "## By fellowship tier",
         "",
-        "Early = DECRA/APD/APDI, Middle = FT, Senior = FL/FF/APF -- see module docstring for why "
-        "the remaining fellowship codes (ARF, QEII, CI-DORA, DAATSIA, IRF, ARFI) are kept "
-        "unclassified rather than guessed into a tier.",
+        "Early = DECRA/APD/APDI/CI-DORA/IRF/DAATSIA, Mid = FT/QEII/ARF/ARFI, Senior = FF/FL/APF "
+        "-- config/scope.py's FELLOWSHIP_TIER, user-confirmed 2026-09-18.",
         "",
         _table(by_tier.rename(columns={"awards": "Awards", "persons": "Persons (distinct)"})),
         "",
