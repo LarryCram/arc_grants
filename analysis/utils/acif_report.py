@@ -94,8 +94,13 @@ def render_acif_markdown(con: duckdb.DuckDBPyConnection, cluster_id: str) -> str
         [cluster_id],
     ).fetchdf()
     accepted = con.execute(
-        "SELECT author_idx, full_name, total_score FROM oax_resolve "
-        "WHERE cluster_id = ? AND status = 'accepted' ORDER BY total_score DESC",
+        """
+        SELECT r.author_idx, r.full_name, r.total_score, r.orcid_mismatch, c.orcid AS candidate_orcid
+        FROM oax_resolve r
+        JOIN oax_candidates c ON c.cluster_id = r.cluster_id AND c.author_idx = r.author_idx
+        WHERE r.cluster_id = ? AND r.status = 'accepted'
+        ORDER BY c.works_count_global DESC
+        """,
         [cluster_id],
     ).fetchdf()
 
@@ -178,11 +183,19 @@ def render_acif_markdown(con: duckdb.DuckDBPyConnection, cluster_id: str) -> str
     lines.append("")
 
     lines.append("## Works")
-    lines.append(f"- {len(accepted)} accepted candidate(s) (oax_resolve, score >= 4/6, no ORCID veto)")
+    lines.append(f"- {len(accepted)} accepted candidate(s) (oax_resolve, score >= 4/6; sorted by works_count DESC)")
+    arc_orcids = list(t["orcids"]) if t["orcids"] is not None else []
+    arc_orcid_str = ", ".join(arc_orcids) if arc_orcids else "(none recorded)"
+    for _, row in accepted[accepted["orcid_mismatch"] == True].iterrows():  # noqa: E712
+        candidate_orcid = str(row["candidate_orcid"]).rstrip("*")
+        lines.append(
+            f"- candidate included with mismatched orcid: {row['full_name']} "
+            f"({row['author_idx']}) -- ARC: {arc_orcid_str} vs OAX: {candidate_orcid}"
+        )
     lines.append("")
     if not accepted.empty:
-        lines.append(markdown_table(accepted.rename(columns={
-            "author_idx": "author_idx", "full_name": "Full name", "total_score": "Score",
+        lines.append(markdown_table(accepted[["author_idx", "full_name", "total_score"]].rename(columns={
+            "full_name": "Full name", "total_score": "Score",
         })))
         lines.append("")
     lines.append("- (oeuvre works themselves still pending)")

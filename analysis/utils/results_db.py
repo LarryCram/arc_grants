@@ -310,8 +310,9 @@ def build_oax_resolve_table(con: duckdb.DuckDBPyConnection) -> int:
     `oax_candidates`, on AcifOaxLinker's own evidence -- there is no resolve()-equivalent in
     AcifOaxLinker itself yet (block()/fd_score()/coawardee_corroborate() only produce evidence),
     so this is genuinely new logic, not a passthrough of anything already computed elsewhere.
-    Design confirmed directly with the user (2026-09-17) before coding, one point per signal:
-      - pt_orcid:        1 if orcid_check = 'match'
+    Design confirmed directly with the user (2026-09-17), one point per signal:
+      - pt_orcid:        1 if orcid_check = 'match', 0 if 'unknown' (either side missing) or
+                          'mismatch' -- a plain match/no-match feature, NOT a veto (see below).
       - pt_given_name:   1 if given_name_check = 'match'
       - pt_coawardee:    1 if n_corroborating_coauthors >= 2
       - pt_subfield:     1 if subfield_fd > 0.75
@@ -319,17 +320,30 @@ def build_oax_resolve_table(con: duckdb.DuckDBPyConnection) -> int:
       - pt_works_au:     1 if works_count_au > 5
     total_score = sum of the six (0-6). NULL FD scores count as failing that point (no evidence
     is not the same as a point) -- same discipline as everywhere else FD scores are used.
+    status = 'accepted' if total_score >= 4, else 'ejected'.
 
-    orcid_veto (HARD veto, independent of total_score): orcid_check = 'mismatch' -- both sides
-    have a real ORCID and they differ, decisive evidence of a different real person (mirrors
-    FilterCandidates.orcid_veto() in the now-superseded old pipeline, kept here deliberately per
-    direct instruction -- a pure point total could otherwise still accept a confirmed-different
-    person via the other five signals).
+    NO hard ORCID veto (2026-09-18, direct instruction reversing the 2026-09-17 design) -- a
+    confirmed ORCID mismatch no longer forces ejection regardless of score; it only costs the
+    one orcid point, same as any other failed criterion. Reversed after a real, concrete
+    false-positive was found and externally verified: LP180100487_YifanWang's top candidate
+    (score 4/6 on every OTHER signal -- institution, field, given name, coawardees all agreed)
+    was being hard-ejected purely because ARC's own recorded ORCID (0000-0002-2504-7441) differs
+    from the OpenAlex candidate's (0000-0001-7462-2679) -- live ORCID lookups (user-supplied)
+    showed ARC's own ORCID has real, matching employment data (UQ, School of ITEE, 2009-present)
+    while the OpenAlex-linked one is empty/private, consistent with the same real person holding
+    two ORCID iDs (not uncommon), not two different people. The veto's own docstring had already
+    named this exact failure mode as an accepted risk "cheaply recoverable when found" -- it
+    surfaced on the very first real case investigated this session, stronger evidence against
+    a blanket veto than the "~2-3 known cases" estimate the old FilterCandidates.orcid_veto()
+    design assumed.
 
-    status = 'ejected' if orcid_veto, else 'accepted' if total_score >= 4, else 'ejected'.
-    reason: human-readable -- 'orcid_mismatch_veto', or 'score_N_of_6' either way (accepted or
-    not), so a review of ejected rows shows exactly which score they missed the bar with, not
-    just that they were rejected.
+    orcid_mismatch (provenance, NOT a gate): TRUE when orcid_check = 'mismatch', persisted
+    regardless of whether the candidate is accepted or ejected -- direct requirement ("we need a
+    provenance for unequal orcid whether it passes or not"), so a reviewer can always see which
+    accepted candidates carry an unresolved ORCID conflict worth checking, without that fact
+    silently disappearing once scoring accepts them anyway.
+
+    reason: 'score_N_of_6', always -- no separate veto-branch reason string anymore.
 
     Explicitly persisted so ejected candidates stay inspectable (direct user requirement,
     2026-09-17: "I will want to look at what is ejected too") -- this is NOT filtered down to
@@ -363,18 +377,14 @@ def build_oax_resolve_table(con: duckdb.DuckDBPyConnection) -> int:
             pt_works_au,
             pt_orcid + pt_given_name + pt_coawardee + pt_subfield + pt_institution + pt_works_au
                 AS total_score,
-            (orcid_check = 'mismatch') AS orcid_veto,
+            (orcid_check = 'mismatch') AS orcid_mismatch,
             CASE
-                WHEN orcid_check = 'mismatch' THEN 'ejected'
                 WHEN pt_orcid + pt_given_name + pt_coawardee + pt_subfield + pt_institution
                      + pt_works_au >= 4 THEN 'accepted'
                 ELSE 'ejected'
             END AS status,
-            CASE
-                WHEN orcid_check = 'mismatch' THEN 'orcid_mismatch_veto'
-                ELSE 'score_' || (pt_orcid + pt_given_name + pt_coawardee + pt_subfield
-                                   + pt_institution + pt_works_au)::VARCHAR || '_of_6'
-            END AS reason
+            'score_' || (pt_orcid + pt_given_name + pt_coawardee + pt_subfield
+                         + pt_institution + pt_works_au)::VARCHAR || '_of_6' AS reason
         FROM scored
     """)
     con.execute("ALTER TABLE oax_resolve ADD PRIMARY KEY (cluster_id, author_idx)")
