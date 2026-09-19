@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pytest
 from src.utils.names import (
     norm_alpha, strip_parens, tokens, parse_given,
-    HumanNameParser, ParsedName,
+    HumanNameParser, ParsedName, name_part_tokens,
 )
 
 
@@ -106,6 +106,40 @@ class TestTokens:
         assert tokens("O'Brien") == ["o", "brien"]
 
 
+class TestNamePartTokensHyphenPreserved:
+    """2026-09-18: name_part_tokens() used to discard a hyphenated given name's own literal
+    spelling entirely -- "Xu-Jia" -> ["xu", "jia"], with no way to match the compound form as
+    itself. Root cause of a real confirmed false merge (DE180100592_JIAWANG combining an ANU
+    mathematician "Xu-Jia Wang" with a Swinburne physicist "Jia Wang" -- both reduce to the
+    identical full_name_key "jia_wang" via the split alone). Fixed additively: the literal
+    hyphenated whole is now ALSO kept as its own token, alongside (not instead of) the split
+    pieces -- never a synthesized/concatenated form (a first draft proposed "xujia", a string
+    that never appears in any source record; corrected before landing)."""
+
+    def test_hyphenated_given_name_keeps_split_and_whole(self):
+        assert name_part_tokens("Xu-Jia") == ["xu", "jia", "xu-jia"]
+
+    def test_hyphenated_surname_shape_keeps_split_and_whole(self):
+        assert name_part_tokens("Watson-Parker") == ["watson", "parker", "watson-parker"]
+
+    def test_space_separated_unaffected(self):
+        assert name_part_tokens("van den Berg") == ["van", "den", "berg"]
+
+    def test_mixed_hyphen_and_space_does_not_invent_a_false_join(self):
+        # The hyphenated whole is only added per hyphen-connected word, never rejoined across a
+        # space -- "mary-jane", not a fabricated "jane-ann".
+        assert name_part_tokens("Mary-Jane Ann") == ["mary", "jane", "ann", "mary-jane"]
+
+    def test_exotic_unicode_hyphens_normalise_to_the_same_ascii_form(self):
+        ascii_form = name_part_tokens("Xu-Jia")
+        assert name_part_tokens("Xu‐Jia") == ascii_form  # HYPHEN
+        assert name_part_tokens("Xu–Jia") == ascii_form  # EN DASH
+        assert name_part_tokens("Xu—Jia") == ascii_form  # EM DASH
+
+    def test_single_word_unaffected(self):
+        assert name_part_tokens("David") == ["david"]
+
+
 class TestParseGivenIsPureDelegation:
     """parse_given() is now a thin delegation to HumanNameParser.parse_given_legacy() -- these
     confirm the historical, already-relied-upon 5-tuple shape/behavior is unchanged."""
@@ -134,6 +168,16 @@ class TestHumanNameParser:
         r = self.p.parse("Frank Grützner")
         assert "gruetzner" in r.family_names
         assert "grutzner" in r.family_names
+
+    def test_hyphenated_given_name_keeps_the_compound_full_name_key(self):
+        # 2026-09-18: the literal compound "xu-jia_wang" key must survive alongside the split
+        # "xu_wang"/"jia_wang" pieces -- not the sole cause of the DE180100592_JIAWANG false
+        # merge (Splink's own scoring is what actually clustered them), but a required part of
+        # making the compound form itself matchable rather than only its shredded syllables.
+        r = self.p.parse("Xu-Jia Wang")
+        assert "xu-jia_wang" in r.full_name_keys
+        assert "xu_wang" in r.full_name_keys
+        assert "jia_wang" in r.full_name_keys
 
     def test_non_latin_ascii_path_empties_but_raw_path_survives(self):
         # A name with no Latin-script form at all: the ASCII-reduced path (real, necessary

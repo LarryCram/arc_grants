@@ -556,6 +556,15 @@ def name_part_tokens(s: str) -> list[str]:
         "parker"] and "van den Berg" → ["van", "den", "berg"]
       - a bare, vowel-less 2-4 letter token is split into individual initials (see
         _split_bare_initials()) -- "pg" → ["p", "g"], but "mo" stays whole
+      - a hyphenated part ALSO keeps the literal hyphenated whole as its own token
+        (e.g. "Xu-Jia" → ["xu", "jia", "xu-jia"]) -- nameparser handed us this as ONE
+        name-part field; splitting it is useful (a real single-syllable short form),
+        but the split must not be the only representation, since that discards the
+        real, literal spelling and leaves no way to match it as itself. This is the
+        actual recorded string with only case/diacritics normalised, never a
+        synthesized/concatenated form (2026-09-18: an earlier draft of this fix
+        proposed "xujia", a string that never appears anywhere in the source data --
+        corrected on direct challenge; only the literal hyphenated spelling is added).
 
     Apply to both ARC and OAX name fields so the token sets are comparable.
     """
@@ -563,8 +572,15 @@ def name_part_tokens(s: str) -> list[str]:
         return []
     s = strip_diacriticals(s)
     s = _APOSTROPHES.sub("", s)
-    toks = re.findall(r"[a-z]+", s.lower())
+    s_lower = s.lower()
+    toks = re.findall(r"[a-z]+", s_lower)
     out: list[str] = []
     for t in toks:
         out.extend(_split_bare_initials(t))
+    # Preserve each hyphenated word's own literal spelling too -- matched independently per
+    # space-separated word (never rejoined across a space), so "Mary-Jane Ann" correctly keeps
+    # "mary-jane" as one unit without inventing a false "jane-ann" join.
+    for word in re.findall(r"[a-z][a-z-]*[a-z]", s_lower):
+        if "-" in word and word not in out:
+            out.append(word)
     return out

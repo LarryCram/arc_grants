@@ -33,9 +33,6 @@ from pathlib import Path
 import diskcache
 import duckdb
 import pandas as pd
-from splink import DuckDBAPI, Linker, SettingsCreator, block_on
-import splink.comparison_library as cl
-import splink.comparison_level_library as cll
 
 from config.settings import PROCESSED_DATA, ADMIN_ORGS_CSV, GRANT_SUMMARIES_CSV, ARC_GRANTS_CSV, DISKCACHE_DIR, OAX_AUTHORS, TOP_CUT, DUCKDB_TMP_DIR, ORCID_BULK_PARQUET
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
@@ -65,6 +62,7 @@ _MANUAL_MERGES_CSV = _DATA_PERSISTED / "manual_merges.csv"
 _MANUAL_RESOLUTIONS_CSV = _DATA_PERSISTED / "manual_resolutions.csv"
 _MANUAL_CONFIRMED_NOT_SUSPICIOUS_CSV = _DATA_PERSISTED / "manual_confirmed_not_suspicious.csv"
 _MANUAL_CONFIRMED_DISTINCT_CSV = _DATA_PERSISTED / "manual_confirmed_distinct.csv"
+_ENRICHMENT_BLOCKLIST_CSV = _DATA_PERSISTED / "enrichment_blocklist.csv"
 
 class StaleClusterIdError(Exception):
     """Raised when a cluster_id/arc_id captured in a data_persisted/manual_*.csv override
@@ -121,7 +119,6 @@ def resolve_cluster_id(old_id: str, clusters: "list[AwardsCIF] | pd.DataFrame") 
     )
 
 
-CLUSTER_THRESHOLD = 0.9  # same value as 01_prepare_arc.py -- high precision, prefer splitting over merging
 RARE_NAME_TF = 2e-6  # OAX full_name_key TF below this -> rare name (tier 2 vs 3). Distinct from
                       # cluster_checks.RARE_NAME_TF (1e-5 as of 2026-08-21, was 5e-5), which
                       # governs is_suspicious()'s own rare-name carve-out -- same constant name,
@@ -893,226 +890,283 @@ def _build_awards_cif(cluster_id: str, items: list[AwardCIFItem]) -> AwardsCIF:
     )
 
 
+# FOR-name-sharing evidence, rebuilt 2026-09-19 from a flat ">=2 tokens" count to a rarity/
+# coincidence-propensity gate -- same z-score-against-a-null-model discipline this project
+# already uses for ACCEPTABLE_DIVISION_PAIRS (src/utils/cluster_checks.py), reduced from that
+# check's two-dimensional division-PAIR table to a one-dimensional per-for_name-signature
+# frequency, because this is a structurally different question: ACCEPTABLE_DIVISION_PAIRS asks
+# whether ONE already-confirmed person's own career plausibly spans two DIFFERENT divisions;
+# this asks whether TWO DIFFERENT, not-yet-confirmed people coincidentally sharing a surname
+# also coincidentally sharing the SAME for_name is real evidence of being one person.
+#
+# The flat ">=2 tokens" rule (FOR_TOKEN_MIN_OVERLAP, removed) was found to be exactly the same
+# class of bug as this whole rebuild's original motivation: unweighted-by-rarity matching.
+# Measured directly (2026-09-18/19): population-wide, a flat threshold generated 30,564
+# pairwise matches, but a naive "does this for_name ever repeat within a confirmed same-person
+# career" z-score (population-wide null, mirroring ACCEPTABLE_DIVISION_PAIRS's own formula
+# verbatim) does NOT discriminate here -- EVERY one of 218 tested for_names clears z>3.3 against
+# that null (real careers are topically consistent almost universally, so "does it repeat" is
+# near-tautologically true regardless of rarity). The question that actually matters, and the
+# one this gate answers, is measured differently: among 1,111 same-surname, name-compatible
+# pairs with CONFIRMED-CONFLICTING ARC-recorded orcids (independently verified to be different
+# real people), 2.52% coincidentally share an exact for_name anyway -- concentrated specifically
+# in the population's own most-common labels (Civil engineering, Materials Engineering, Applied
+# and developmental psychology), confirming for_name population rarity genuinely predicts this
+# false-positive risk, just not via the "does it repeat" framing.
+#
+# Confirmed concretely on the case that motivated this fix: FT130100778_XiaolinWang's 15-grant
+# UOW materials-physics cluster wrongly absorbed 3 University of Tasmania grants (different
+# field entirely on inspection, different real person's own ARC-recorded ORCID) via a single
+# bridging grant, DP140101501_XiaolinWang, whose own for_name ("Electrical engineering",
+# p=1.66% of the population) was atypical for that person's own otherwise-materials-physics
+# portfolio but happened to exactly match the Tasmania person's own field. p=1.66% is nowhere
+# near this gate's threshold -- correctly rejected as a lone bridge (see FOR_NAME_M below).
+#
+# FOR_NAME_M: not just p(X) alone -- a SINGLE shared for_name should mean something different
+# depending on how many mutually-independent items are relying on it. A bare pairwise bridge
+# (one orphan item attaching itself to an already-established identity, or two lone orphans
+# only connected to each other) is one coincidence roll: accepted only if p(X) itself clears
+# the threshold directly. A larger clique of orphan items (no orcid on any of them) that all
+# mutually share the identical for_name -- e.g. the real case Geoffrey Webb, 10 grants, all
+# "Artificial intelligence" (p=2.24%, itself one of the more common labels in the population,
+# but 10-way mutual coincidence is a different order of improbability) -- gets real credit for
+# that redundancy: accepted if p(X)**(m-1) clears the threshold, m = the size of the
+# for-name-only connected component (computed BEFORE folding in any orcid-established
+# structure, so an orcid-anchored group's own pre-existing size never inflates m for a bridge
+# joining it -- the orcid side always counts as exactly one unit for this purpose, since its
+# own internal cohesion was already established by stronger, unrelated evidence).
+FOR_NAME_COINCIDENCE_THRESHOLD = 0.05 / 295  # Bonferroni-style, ~295 distinct for_name values
+
+
 def cluster_items(
     items: list[AwardCIFItem],
     corrections: dict[str, dict] | None = None,
     orcid_corrections: dict[str, dict] | None = None,
 ) -> list[AwardsCIF]:
-    """Cluster Award-CI/F items into provisional AwardsCIF() groupings via Splink `dedupe_only`
-    -- the exact comparison/blocking configuration from 01_prepare_arc.py's Phase 2, reused
-    unchanged as a tool (Splink itself isn't being redesigned, only what's built from its output
-    -- see the tool/architecture split in the plan). What changes: instead of writing a
-    cluster_id column onto a DataFrame, the clustering result directly constructs one
-    AwardsCIF() per group, recording a splink_cluster provenance event on each, plus a
-    name_typo_correction event on any cluster containing an item load_award_cif_items()
-    corrected, and an orcid_correction event on any cluster containing an item whose ORCID
-    load_award_cif_items() corrected (manual_orcid_corrections.csv).
+    """Cluster Award-CI/F items into provisional AwardsCIF() groupings via plain SQL blocking +
+    explicit rule-based matching -- NOT Splink (2026-09-18 rebuild; Splink's own
+    dedupe_only/EM/TF machinery was removed outright, not patched further, after three separate,
+    confirmed bugs surfaced investigating one false merge: OpenAlex-population-sourced term
+    frequency applied to an ARC-internal population question (see the retired
+    register_term_frequency_lookup() note this replaced); full_name_key triple-counting the
+    same fact as first_name_canonical+family_name_main; and -- found last, the one that made the
+    first two moot -- comparison levels commented "hand-set, not EM-trained" that were, in fact,
+    always silently retrained, because m_probability/u_probability values alone are only a
+    training SEED in Splink's API, not a fixed value, without also passing
+    fix_m_probability=True/fix_u_probability=True. Direct parallel to this project's own
+    2026-09-09 decision to drop Splink from ARC<->OAX linking (AcifOaxLinker's plain SQL
+    block()/fd_score() replaced 03_link_arc_oax.py) for the same reason: every signal this
+    project actually trusts (ORCID exact match, name compatibility, FOR-code/subject overlap,
+    co-investigator overlap) was already being expressed as an explicit, hand-set rule --
+    Splink's probabilistic combination was never adding anything a transparent rule couldn't,
+    and at this population size (~65K items, ~23K people) a rule-based approach is trivially
+    fast in DuckDB with no training step left to silently betray a hand-set value.
+
+    Deliberately does NOT use institution/admin_org overlap as matching evidence (direct user
+    direction, 2026-09-18) -- ARC's raw investigator-level data has no field tying a specific
+    investigator to a specific organisation on a multi-investigator grant (already documented
+    at length elsewhere in this project, e.g. the 2026-08-25 inst_arr/single-org-gate rebuild),
+    so an institution-overlap signal is only trustworthy when a grant has exactly one
+    investigator -- too narrow and error-prone a carve-out to build into a population-wide
+    matching rule. The two signals actually used beyond ORCID are both pure name/content facts:
+    FOR2020-token overlap (>=FOR_TOKEN_MIN_OVERLAP, see that constant's own docstring) and
+    first_names_compatible()/family_names overlap (shared-cluster_checks.py logic, same
+    functions compute_gap_candidates() already trusts for the identical judgement call).
+    scheme/year eligibility (_scheme_incompat()) is checked too -- an ARC-recorded fact about
+    the grant itself, not an inferred institution attribution.
+
+    Blocking: four rules, unioned (same shape Splink's own blocking_rules_to_generate_predictions
+    used) -- (family_name_main, first_initial) exact; shared ORCID; family_names set-overlap +
+    first_initial; family_name_main + given_multichar (nickname) set-overlap. Each is a plain
+    equi-join, not an OR'd single query (measured: the OR'd form took 114.7s on this population,
+    since DuckDB can't turn a 4-way OR into a hash join and falls back to evaluating close to
+    the full 2.1-billion-pair cross product; the UNION-of-equi-joins form takes 0.2s).
+
+    Matching, per candidate pair, ORCID first:
+      - both sides have a non-null orcid and they DIFFER -> hard veto, never merge on any other
+        evidence (same principle as merge_same_grant_coinvestigators()'s own ORCID-conflict
+        skip and 04_filter_candidates.py's orcid_veto()).
+      - both sides have the SAME non-null orcid -> merge (strongest possible evidence).
+      - otherwise: name/family/scheme-compatible pairs sharing an EXACT for_name_tokens
+        signature become FOR-name-match candidates, but are not unioned immediately -- see
+        FOR_NAME_COINCIDENCE_THRESHOLD's own docstring for why this needs a second pass (the
+        accept/reject decision depends on how many mutually-independent items are relying on
+        the same evidence, which isn't known until every candidate edge has been collected).
+    Connected components (plain union-find) over every pair that merges form the provisional
+    clusters -- same "keep chaining real matches transitively" principle
+    cluster_pairwise_predictions_at_threshold() used, without a trained probability behind it.
+
+    This intentionally leaves some genuine no-ORCID same-person pairs split (their shared
+    for_name doesn't clear FOR_NAME_COINCIDENCE_THRESHOLD, even though the whole career would,
+    viewed in aggregate) -- not a gap in this function, the second, separately-scoped,
+    already-built mechanism for exactly that case is merge_by_coawardee_corroboration(), which
+    runs later in build_arc_only_population() against each cluster's FULL portfolio of
+    co-investigators (>=2 shared, a safely higher bar than any single grant-pair check could
+    support) rather than trying to make this function's own per-pair rule do that job too.
     """
     corrections = corrections or {}
     orcid_corrections = orcid_corrections or {}
 
     df = pd.DataFrame([{
         "unique_id": it.unique_id,
-        "first_name_canonical": it.first_name_canonical,
         "family_name_main": it.family_name_main,
         "family_names": list(it.family_names),
-        "full_name_key": it.full_name_key,
         "first_initial": it.first_initial,
         "orcid": it.orcid,
-        "inst_arr": [it.institution_oax_id] if it.institution_oax_id else [],
-        "for_name_tokens": it.for_name_tokens,
-        # given_multichar (2026-09-08): given_tokens + nickname_tokens, single-character
-        # initials filtered out. Feeds the given-name set-overlap blocking rule below --
-        # bare initials must be excluded, or the rule fires on any coincidentally-shared
-        # letter (confirmed directly: unfiltered, "Ying Zhu"/"Huai-Yong Zhu" blocked together
-        # purely because "Huai-Yong" tokenizes to include a bare "y", nothing to do with
-        # either person's actual given name). Anchored on family_name_main (not first_initial)
-        # so it can still catch a genuine given-name mismatch -- first_initial itself is
-        # exactly what a nickname breaks (Yingzi vs Jenny).
+        "for_name_tokens": list(it.for_name_tokens),
         "given_multichar": (
             [t for t in (it.parsed.given_tokens + it.parsed.nickname_tokens) if len(t) > 1]
             if it.parsed else []
         ),
     } for it in items])
 
-    settings = SettingsCreator(
-        unique_id_column_name="unique_id",
-        link_type="dedupe_only",
-        blocking_rules_to_generate_predictions=[
-            block_on("family_name_main", "first_initial"),
-            "l.orcid = r.orcid AND l.orcid IS NOT NULL",
-            # Set-overlap blocking (2026-09-07) -- mirrors 03_link_arc_oax.py's own 2026-08-25
-            # fix (see that file's module docstring for the full incident/measurement). Same
-            # root cause here: family_name_main is one scalar picked from a genuinely
-            # multi-valued family_names set (confirmed real, not theoretical -- 77 real
-            # AwardCIFItem records carry 2+ family_names, e.g. Schröder ->
-            # ['schroder','schroeder','schröder']), so two of the SAME real person's own grant
-            # records can carry disagreeing family_name_main scalars (a diacritic-convention
-            # difference between two data-entry points, or a genuine mid-career spelling
-            # correction) with nothing here to rescue the pair -- this dedupe run had neither
-            # this blocking rule nor the matching comparison level below before this fix, unlike
-            # its already-fixed 03_link_arc_oax.py sibling.
-            "list_has_any(l.family_names, r.family_names) AND l.first_initial = r.first_initial",
-            # Given-name set-overlap (2026-09-08) -- the given-name-side sibling of the rule
-            # above, needed for the case first_initial itself can't survive: a real nickname
-            # (Yingzi/Jenny) changes the initial, not just the spelling. Anchored on exact
-            # family_name_main (not first_initial, which is exactly what's unreliable here) --
-            # measured directly against the real ~64,830-item population: unanchored
-            # (list_has_any(full_name_keys, full_name_keys) alone) cost 241s and produced
-            # noise from bare-initial collisions; this anchored, multichar-filtered version
-            # cost 0.5s and the false positive it was compared against was confirmed excluded.
-            "l.family_name_main = r.family_name_main AND list_has_any(l.given_multichar, r.given_multichar)",
-        ],
-        comparisons=[
-            cl.CustomComparison(
-                output_column_name="first_name_canonical",
-                comparison_description="First name: exact / initial-match / full-mismatch",
-                comparison_levels=[
-                    {
-                        "sql_condition": "first_name_canonical_l IS NULL OR first_name_canonical_r IS NULL",
-                        "label_for_charts": "null",
-                        "is_null_level": True,
-                    },
-                    {
-                        "sql_condition": "first_name_canonical_l = first_name_canonical_r",
-                        "label_for_charts": "Exact match",
-                        "tf_adjustment_column": "first_name_canonical",
-                        "tf_adjustment_weight": 1.0,
-                    },
-                    {
-                        "sql_condition": (
-                            "(length(first_name_canonical_l) = 1"
-                            " AND length(first_name_canonical_r) > 1"
-                            " AND first_name_canonical_l = substr(first_name_canonical_r, 1, 1))"
-                            " OR"
-                            " (length(first_name_canonical_r) = 1"
-                            " AND length(first_name_canonical_l) > 1"
-                            " AND first_name_canonical_r = substr(first_name_canonical_l, 1, 1))"
-                        ),
-                        "label_for_charts": "Initial matches full name",
-                    },
-                    # Set overlap (2026-09-08) -- pairs reaching Splink only via the
-                    # given_multichar blocking rule need to score as real evidence here, same
-                    # reasoning as family_name_main's own set-overlap level below -- otherwise
-                    # the blocking rule generates the pair but this comparison scores it as a
-                    # mismatch, defeating the fix. Placed after the exact/initial levels,
-                    # before the mismatch level below, mirroring 03_link_arc_oax.py's own
-                    # 2026-08-25 given-name set-overlap level exactly (same m/u probabilities --
-                    # hand-set, not EM-trained, per this project's one-EM-session rule).
-                    {
-                        "sql_condition": "list_has_any(given_multichar_l, given_multichar_r)",
-                        "label_for_charts": "Set overlap (shared given-name/nickname form)",
-                        "m_probability": 0.5, "u_probability": 0.02,
-                    },
-                    {
-                        "sql_condition": (
-                            "length(first_name_canonical_l) > 1"
-                            " AND length(first_name_canonical_r) > 1"
-                            " AND first_name_canonical_l != first_name_canonical_r"
-                        ),
-                        "label_for_charts": "Full name mismatch",
-                        "m_probability": 0.02,
-                    },
-                    {
-                        "sql_condition": "ELSE",
-                        "label_for_charts": "All other",
-                    },
-                ],
-            ),
-            cl.CustomComparison(
-                output_column_name="family_name_main",
-                comparison_levels=[
-                    cll.NullLevel("family_name_main"),
-                    cll.ExactMatchLevel("family_name_main").configure(
-                        tf_adjustment_column="family_name_main",
-                        tf_adjustment_weight=1.0,
-                    ),
-                    # Set overlap (2026-09-08 fix -- was missing despite the matching blocking
-                    # rule above already existing since 2026-09-07, confirmed by direct
-                    # comparison against 03_link_arc_oax.py's own equivalent level; a pair
-                    # reaching Splink only via the family_names blocking rule was falling
-                    # through to ElseLevel here, defeating that fix). Mirrors
-                    # 03_link_arc_oax.py's "Set overlap (shared spelling variant)" level exactly.
-                    cll.CustomLevel(
-                        "list_has_any(family_names_l, family_names_r)",
-                        label_for_charts="Set overlap (shared spelling variant)",
-                    ).configure(m_probability=0.5, u_probability=0.02),
-                    cll.ElseLevel(),
-                ],
-            ),
-            cl.CustomComparison(
-                output_column_name="full_name_key",
-                comparison_levels=[
-                    cll.NullLevel("full_name_key"),
-                    cll.ExactMatchLevel("full_name_key").configure(
-                        tf_adjustment_column="full_name_key",
-                        tf_adjustment_weight=1.0,
-                    ),
-                    cll.ElseLevel(),
-                ],
-            ),
-            cl.ExactMatch("orcid").configure(
-                m_probabilities=[0.85, 0.15]
-            ),
-            cl.ArrayIntersectAtSizes("inst_arr", [1]),
-            cl.ArrayIntersectAtSizes("for_name_tokens", [2, 1]).configure(
-                m_probabilities=[0.35, 0.45, 0.20]
-            ),
-        ],
-    )
-
-    db_api = DuckDBAPI()
-    linker = Linker(df, settings, db_api=db_api)
-
-    for fname, col in [
-        ("oax_tf_family_name.parquet", "family_name_main"),
-        ("oax_tf_first_name.parquet", "first_name_canonical"),
-        ("oax_tf_full_name.parquet", "full_name_key"),
-    ]:
-        tf = pd.read_parquet(PROCESSED_DATA / fname)
-        linker.table_management.register_term_frequency_lookup(tf, col)
-
-    # seed=42: pins u-probability random sampling (matches this project's existing seed
-    # convention, 00_samples.py's reservoir sampling). 2026-08-21: confirmed this alone does
-    # NOT make the pipeline fully deterministic -- a direct double-run test (with this seed AND
-    # a stable ORDER BY on the base items query) still showed ~40/22,927 clusters differing
-    # between runs. Root cause is deeper in Splink's own EM training/clustering internals
-    # (suspected parallel floating-point summation order), not input-row ordering or this
-    # sampling step alone. Accepted as a known, small (~0.1-0.2%) residual per user decision --
-    # matches this file's own prior documented precedent ("~99.15% field-for-field agreement,
-    # attributed to Splink's own run-to-run clustering stochasticity, not a logic gap"). This
-    # seed is kept anyway since it removes one real, understood source, even though incomplete.
-    linker.training.estimate_u_using_random_sampling(max_pairs=1_000_000, seed=42)
-    linker.training.estimate_probability_two_random_records_match(
-        [block_on("family_name_main")],
-        recall=0.8,
-    )
-    linker.training.estimate_parameters_using_expectation_maximisation(
-        "l.orcid = r.orcid AND l.orcid IS NOT NULL",
-        fix_u_probabilities=True,
-    )
-
-    df_pred = linker.inference.predict(threshold_match_probability=0.5)
-    df_clusters = linker.clustering.cluster_pairwise_predictions_at_threshold(
-        df_pred, threshold_match_probability=CLUSTER_THRESHOLD
-    )
-    df_cluster_ids = df_clusters.as_pandas_dataframe()
+    con = duckdb.connect()
+    con.register("df", df)
+    pairs = con.execute("""
+        WITH fam_unnest AS (SELECT unique_id, unnest(family_names) AS fam, first_initial FROM df),
+             given_unnest AS (SELECT unique_id, family_name_main, unnest(given_multichar) AS gv FROM df)
+        SELECT DISTINCT LEAST(uid_l, uid_r) AS a, GREATEST(uid_l, uid_r) AS b FROM (
+            SELECT l.unique_id AS uid_l, r.unique_id AS uid_r FROM df l JOIN df r
+                ON l.family_name_main = r.family_name_main AND l.first_initial = r.first_initial
+                AND l.unique_id != r.unique_id
+            UNION ALL
+            SELECT l.unique_id, r.unique_id FROM df l JOIN df r
+                ON l.orcid = r.orcid AND l.orcid IS NOT NULL AND l.unique_id != r.unique_id
+            UNION ALL
+            SELECT l.unique_id, r.unique_id FROM fam_unnest l JOIN fam_unnest r
+                ON l.fam = r.fam AND l.first_initial = r.first_initial AND l.unique_id != r.unique_id
+            UNION ALL
+            SELECT l.unique_id, r.unique_id FROM given_unnest l JOIN given_unnest r
+                ON l.family_name_main = r.family_name_main AND l.gv = r.gv AND l.unique_id != r.unique_id
+        )
+    """).fetchall()
+    con.close()
 
     item_by_uid = {it.unique_id: it for it in items}
+
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            keep, drop = (ra, rb) if ra < rb else (rb, ra)
+            parent[drop] = keep
+
+    for a, b in pairs:
+        ia, ib = item_by_uid[a], item_by_uid[b]
+        if ia.orcid and ib.orcid:
+            if ia.orcid == ib.orcid:
+                union(a, b)
+            # differing non-null orcids: hard veto, never merge on name/FOR alone -- this pass
+            # is done with this pair either way (the FOR-name pass below re-applies the same
+            # veto independently, via distinct_orcids, since it doesn't share this loop)
+            continue
+        if not (first_names_compatible(ia.first_names, ib.first_names)
+                and first_names_compatible(ib.first_names, ia.first_names)):
+            continue
+        if not (set(ia.family_names) & set(ib.family_names)):
+            continue
+        if _scheme_incompat(_scheme_years([ia]), _scheme_years([ib])):
+            continue
+        # FOR-name matching is deferred (see FOR_NAME_COINCIDENCE_THRESHOLD's own docstring) --
+        # collected below into per-(family_name_main, signature) buckets instead of decided
+        # per-pair here, since the accept/reject decision depends on how many mutually-
+        # independent items share the same evidence, not just this one pair.
+
+    # FOR-name matching, deferred pass: bucket every item by (family_name_main, exact
+    # for_name_tokens signature) -- family_name_main, not the pairwise blocking used above,
+    # since this pass reasons about whole buckets, and first_names_compatible() below already
+    # does the real given-name filtering (the coarser first_initial blocking used for ORCID/
+    # family_names/given_multichar edges above isn't needed a second time here).
+    n_items = len(items)
+    sig_counts: Counter = Counter()
+    for it in items:
+        if it.for_name_tokens:
+            sig_counts[frozenset(it.for_name_tokens)] += 1
+    for_name_freq = {sig: cnt / n_items for sig, cnt in sig_counts.items()}
+
+    buckets: dict[tuple, list[AwardCIFItem]] = defaultdict(list)
+    for it in items:
+        if it.for_name_tokens and it.family_name_main:
+            buckets[(it.family_name_main, frozenset(it.for_name_tokens))].append(it)
+
+    for (_, sig), its in buckets.items():
+        if len(its) < 2:
+            continue
+        p = for_name_freq[sig]
+
+        # Sub-partition the bucket by name/scheme compatibility -- sharing a surname+for_name
+        # signature doesn't override a genuine given-name mismatch or scheme-eligibility
+        # conflict, and two DIFFERENT orcid holders must never be unioned directly (mirrors the
+        # hard veto above).
+        sub_parent: dict[str, str] = {}
+
+        def sfind(x: str) -> str:
+            sub_parent.setdefault(x, x)
+            while sub_parent[x] != x:
+                sub_parent[x] = sub_parent[sub_parent[x]]
+                x = sub_parent[x]
+            return x
+
+        def sunion(x: str, y: str) -> None:
+            rx, ry = sfind(x), sfind(y)
+            if rx != ry:
+                keep, drop = (rx, ry) if rx < ry else (ry, rx)
+                sub_parent[drop] = keep
+
+        for x, y in combinations(its, 2):
+            if x.orcid and y.orcid:
+                continue
+            if not (first_names_compatible(x.first_names, y.first_names)
+                    and first_names_compatible(y.first_names, x.first_names)):
+                continue
+            if _scheme_incompat(_scheme_years([x]), _scheme_years([y])):
+                continue
+            sunion(x.unique_id, y.unique_id)
+
+        sub_groups: dict[str, list[AwardCIFItem]] = defaultdict(list)
+        for it2 in its:
+            sub_groups[sfind(it2.unique_id)].append(it2)
+
+        for group_its in sub_groups.values():
+            if len(group_its) < 2:
+                continue
+            distinct_orcids = {x.orcid for x in group_its if x.orcid}
+            if len(distinct_orcids) > 1:
+                continue  # two different established identities pulled together via a common
+                          # orphan item -- too ambiguous to resolve here, leave unmerged
+            n_orphans = sum(1 for x in group_its if not x.orcid)
+            # m: size of the evidence-only component. An already-orcid-established identity
+            # counts as ONE unit regardless of how many of its own grant records are present
+            # here -- that side's internal cohesion was already settled by orcid, a stronger,
+            # unrelated signal, and must not inflate the coincidence credit this specific
+            # FOR-name bridge gets to claim (see FOR_NAME_COINCIDENCE_THRESHOLD's own docstring,
+            # the DP140101501_XiaolinWang/UTAS case this guards against directly).
+            m = (1 if distinct_orcids else 0) + n_orphans
+            if m < 2:
+                continue
+            if p ** (m - 1) <= FOR_NAME_COINCIDENCE_THRESHOLD:
+                for x, y in combinations(group_its, 2):
+                    union(x.unique_id, y.unique_id)
+
     groups: dict[str, list[AwardCIFItem]] = defaultdict(list)
-    for row in df_cluster_ids.itertuples():
-        groups[row.cluster_id].append(item_by_uid[row.unique_id])
+    for it in items:
+        groups[find(it.unique_id)].append(it)
 
     clusters: list[AwardsCIF] = []
     for cluster_id, group_items in groups.items():
         cif = _build_awards_cif(cluster_id, group_items)
-        cif.record_event("splink_cluster")
-        # Sorted by unique_id (2026-09-15 fix, same class of bug as compute_coawardees()'s own
-        # full_name_keys fix): group_items' own order comes from Splink's cluster_pairwise_
-        # predictions_at_threshold output row order, not guaranteed stable across runs --
-        # confirmed directly, the name_typo_correction/orcid_correction events below were
-        # appended in a different order run-to-run on real data (DP170104546_ChienMingWang's
-        # 3 orcid_correction events), same content, different order, from identical input.
+        cif.record_event("sql_cluster")
+        # Sorted by unique_id -- same determinism discipline as every other grouping/merge step
+        # in this file (compute_coawardees(), merge_same_grant_coinvestigators()'s own merged_from
+        # ordering, etc.): `groups[...]` iteration order isn't otherwise guaranteed stable.
         for it in sorted(group_items, key=lambda x: x.unique_id):
             correction = corrections.get(it.unique_id)
             if correction is not None:
@@ -1534,6 +1588,96 @@ def apply_manual_splits(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     return out
 
 
+def apply_enriched_orcids(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
+    """Promote high/au_match-confidence ORCIDs from orcid_enrichment.parquet -- the search-phase
+    output of 00b_enrich_orcid.py (ARC-name lookups against the local bulk ORCID reference
+    snapshot, restricted to AU-affiliation candidates) -- into any NO_ORCID cluster whose own
+    items resolve to exactly one distinct candidate ORCID.
+
+    Reactivated 2026-09-18 (direct user prompt, mid-way through investigating why the new
+    SQL-based cluster_items() concentrates so much of the population into reliability_tier
+    4/4u: "it is in principle possible to get AU orcids by name from the orcid reference
+    parquet. maybe that could be reactivated?"). Checked directly before writing anything: this
+    promotion step (ported from the archived 01_prepare_arc.py's own _apply_enriched_orcids(),
+    ZARCHIVE/src_archive_20260821/01_prepare_arc.py) was silently dropped somewhere during the
+    AwardsCIF dataclass rebuild -- no function anywhere in the current codebase sets the
+    "enriched_orcid" provenance event compute_reliability()'s own docstring says tier 1b depends
+    on, so 1b has been unreachable (always 0) since the rebuild, an undetected gap, not a
+    considered removal. 00b_enrich_orcid.py itself was archived 2026-09-12 (superseded by
+    src/utils/orcid_processor.py::OrcidProcessor for fresh searches), but its own already-computed
+    output, orcid_enrichment.parquet (11,960 rows: 5,792 high + 1,848 au_match + others), was
+    never deleted and is exactly the real, AU-targeted candidate data the user is asking to put
+    back to work -- no new search needed, just wiring the existing result back into the pipeline.
+
+    Only promotes when EXACTLY ONE distinct enrichment ORCID is found across ALL of a cluster's
+    own items' (first_name, family_name) pairs -- multiple distinct candidates across a
+    cluster's own name variants is ambiguous, not resolved here (same discipline as the
+    archived original). data_persisted/enrichment_blocklist.csv (5 real, externally-confirmed
+    wrong-enrichment-match cases from this project's own history -- LP0220171_JNichols,
+    DP0452211_RobertMarks, DP200103243_JillianBanfield, LP0347702_JMcDonald,
+    DP0345542_JeffreyRichardson) is checked before promoting, same as always.
+
+    Runs between apply_manual_splits() and apply_manual_orcids() (matches the archived
+    pipeline's own step order: enrichment promotion, THEN manual ORCID overrides, THEN
+    merge_persons_by_orcid() to unite any clusters an enriched or manual ORCID newly connects)."""
+    enrichment_path = PROCESSED_DATA / "orcid_enrichment.parquet"
+    if not enrichment_path.exists():
+        return clusters
+    enrichment = pd.read_parquet(enrichment_path)
+    enrichment = enrichment[
+        enrichment["confidence"].isin(["high", "au_match"]) & enrichment["orcid"].notna()
+    ]
+    if len(enrichment) == 0:
+        return clusters
+
+    by_name: dict[tuple[str, str], dict[str, str]] = defaultdict(dict)
+    for _, row in enrichment.iterrows():
+        by_name[(row["first_name"], row["family_name"])][row["orcid"]] = row["confidence"]
+
+    # resolve_cluster_id() (2026-09-18 fix, found immediately on reactivating this function):
+    # enrichment_blocklist.csv's own cluster_id values were written against whatever clustering
+    # run was live when each entry was recorded -- cluster_id is a derived, not stable,
+    # identifier (min() of a cluster's own unique_ids), so it drifts whenever the underlying
+    # clustering logic changes shape, exactly as it just did (Splink -> SQL). A naive exact-string
+    # blocklist match would silently stop protecting a still-live, already-confirmed wrong-match
+    # case the moment its cluster_id drifted -- confirmed concretely: LP0220171_JNichols (blocked,
+    # "J Nichols is not Susan Nichols") now resolves under LP0776336_JNichols, and the SAME wrong
+    # ORCID (0000-0002-3553-8009) reappeared there, unblocked, on this very run.
+    blocklist: set[tuple[str, str]] = set()
+    if _ENRICHMENT_BLOCKLIST_CSV.exists():
+        with open(_ENRICHMENT_BLOCKLIST_CSV, newline="") as f:
+            for row in csv.DictReader(f):
+                cid, orcid = row["cluster_id"].strip(), row["orcid"].strip()
+                if not (cid and orcid):
+                    continue
+                try:
+                    cid = resolve_cluster_id(cid, clusters)
+                except StaleClusterIdError as e:
+                    print(f"  WARNING enrichment_blocklist: {e}")
+                    continue
+                blocklist.add((cid, orcid))
+
+    n_promoted = 0
+    for c in clusters:
+        if c.orcids:
+            continue
+        candidates: dict[str, str] = {}
+        for it in c.items:
+            candidates.update(by_name.get((it.first_name, it.family_name), {}))
+        if len(candidates) != 1:
+            continue
+        orcid, confidence = next(iter(candidates.items()))
+        if (c.cluster_id, orcid) in blocklist:
+            continue
+        c.orcids = [orcid]
+        c.orcid_status = "HAS_ORCID"
+        c.record_event("enriched_orcid", orcid=orcid, confidence=confidence)
+        n_promoted += 1
+
+    print(f"  Promoted {n_promoted} enriched ORCID(s) to clusters (high/au_match)")
+    return clusters
+
+
 def apply_manual_orcids(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     """Inject verified ORCIDs for clusters ARC data has none for --
     data_persisted/manual_orcids.csv. Mirrors _apply_manual_orcids().
@@ -1562,8 +1706,21 @@ def apply_manual_orcids(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
 
 def merge_persons_by_orcid(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     """Merge clusters sharing an ORCID after enrichment/manual additions -- mirrors
-    _merge_persons_by_orcid(). Skips merges where first-name initials are incompatible
-    (signals a wrong enrichment hit)."""
+    _merge_persons_by_orcid(). Skips merges where first_names_compatible() rules out the given
+    names (signals a wrong enrichment hit).
+
+    2026-09-18 fix: previously compared only the bare single-character initials in each side's
+    own first_names, not first_names_compatible() (the same shared, nickname-aware check
+    merge_same_grant_coinvestigators()/compute_gap_candidates() already trust for this exact
+    judgement). Found reactivating apply_enriched_orcids(): 11 real same-person pairs (e.g.
+    DP130104843_DrewDawson/LP0214128_DrewDawson -- "William (Drew) Dawson" vs "Drew Dawson", the
+    same nickname case this project's own 2026-09-08 nickname-handling session already confirmed
+    reachable; LP0668357.../LP110100405... -- "Alison (Sal) Humphreys"/"Sal (Alison) Humphreys"
+    reciprocally, also already confirmed elsewhere) were left unmerged, both carrying the same
+    ORCID, purely because "drew"/"william" or "alison"/"sal" share no bare initial -- even though
+    each side's own aggregated first_names already contains the OTHER side's given name too (a
+    shared middle name, a recorded nickname form, or simply both first-name variants appearing
+    across the cluster's own grant records), which first_names_compatible() correctly detects."""
     orcid_to_ids: dict[str, list[str]] = defaultdict(list)
     for c in clusters:
         for orcid in c.orcids:
@@ -1577,15 +1734,47 @@ def merge_persons_by_orcid(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     for orcid, ids in conflicts.items():
         canonical = min(ids)
         absorbed = [cid for cid in ids if cid != canonical]
-        can_initials = {x for x in by_id[canonical].first_names if len(x) == 1}
-        skip = False
+        # Decided per-cid, not per-group (2026-09-18 fix -- inherited from the archived
+        # pre-rebuild code unchanged until now, so not new, just newly consequential): the old
+        # loop set one shared `skip` flag and `break`d on the FIRST incompatible absorbed
+        # cluster, aborting the merge for the WHOLE same-orcid group -- including every other
+        # absorbed cluster that WAS compatible. Confirmed live on orcid 0000-0001-7385-5630
+        # (Drew Dawson): 5 clusters share it, 4 of them ("Drew Dawson" x3, canonical included)
+        # are trivially compatible with each other, but the 5th ("William Drew Dawson" -- a
+        # raw ARC record where "Drew" is a literal middle token, not yet folded into
+        # first_names the way a parenthetical nickname is) failed the check and silently
+        # blocked all 4 of the others from merging too. Each absorbed cluster is now judged
+        # independently -- the incompatible one is simply left out (still correctly flagged by
+        # 01a_diagnose.py's B1 check for human review), not treated as a veto over unrelated
+        # clusters that happen to share the same orcid.
         for cid in absorbed:
-            abs_initials = {x for x in by_id[cid].first_names if len(x) == 1}
-            if can_initials and abs_initials and not (can_initials & abs_initials):
-                skip = True
-                break
-        if not skip:
-            for cid in absorbed:
+            fnc = by_id[canonical]
+            fna = by_id[cid]
+            # Reactivating this function (2026-09-18) with ONLY first_names_compatible() traded
+            # one bug for another: it correctly recovered real nicknames (Drew/William Dawson)
+            # but then wrongly REJECTED plain given-name spelling variants -- Alan/Allan Chivas,
+            # Gwendolen/Gwendolyn Jull, Hong/Hongyuan Liu -- because that function requires an
+            # EXACT full-token match once both sides have any multi-character token, by design
+            # (it has to reject e.g. "Anthony"/"Alan" sharing only a letter -- see its own
+            # docstring). The OLD bare-initial check happened to accept these particular pairs
+            # correctly (both start with the same letter), just for the wrong general reason (it
+            # would have equally accepted "Anthony"/"Alan" too). Restored as a secondary,
+            # OR'd fallback rather than the primary check: safe specifically HERE, unlike in
+            # compute_gap_candidates()'s general case, because every pair reaching this function
+            # already shares the identical real ORCID -- a far stronger anchor than a bare name
+            # coincidence, so a shared bare initial is reasonable secondary corroboration for a
+            # pairing an independent ORCID search has already made, not the sole piece of
+            # evidence deciding it.
+            shared_initial = bool(
+                ({x for x in fnc.first_names if len(x) == 1} | {x[0] for x in fnc.first_names if len(x) > 1})
+                & ({x for x in fna.first_names if len(x) == 1} | {x[0] for x in fna.first_names if len(x) > 1})
+            )
+            compatible = (
+                (first_names_compatible(fnc.first_names, fna.first_names)
+                 and first_names_compatible(fna.first_names, fnc.first_names))
+                or shared_initial
+            )
+            if compatible:
                 remapping[cid] = canonical
 
     if not remapping:
@@ -1760,13 +1949,17 @@ def merge_same_grant_coinvestigators(clusters: list[AwardsCIF]) -> list[AwardsCI
 
 
 def refine_clusters(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
-    """Apply the full Phase-2 refinement sequence to Splink's provisional clusters -- same
-    step order as 01_prepare_arc.py's main(). See the plan file for why this order and
-    decomposition is preserved (validated logic, rebuilt architecture, not a redesign)."""
+    """Apply the full Phase-2 refinement sequence to the provisional clusters cluster_items()
+    produces -- same step order as the original (pre-rebuild) 01_prepare_arc.py's main().
+    apply_enriched_orcids() restored 2026-09-18 (see its own docstring) between
+    apply_manual_splits() and apply_manual_orcids(), matching that original order exactly --
+    it had been silently missing from every version of this function since the AwardsCIF
+    rebuild."""
     clusters = merge_by_orcid(clusters)
     clusters = split_orcid_conflicts(clusters)
     clusters = split_multi_name_clusters(clusters)
     clusters = apply_manual_splits(clusters)
+    clusters = apply_enriched_orcids(clusters)
     clusters = apply_manual_orcids(clusters)
     clusters = merge_persons_by_orcid(clusters)
     clusters = apply_manual_merges(clusters)
@@ -2401,6 +2594,114 @@ def compute_gap_candidates(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     return clusters
 
 
+# gap_candidates only records "not ruled out" -- most such pairs genuinely need a human to
+# settle them, but a strong POSITIVE signal already sits unused in .coawardees: real
+# co-investigators keep working with the same people across grants. Measured directly against
+# the live population before picking a threshold (2026-09-18): of the current gap_candidate
+# pairs, 18 share >=1 informative co-investigator (real, but weak alone -- a single shared third
+# party could be coincidence, especially a prolific, common-named collaborator), but only 4
+# share >=2, and every one of those 4 is independently plausible on inspection (e.g.
+# DP0452777_MichaelSmith/DP200102151_MichaelSmith share BOTH Peter Danaher and Tracey Danaher --
+# a married co-investigator pair, evidence a single shared name could not provide). Same
+# evidence class this project's own manual reviews have used decisively, dozens of times, never
+# automated before now (Ying Zhu/Michael Webber+John Benson; Anthony Harris/Duncan Mortimer; the
+# 5-way Jun Li merge via Roger Smart/Russell Schumann/Andrea Gerson; David Evans/Douglas
+# Stewart).
+MIN_SHARED_COAWARDEES = 2
+
+
+def _coawardee_informative_keys(coawardees: list[dict]) -> set[str]:
+    """Multi-character-given-name full_name_keys from a cluster's own .coawardees -- excludes
+    bare-initial-derived keys (every given-name token self-adds its own first-letter form for
+    Splink blocking, e.g. "j_smith" alongside "john_smith"), same filter convention as
+    given_multichar elsewhere in this file: a shared bare initial carries no identifying
+    information on its own and would let two different common-surname clusters "share a
+    coawardee" purely by letter coincidence."""
+    out: set[str] = set()
+    for d in coawardees:
+        for k in d.get("full_name_keys", []):
+            given = k.split("_", 1)[0]
+            if len(given) > 1:
+                out.add(k)
+    return out
+
+
+def merge_by_coawardee_corroboration(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
+    """Auto-merge gap_candidate pairs that ALSO share >=MIN_SHARED_COAWARDEES real, informative
+    co-investigators across their currently-separate grant portfolios. Requires .gap_candidates
+    (already ruled name/FOR-division/ORCID/scheme compatible by a prior compute_gap_candidates()
+    pass -- see build_arc_only_population()'s own pipeline-order docstring for why this runs
+    between two compute_gap_candidates() calls, not just once) and .coawardees, both already
+    populated by the time this runs.
+
+    A cluster_id pair already recorded in manual_confirmed_distinct.csv can never reach this
+    function at all -- compute_gap_candidates() excludes it from .gap_candidates outright, before
+    this ever sees it.
+
+    Union-find, same pattern as merge_same_grant_coinvestigators() -- lets a genuine transitive
+    chain (A shares 2+ coawardees with B, B shares 2+ with C) merge all three, not just pairs, on
+    the same "same people keep working with the same people" reasoning."""
+    by_id = {c.cluster_id: c for c in clusters}
+    pairs: set[tuple[str, str]] = set()
+    for c in clusters:
+        for other in c.gap_candidates:
+            if other in by_id:
+                pairs.add(tuple(sorted((c.cluster_id, other))))
+
+    shared_by_pair: dict[tuple[str, str], set[str]] = {}
+    for a, b in sorted(pairs):
+        shared = _coawardee_informative_keys(by_id[a].coawardees) & _coawardee_informative_keys(by_id[b].coawardees)
+        if len(shared) >= MIN_SHARED_COAWARDEES:
+            shared_by_pair[(a, b)] = shared
+
+    if not shared_by_pair:
+        print("  Coawardee-corroborated merge: 0 pairs")
+        return clusters
+
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            keep, drop = (ra, rb) if ra < rb else (rb, ra)
+            parent[drop] = keep
+
+    for a, b in shared_by_pair:
+        union(a, b)
+
+    merge_groups: dict[str, list[str]] = defaultdict(list)
+    for c in clusters:
+        merge_groups[find(c.cluster_id)].append(c.cluster_id)
+
+    out = []
+    n_merged_groups = 0
+    for root, ids in merge_groups.items():
+        if len(ids) == 1:
+            out.append(by_id[root])
+            continue
+        n_merged_groups += 1
+        canonical = by_id[root]
+        absorbed = sorted((by_id[cid] for cid in ids if cid != root), key=lambda c: c.cluster_id)
+        all_shared: set[str] = set()
+        for a, b in combinations(sorted(ids), 2):
+            all_shared |= shared_by_pair.get((a, b), set())
+        out.append(_merge_awards_cifs(
+            canonical, absorbed, "coawardee_corroborated_merge",
+            shared_coawardees=sorted(all_shared),
+        ))
+
+    print(f"  Coawardee-corroborated merge: {len(shared_by_pair)} qualifying pair(s), "
+          f"{n_merged_groups} group(s) merged")
+    return out
+
+
 def _load_confirmed_not_suspicious(clusters: list[AwardsCIF]) -> set[str]:
     """data_persisted/manual_confirmed_not_suspicious.csv -- cluster_ids a human has reviewed
     (typically via external evidence: co-authorship, employment history, news/press coverage)
@@ -2561,6 +2862,19 @@ def build_arc_only_population(
         clusters = compute_orcid_for(clusters)
         clusters = compute_coawardees(clusters, items)
         clusters = widen_names_with_orcid_bulk_db(clusters)
+        # Two-pass gap_candidates (2026-09-18): the first pass identifies which pairs are
+        # already ruled name/FOR-division/ORCID/scheme compatible -- merge_by_coawardee_
+        # corroboration() then merges the subset of those also sharing >=2 real co-investigators
+        # across their whole portfolios (see that function's own docstring). compute_coawardees()
+        # is rerun on the result because _merge_awards_cifs() doesn't carry .coawardees forward
+        # (not one of _merge_aggregate_fields()'s explicitly-carried fields -- it's cheap to just
+        # recompute, same as gap_candidates itself). The second compute_gap_candidates() pass
+        # gives the FINAL, post-merge gap_candidates/reliability_tier -- reusing its own
+        # unchanged pairing+rule-out logic twice, rather than a second, drifting reimplementation
+        # of the same checks inside the merge step.
+        clusters = compute_gap_candidates(clusters)
+        clusters = merge_by_coawardee_corroboration(clusters)
+        clusters = compute_coawardees(clusters, items)
         clusters = compute_gap_candidates(clusters)
         clusters = compute_reliability(clusters)
     finally:
