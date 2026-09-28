@@ -41,6 +41,7 @@ from src.utils.awards_cif import (
     persist_grant_cluster_map,
     ARC_ONLY_PARQUET,
     GRANT_CLUSTER_MAP_PARQUET,
+    StaleClusterIdError,
 )
 
 # 00b_extract_oax.py's filename starts with a digit, so it can't be imported with a normal
@@ -55,7 +56,20 @@ _spec.loader.exec_module(prepare_oax)
 def main():
     prepare_oax.ensure_fresh()
     prepare_oax.scan_for_new_diacritics()
-    clusters = build_arc_only_population()
+    # The sole place this project catches StaleClusterIdError (2026-09-28 direct instruction:
+    # "there will not be any 'real' failures of this type -- if there are I want the exception
+    # to list the circumstances and raise SystemExit in every case ... put the try/except in
+    # one place"). Every manual_*.csv loader inside build_arc_only_population() raises this
+    # bare -- none of them catch it themselves -- so it always surfaces here, once, with the
+    # full circumstances (which file/column, which id, why unresolvable) already in the
+    # message resolve_cluster_id() built.
+    try:
+        clusters = build_arc_only_population()
+    except StaleClusterIdError as e:
+        raise SystemExit(
+            f"FATAL: a manual_*.csv override references a cluster_id that no longer exists "
+            f"and cannot be resolved automatically.\n{e}"
+        )
     persist_awards_cif(clusters, ARC_ONLY_PARQUET)
     persist_grant_cluster_map(clusters, GRANT_CLUSTER_MAP_PARQUET)
 

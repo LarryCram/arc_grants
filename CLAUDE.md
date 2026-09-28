@@ -2453,6 +2453,82 @@ No executable cyclic-build code exists yet -- `build.py`'s merge tests and `feat
 read-and-attach wiring are next. This entry documents the plan and the first landed step, not a
 completed rebuild; see `plan-that-in-tiny-immutable-heron.md` for the full, unabridged design.
 
+## `resolve_cluster_id()` staleness mechanism examined end-to-end; exception handling centralized into one place (2026-09-28)
+
+Triggered by direct questioning of the cyclic-ACIF-rebuild plan above: does the plan's `cluster_id`
+tie-break recipe (year, then scheme, then remainder) actually behave the way its own text claims
+("monotonically well-behaved... sufficient identity on its own")? Working through a concrete
+scenario -- an ACIF `G-N` merging into another ACIF `G1-N1` that happens to contain an earlier
+grant -- surfaced that the *specific* tie-break rule doesn't matter at all: any deterministic,
+order-independent rule for picking a survivor is equivalent, since all real information already
+lives in the full member list regardless of which member's id labels the group. What actually
+matters is whether anything holding onto an old label (a manual override CSV, a CLI argument, a
+provenance log) can still find the group after it relabels -- and that turns out to already be a
+solved problem in the *current* production code, not a gap needing new design.
+
+**Confirmed by reading the actual code, not assumed**: every `manual_*.csv` file in
+`data_persisted/` is keyed by `cluster_id`/`unique_id` (a `<grant_code>_<Name>` compound string,
+never a bare name -- checked all eight files' real headers/rows directly) and, since 2026-08-26
+(`8f81ca8`), every cluster-level lookup among them resolves through one shared function,
+`resolve_cluster_id()` (`awards_cif.py`), rather than raw string equality against a live field:
+if the old label isn't a current `cluster_id`, it checks whether that literal string still
+appears in any current ACIF's `grant_ids` (the full, flattened list of every grant-record
+`unique_id` that ACIF has ever absorbed, transitively -- so a multi-hop chain of past relabeling
+resolves in one lookup, not a recursive walk). If found in exactly one, that ACIF's current label
+is returned; if found in zero or 2+, it raises `StaleClusterIdError` rather than guessing.
+
+**Root cause of why this was ever a problem, traced to its origin** (`8f81ca8`, 2026-08-26):
+before this function existed, each of ~7 cluster_id-keyed loaders handled a lookup miss its own
+bespoke way, and none of them said anything when it happened -- the worst being
+`apply_manual_merges()`, which used to silently **delete a real, currently-existing person from
+the entire output population** if only the "keep" side of a recorded merge had gone stale, with
+nothing printed anywhere. It was found, not designed around in the abstract: a direct comparison
+during the 03b/04 consolidation (2026-08-25) turned up 81 `manual_resolutions.csv` rows whose
+`arc_id` no longer matched any current cluster, 42 of them genuinely stale references (the rest
+were something else). One real documentation gap surfaced while tracing this: several docstrings
+say "see CLAUDE.md's 2026-08-26 stale-reference risk audit for the full case-by-case list" -- that
+audit's case-by-case detail was never actually written into CLAUDE.md, only into the `8f81ca8`
+commit message. Not backfilled here either (out of scope for this entry) -- flagged so the
+docstring's reference isn't mistaken for pointing at something that exists.
+
+**A real, live inconsistency found and fixed**: checking every one of the ~7 `resolve_cluster_id()`
+call sites directly, six had no `try/except` at all (a single unresolvable row anywhere in that
+CSV kills the entire loading step, not just that row -- arguably correct given this project's own
+"never silently skip, never guess" doctrine, since it forces immediate attention). The seventh,
+`apply_enriched_orcids()`'s `enrichment_blocklist.csv` loader, was the odd one out: it caught
+`StaleClusterIdError` itself and downgraded it to a printed warning plus a skipped row -- the one
+place in the whole file that *did* silently skip, contradicting the doctrine the other six follow.
+
+**Fix, per direct instruction** ("I am expecting that there will not be any 'real' failures of
+this type -- if there are I want the exception to list the circumstances and raise SystemExit in
+every case ... rather than scatter this over the code base can you put the try/except in one
+place"): `resolve_cluster_id()` gained an optional `context: str` parameter (a static
+`"file.csv:column"` label folded into the exception message only -- no behavior change) so every
+call site's one-line addition documents itself without adding any exception-handling logic there;
+all seven call sites now pass their own label. `apply_enriched_orcids()`'s soft-fail catch was
+removed so it propagates bare like the other six. The **only** `try/except StaleClusterIdError`
+anywhere in the codebase now lives in `01_prepare_arc.py:main()`, wrapping the single call to
+`build_arc_only_population()` (confirmed by direct grep to be the sole production caller of the
+full manual-override chain -- `01a_diagnose.py` reads the already-persisted parquet and calls
+`load_award_cif_items()` directly for scope checks, it never exercises `refine_clusters()` or any
+`apply_manual_*()` function, so it needs no guard of its own) -- catching, printing the full
+circumstances (already embedded in `resolve_cluster_id()`'s own message: which file/column, which
+id, why unresolvable), and raising `SystemExit`.
+
+**A real process lapse, caught by direct user correction, worth recording plainly**: this fix
+landed in `src/utils/awards_cif.py` and `src/01_prepare_arc.py` -- the exact file the cyclic-
+ACIF-rebuild plan (`plan-that-in-tiny-immutable-heron.md`, documented above) explicitly commits to
+leaving **unmodified** until the new `src/acif/` engine is built and validated. The edit went in
+without checking that commitment first, despite having summarized it to the user only a few turns
+earlier in the same session. Kept anyway, per direct instruction, on the reasoning that
+`src/acif/build.py`/`features.py` are still empty stubs -- `awards_cif.py` is still the only code
+actually running against real data today, so a real bugfix to it has live value regardless of the
+pending rebuild -- but the process point stands on its own: check a file against any stated
+"leave this alone" commitment *before* editing it, not after being asked why.
+
+Verified: 519/519 tests passing (`tests/` + `analysis/tests/`, excluding `ZARCHIVE/`'s own
+pre-existing broken imports, unrelated to this change).
+
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
 

@@ -78,7 +78,9 @@ class StaleClusterIdError(Exception):
     list). resolve_cluster_id() replaces all of those with one shared, loud failure instead."""
 
 
-def resolve_cluster_id(old_id: str, clusters: "list[AwardsCIF] | pd.DataFrame") -> str:
+def resolve_cluster_id(
+    old_id: str, clusters: "list[AwardsCIF] | pd.DataFrame", context: str = "",
+) -> str:
     """Resolve a possibly-stale cluster_id/arc_id to whichever AwardsCIF it currently lives in.
 
     `clusters` may be either a list[AwardsCIF] (the in-memory representation used throughout
@@ -86,6 +88,15 @@ def resolve_cluster_id(old_id: str, clusters: "list[AwardsCIF] | pd.DataFrame") 
     persisted-parquet shape read directly by 01a_diagnose.py) -- both are genuinely used
     side by side across this project for the same population, so this function accepts
     either rather than forcing every caller to reconstruct one from the other.
+
+    `context` is a short, static "file.csv:column" label identifying the caller -- every
+    call site passes its own literal string. Purely cosmetic (folded into the exception
+    message only), so it costs each call site one keyword argument, not a try/except: the
+    actual handling of a raised StaleClusterIdError lives in exactly one place, the pipeline
+    entry point (01_prepare_arc.py:main()), not scattered across every loader (2026-09-28
+    direct instruction: "I am expecting that there will not be any 'real' failures of this
+    type -- if there are I want the exception to list the circumstances and raise SystemExit
+    in every case ... put the try/except in one place").
 
     1. old_id is already a current cluster_id -> returned unchanged (the common case, and the
        only case before this function existed).
@@ -105,15 +116,16 @@ def resolve_cluster_id(old_id: str, clusters: "list[AwardsCIF] | pd.DataFrame") 
     if old_id in {cid for cid, _ in pairs}:
         return old_id
     matches = [cid for cid, grant_ids in pairs if old_id in grant_ids]
-    if len(matches) == 1:
-        return matches[0]
+    where = f" [{context}]" if context else ""
     if len(matches) > 1:
         raise StaleClusterIdError(
-            f"{old_id!r} is not a current cluster_id and appears in {len(matches)} different "
+            f"{old_id!r}{where} is not a current cluster_id and appears in {len(matches)} different "
             f"current clusters ({matches!r}) -- ambiguous, cannot resolve automatically."
         )
+    if len(matches) == 1:
+        return matches[0]
     raise StaleClusterIdError(
-        f"{old_id!r} is not a current cluster_id and does not appear in any current cluster's "
+        f"{old_id!r}{where} is not a current cluster_id and does not appear in any current cluster's "
         "grant_ids. This manual override reference is stale and needs human review -- do not "
         "guess at a replacement; find out what actually happened to this person's records."
     )
@@ -1539,7 +1551,10 @@ def _load_manual_splits_by_grant(clusters: list[AwardsCIF]) -> dict[str, dict[st
         for row in csv.DictReader(f):
             cid, uid, label = row["cluster_id"].strip(), row["unique_id"].strip(), row["split_label"].strip()
             if cid and uid and label:
-                out[resolve_cluster_id(cid, clusters)][uid] = label
+                resolved = resolve_cluster_id(
+                    cid, clusters, context="manual_splits_by_grant.csv:cluster_id",
+                )
+                out[resolved][uid] = label
     return dict(out)
 
 
@@ -1559,7 +1574,9 @@ def apply_manual_splits(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     with open(_MANUAL_SPLITS_CSV, newline="") as f:
         for row in csv.DictReader(f):
             if row.get("confirmed_different_people", "").strip().lower() == "true":
-                split_ids.add(resolve_cluster_id(row["cluster_id"], clusters))
+                split_ids.add(resolve_cluster_id(
+                    row["cluster_id"], clusters, context="manual_splits.csv:cluster_id",
+                ))
     if not split_ids:
         return clusters
     by_grant = _load_manual_splits_by_grant(clusters)
@@ -1643,6 +1660,12 @@ def apply_enriched_orcids(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
     # case the moment its cluster_id drifted -- confirmed concretely: LP0220171_JNichols (blocked,
     # "J Nichols is not Susan Nichols") now resolves under LP0776336_JNichols, and the SAME wrong
     # ORCID (0000-0002-3553-8009) reappeared there, unblocked, on this very run.
+    #
+    # 2026-09-28: used to catch StaleClusterIdError here and warn-and-skip -- the one loader in
+    # this file that soft-failed instead of propagating, inconsistent with every other
+    # cluster_id-keyed override. Removed: a stale reference now raises here exactly like it does
+    # everywhere else, caught in the single place this project handles it (01_prepare_arc.py's
+    # main()), not silently downgraded to a log line a human could miss.
     blocklist: set[tuple[str, str]] = set()
     if _ENRICHMENT_BLOCKLIST_CSV.exists():
         with open(_ENRICHMENT_BLOCKLIST_CSV, newline="") as f:
@@ -1650,11 +1673,7 @@ def apply_enriched_orcids(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
                 cid, orcid = row["cluster_id"].strip(), row["orcid"].strip()
                 if not (cid and orcid):
                     continue
-                try:
-                    cid = resolve_cluster_id(cid, clusters)
-                except StaleClusterIdError as e:
-                    print(f"  WARNING enrichment_blocklist: {e}")
-                    continue
+                cid = resolve_cluster_id(cid, clusters, context="enrichment_blocklist.csv:cluster_id")
                 blocklist.add((cid, orcid))
 
     n_promoted = 0
@@ -1692,7 +1711,8 @@ def apply_manual_orcids(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
         for row in csv.DictReader(f):
             cid, orcid = row["cluster_id"].strip(), row["orcid"].strip()
             if cid and orcid:
-                overrides[resolve_cluster_id(cid, clusters)] = orcid
+                resolved = resolve_cluster_id(cid, clusters, context="manual_orcids.csv:cluster_id")
+                overrides[resolved] = orcid
     if not overrides:
         return clusters
     by_id = {c.cluster_id: c for c in clusters}
@@ -1827,8 +1847,8 @@ def apply_manual_merges(clusters: list[AwardsCIF]) -> list[AwardsCIF]:
             keep, drop = row["cluster_keep"].strip(), row["cluster_drop"].strip()
             if not (keep and drop):
                 continue
-            keep = resolve_cluster_id(keep, clusters)
-            drop = resolve_cluster_id(drop, clusters)
+            keep = resolve_cluster_id(keep, clusters, context="manual_merges.csv:cluster_keep")
+            drop = resolve_cluster_id(drop, clusters, context="manual_merges.csv:cluster_drop")
             if keep != drop:
                 remapping[drop] = keep
     if not remapping:
@@ -2504,8 +2524,8 @@ def _load_confirmed_distinct(clusters: list[AwardsCIF]) -> set[tuple[str, str]]:
         for row in csv.DictReader(f):
             a, b = row["cluster_id_1"].strip(), row["cluster_id_2"].strip()
             if a and b:
-                a = resolve_cluster_id(a, clusters)
-                b = resolve_cluster_id(b, clusters)
+                a = resolve_cluster_id(a, clusters, context="manual_confirmed_distinct.csv:cluster_id_1")
+                b = resolve_cluster_id(b, clusters, context="manual_confirmed_distinct.csv:cluster_id_2")
                 pairs.add(tuple(sorted((a, b))))
     return pairs
 
@@ -2734,7 +2754,10 @@ def _load_confirmed_not_suspicious(clusters: list[AwardsCIF]) -> set[str]:
         return set()
     with open(_MANUAL_CONFIRMED_NOT_SUSPICIOUS_CSV, newline="") as f:
         return {
-            resolve_cluster_id(row["cluster_id"].strip(), clusters)
+            resolve_cluster_id(
+                row["cluster_id"].strip(), clusters,
+                context="manual_confirmed_not_suspicious.csv:cluster_id",
+            )
             for row in csv.DictReader(f) if row["cluster_id"].strip()
         }
 
