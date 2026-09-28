@@ -1,17 +1,19 @@
 """
-Lightweight real-data tests for src/00c_extract_propensities.py's four table builders.
+Lightweight real-data tests for src/00c_extract_propensities.py's five table builders.
 
-All four hit real ARC data (grants_flat.parquet, raw_json.csv, grant_summaries.csv,
+All five hit real ARC data (grants_flat.parquet, raw_json.csv, grant_summaries.csv,
 admin_orgs.csv) -- no pure/mockable logic to split out separately, unlike src/acif/build.py's
 enrich_items(). Same convention as tests/test_awards_cif.py's own real-data tests: loose range
 assertions and known-value spot-checks, never brittle exact counts that go stale as ARC issues
 new grants. Deliberately lightweight -- exhaustive correctness (institution-name canonicalization,
-HEP filtering, grant-vs-item-level counting) was verified by direct inspection when this module
-was built; see CLAUDE.md's 2026-09-19/28 entries.
+HEP filtering, grant-vs-item-level counting, the announcement/current rename classification) was
+verified by direct inspection when this module was built; see CLAUDE.md's 2026-09-19/28 entries.
 """
 import importlib.util
 import sys
 from pathlib import Path
+
+import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -83,3 +85,41 @@ class TestInstitutionPairFreq:
         assert set(df.columns) == {"institution_a", "institution_b", "count", "frequency"}
         assert (df["institution_a"] < df["institution_b"]).all()
         assert abs(df["frequency"].sum() - 1.0) < 1e-9
+
+
+class TestAwardRenameMap:
+    def test_shape_and_range(self):
+        df = _mod.build_award_rename_map()
+        # 1,665 at last real build (2026-09-28) -- loose band, not an exact pin.
+        assert 1200 <= len(df) <= 2200
+        assert set(df.columns) == {
+            "announcement_unique_id", "current_unique_id", "announcement_name", "current_name",
+        }
+        # every emitted id must be a real, existing investigators_raw.parquet id, not a
+        # fabricated/regex-only construction -- this is the whole point of the table.
+        real_ids = set(pd.read_parquet(_mod.PROCESSED_DATA / "investigators_raw.parquet")["unique_id"])
+        assert set(df["announcement_unique_id"]) <= real_ids
+        assert set(df["current_unique_id"]) <= real_ids
+
+    def test_known_rename_case(self):
+        # the DE120101452 case this table was built to catch -- confirmed by the grant's own
+        # former CI, 2026-09-28.
+        df = _mod.build_award_rename_map()
+        row = df[df["announcement_unique_id"] == "DE120101452_MahmudaAkhtar"]
+        assert len(row) == 1
+        assert row.iloc[0]["current_unique_id"] == "DE120101452_MShumiAkhtar"
+
+    def test_proper_parsing_excludes_case_only_differences(self):
+        # regression guard for the 284-grant false-positive fix: a pure capitalization
+        # difference (e.g. "KalantarZadeh" vs "Kalantarzadeh") must never appear as a rename --
+        # it isn't a rename at all, it's the same name the regex-based comparison got wrong.
+        df = _mod.build_award_rename_map()
+        assert not df["announcement_unique_id"].str.contains("KalantarZadeh", case=False).any()
+
+    def test_ambiguous_multi_person_grant_not_recorded(self):
+        # LP230201137: one person dropped, two different people added -- genuinely ambiguous,
+        # must never be recorded as a rename (that would misattribute McKinley's name to an
+        # unrelated real person).
+        df = _mod.build_award_rename_map()
+        assert not df["announcement_unique_id"].str.startswith("LP230201137_").any()
+        assert not df["current_unique_id"].str.startswith("LP230201137_").any()

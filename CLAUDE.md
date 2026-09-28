@@ -2529,6 +2529,165 @@ pending rebuild -- but the process point stands on its own: check a file against
 Verified: 519/519 tests passing (`tests/` + `analysis/tests/`, excluding `ZARCHIVE/`'s own
 pre-existing broken imports, unrelated to this change).
 
+## Cyclic ACIF build continued: stage-1 seeding, grant-level enrichment, `admin_orgs`, tests-as-we-go, and a real announcement/current rename-detection fix (2026-09-28)
+
+Direct continuation of the cyclic ACIF rebuild (`src/acif/`, see the entry above). Built
+incrementally, one reviewable piece at a time, per direct instruction not to write it all at
+once -- nothing here draws on `src/utils/awards_cif.py` (being archived); logic worth keeping
+is ported and condensed, not imported.
+
+**`src/acif/build.py` built up in small steps, each shown against a real example before moving
+on**: `load_items()` (raw ARC facts, KEEP_ROLES/KEEP_SCHEMES/HEP-admin_org scope, ported and
+condensed from three near-duplicate old-pipeline CSV readers into one `_admin_orgs_canonical()`)
+-> `enrich_items()` (grant-level `for2020_codes`/`hep_codes`/`inst_ids`, computed once per
+`grant_code` not per item) -> `seed()` (the plan's explicit stage-1 seeding, one singleton
+`AwardsCIF` per item) -> `build_stage_zero()` (the production wiring). Verified at every step
+against real data (64,830 items, matching this project's own previously-validated population
+size for this scope; zero missing enrichment facts across the population).
+
+**Two real bugs found by inspecting actual examples, not by reasoning in the abstract**:
+1. `eligible_orgs` from `grants_flat.parquet` is a numpy array (parquet list column via
+   pyarrow) -- `x or []` raises `ValueError: ambiguous truth value` for a 2+-element array,
+   the same pitfall already hit once in `00c_extract_propensities.py`. Fixed with an explicit
+   `is not None` check.
+2. **`AwardCIFItem.admin_orgs` gap, confirmed live by the grant's own former CI**: `DE120101452`
+   showed `hep_codes=['ANU','USY']` even though `admin_org` (a scalar, current-only) said only
+   Sydney -- traced to `announcement_admin_org` (ANU) vs `admin_org` (current, Sydney) genuinely
+   differing, a mid-grant institutional move, not a partner org. `admin_org` alone silently
+   dropped the at-award institution. Fixed: new `AwardCIFItem.admin_orgs: list[str]` field,
+   same list-retains-every-form/scalar-picks-the-current convention as `first_name(s)`/
+   `family_name(s)`. Population scale: 8,079/64,830 items (12.46%) have a genuine
+   `admin_org != announcement_admin_org`, matching this project's own previously-documented
+   grant-level figure (4,230/33,583 grants, 12.60%, 2026-08-25) almost exactly -- the same
+   known phenomenon, now correctly retained for the new engine instead of silently dropped.
+
+**Tests built alongside the code from this point on, not deferred** (direct instruction: "a lot
+of the ~500 tests will be dropped as the new overtakes the old" -- the existing suite is a
+temporary scaffold for the old pipeline, not a permanent asset, so the new engine needs its own
+coverage built as it's written). `enrich_items()` refactored to take its two lookups
+(`for2020`, `org_facts`) as parameters instead of loading them itself, purely so it's a pure,
+directly-testable function -- `build_stage_zero()` added as the one production call site wiring
+it to real I/O. `tests/test_acif_build.py` (13 tests): hand-built-fixture tests for the pure
+functions (`enrich_items()`, `seed()`), same convention as `tests/test_awards_cif.py`'s own
+style, plus lightweight real-data checks for the I/O loaders (loose range assertions and
+known-value spot-checks, never brittle exact counts that go stale as ARC issues new grants --
+same house style as `test_awards_cif.py`'s `test_institution_crosswalk_only_covers_real_heps`).
+`tests/test_00c_extract_propensities.py` (5 tests, same convention) added for the previously-
+untested `00c_extract_propensities.py` -- caught one real test-assumption error before it
+landed: `institution_rarity` is multi-label per grant (a grant can list 2+ institutions), so its
+frequencies legitimately sum above 1, unlike `for_name_rarity`/the two `*_pair_freq` tables,
+which are built so each grant contributes to exactly one denominator slot and correctly sum to
+1 -- fixed the test's wrong assumption, not the code. 537/537 tests passing at this point.
+
+### Coawardees design settled (not yet built): evidence for a merge test, two-layer computation, no cycle-count needed
+
+Before writing `enrich_items()`'s natural next field (coawardees -- who else is on the same
+grant), worked through what it's actually FOR and how it behaves across cyclic stages, using
+Graham Jenkin's real 3-grant career (`DP0208030`, `DP0878304`, `LP130100705`) as the worked
+example. Conclusions, all direct answers to explicit questions, not assumed:
+
+- **Use**: evidence for a merge test, same role as the old pipeline's
+  `merge_by_coawardee_corroboration()` -- if two candidate ACIFs share a (rare enough) coawardee
+  name, that's corroborating evidence they're the same real person.
+- **No cycle-count needed on the object itself**: coawardees is a plain set, recomputed fully
+  from an ACIF's current items every stage -- follows directly from the same "recompute
+  bottom-up, never incrementally patch" principle already settled for `for2020_codes`/`inst_arr`.
+  If the aggregate is always fully recomputed, there's nothing for a cycle count to track.
+- **But it's genuinely two layers, not one**: (1) a stage-invariant RAW fact -- "which other
+  items share this item's `grant_code`" -- computable once, up front, like the propensity
+  tables, since it never changes; (2) a per-stage TRANSLATION -- each of those other items
+  currently belongs to *some* ACIF, but which one changes as merges happen, so turning "other
+  people on my grants" into "other ACIF ids I corroborate with" needs a live
+  `unique_id -> current cluster_id` map, rebuilt fresh every stage, plus excluding any result
+  that equals the ACIF's OWN current `cluster_id` (the self-exclusion problem below,
+  generalized: not just "exclude my own name" but "exclude anything that's become part of my
+  own merged self").
+
+Not yet built -- design settled, not implemented.
+
+### A real, corrected misdiagnosis: the Akhtar "self-coawardee" case isn't a coawardees problem at all
+
+Investigating the two-HEP `DE120101452` example (found a few turns earlier) surfaced M. Shumi
+Akhtar / Mahmuda Akhtar as two separate items sharing one grant -- initially framed (wrongly) as
+something `coawardees` needed to defend against at merge-test time via runtime self-exclusion.
+**Direct user correction**: this is the wrong layer entirely -- an announcement/current name
+change for the same person is a resolvable, structural fact about the raw data, and needs
+resolving *before* any ACIF is built, not worked around later by every downstream consumer that
+happens to touch it.
+
+**Investigated properly, with real measurement, not assumption.** `00a_extract_arc.py::
+extract_investigators()` unions `investigators-at-announcement`/`investigators-current`,
+deduplicating by a *regex*-cleaned name string (`re.sub(r'[^a-zA-Z0-9]', '', ...)`, no
+case-folding). When a name form genuinely differs between the two snapshots, this produces two
+separate `investigators_raw.parquet` rows with no field tying them back to the same slot beyond
+the name match itself.
+
+**Three genuinely different cases, measured across the real population** (4,795 grants with a
+real -- i.e., not just regex noise, see below -- announcement/current investigator-set
+difference, KEEP_SCHEMES-scoped):
+- **1,665 (34.7%) -- clean 1:1 rename**: exactly one name unmatched on each side. For a
+  single-investigator-slot scheme (DECRA etc.) this is structurally certain, not a guess -- there
+  is only one slot, so a name mismatch can only mean a rename. Safe to auto-resolve.
+- **2,483 (51.8%) -- pure drop or pure add**: unmatched names on only one side. A genuine
+  membership change (someone joined or left), nothing to pair -- no rename candidate exists.
+- **647 (13.5%) -- genuinely ambiguous**: 2+ unmatched on at least one side. Real example,
+  `LP230201137`: one person (McKinley) dropped, but *two different* people (Clinton, Rom) added
+  -- guessing a pairing here risks attributing one real person's name to someone else entirely.
+  Deliberately left unresolved -- each name stays its own separate item, same "don't guess,
+  defer" discipline as `resolve_cluster_id()`'s own `StaleClusterIdError`.
+
+**A second, independent real bug found while building the measurement itself, not folded into
+the three-way split above**: comparing names via the regex instead of the project's own real
+`HumanNameParser` (`full_name_key`/`full_name_key_raw`) produces **284 false-positive
+"differences"** that are actually the same name -- confirmed concretely on `DP240101086`:
+"KalantarZadeh" (announcement) vs "Kalantarzadeh" (current) differ only in capitalization, which
+the regex has no way to see past but the real parser resolves correctly, same as it already does
+for diacritics/apostrophes/postnominals elsewhere in this project. Switching the
+same-vs-different comparison from the regex to the proper parser drops "grants with any
+difference" from 5,079 to 4,795 -- verified by direct measurement, not assumed from the single
+example. **Deliberately NOT fixed by changing `unique_id`'s own construction** (still the old
+regex, matching what's actually in `investigators_raw.parquet` today) -- that would ripple into
+every existing reference to a `unique_id`, a far bigger and separate change from this table's
+actual job of deciding which of the *existing* ids are a rename pair.
+
+**Built**: `src/00c_extract_propensities.py::build_award_rename_map()` -- new fifth table,
+`award_rename_map.parquet` (`announcement_unique_id, current_unique_id, announcement_name,
+current_name`), one row per confirmed clean 1:1 rename only (the other two categories need no
+row: pure drop/add has nothing to pair, ambiguous is deliberately left alone). Population-wide
+run: 1,665 rows, matching the measured count exactly; Akhtar's case correctly appears twice
+(she holds a second grant, `DP110101953`, with the identical rename). `tests/
+test_00c_extract_propensities.py` gained 4 tests: shape/range, the known Akhtar case, a
+regression guard that no case-only difference (KalantarZadeh) ever appears as a "rename", and a
+regression guard that the genuinely-ambiguous `LP230201137` never gets recorded either.
+541/541 tests passing.
+
+### Naming-scheme decision for the (not yet built) rename-collapse step: no `full_name_raws`, a real item-level `full_name_keys`
+
+Discussing how `load_items()` should actually consume `award_rename_map.parquet` (collapsing a
+confirmed rename pair into one item before seeding, per the earlier direct instruction --
+"resolved before the acif_id is built and never revisited apart from inclusion in
+full_name_keys") surfaced a naming question, settled by direct correction:
+
+- **No `full_name_raws` field needed.** `AwardCIFItem.full_name` (display, scalar) stays just
+  the CURRENT name -- for a collapsed Akhtar-style pair, `current_name` ("M. Shumi Akhtar") from
+  the rename map wins outright; the announcement form isn't retained for display at all. This is
+  narrower than the `admin_orgs` precedent (which retains BOTH org names in a list) -- names and
+  orgs don't need the same treatment here.
+- **A real matching-keys set is still needed, though** -- "since we don't know what OAX will be
+  using" (direct quote): OpenAlex may have indexed this person's publications under either name
+  form across her career, so the MATCHING vocabulary (not the display name) must cover both.
+  This means `AwardCIFItem` needs a genuine plural `full_name_keys: list[str]` field, which does
+  not exist yet -- today `AwardCIFItem` only has the scalar `full_name_key`; the plural form
+  currently only exists at the `AwardsCIF` (cluster) level and inside `ParsedName`'s own
+  per-occurrence output. For a collapsed rename pair, this item-level `full_name_keys` would be
+  the union of parsing BOTH retained name forms (not just the surviving current one) through
+  `HumanNameParser`.
+
+**Not yet built**: adding `AwardCIFItem.full_name_keys`, and wiring `award_rename_map.parquet`
+into `load_items()` to actually collapse a confirmed rename pair into one item (current name as
+`full_name`/`unique_id`/`cluster_id`, union of both forms' parsed keys as `full_name_keys`) --
+this is the next concrete step. Coawardees (design settled above) remains queued behind it.
+
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
 
