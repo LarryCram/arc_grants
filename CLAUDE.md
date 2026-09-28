@@ -2308,6 +2308,151 @@ Narendra and others), 420/420 tests passing throughout -- including a final run 
 `arc_oax_links.parquet` actually gone from disk, not just trapped, confirming the SystemExit
 never fires and nothing regressed.
 
+## Reporting fixes; population-level summary tables; fellowship career-stage tiers; a confirmed same-grant false-merge bug fixed (2026-09-18)
+
+Four small, separate fixes/additions landed the same day, all downstream of the `results.db`
+reporting work above.
+
+**`funding_current` replaced with `funding_announced` throughout the `arc` table.** Confirmed by
+reading ARC's own raw NCGP JSON directly (`raw_json.csv`, not just `grants_flat.parquet`):
+`funding-current` is not a stable "amount awarded" figure -- for `DE120100390` (status Closed) it
+reads `0.0` while funding-at-announcement reads the real $375,000. Population-wide: 629/33,650
+grants (1.9%) show `funding_current=0` with `funding_announced>0`, 616 of those (98%) status
+Closed -- a strong pattern but not a clean status-based rule (13 Active grants also show it, some
+Closed grants keep a real nonzero `funding_current`), so not safe to special-case on. Switched the
+whole `Amount` column to `funding_announced`, stable regardless of a grant's current status.
+
+**`render_acif_markdown()` made a rigid template**, per direct instruction: every ACIF's report
+must have the same sections/headings/tables in the same order always, never conditionally omitted
+or swapped for placeholder text based on data availability. Refactored to build all three tables
+(ARC awards, ARC-OAX candidates, Works accepted) unconditionally every time; `markdown_table()`'s
+own "(none)" fallback now handles the empty case uniformly, replacing three separate
+`if not X.empty: ... else: (placeholder)` branches. `title` gained `arc_full_name`
+(`AwardsCIF.full_names[1]`, the ARC-recorded name) as the H1 fallback whenever no OAX candidate is
+accepted -- the header is never blank now, not even for a zero-candidate ACIF (e.g. Natalie
+Keirstead now shows "# Natalie Keirstead" instead of no heading at all). Also fixed a real
+leftover bug caught in passing: the main ARC-OAX candidate table was still sorted by the old
+`works_count` (HEP-context population count) instead of `works_count_au`, unlike the Works
+section's accepted-candidate list, which had already been switched. 420/420 tests passing.
+
+**`analysis/13_summary_tables.py`** -- a new population-level report, distinct from the per-ACIF
+one: total awards/persons, breakdown by scheme code (DP/LP/DE/FT/FL/FF), fellowship tier
+(early/middle/senior), and CI/Fellow split. "CI/F" = Chief Investigator OR Fellow, the whole ACIF
+population (literally what ACIF stands for) -- established project terminology per direct
+instruction, not redundant with "total", just the same figure under its own recognized label.
+`is_fellowship` (`investigators_raw.parquet`'s own field) is used as the sole, authoritative gate
+for CI vs Fellow throughout -- corrected during development after an initial draft leaned on a
+`role_code='CI'` string comparison instead; role_code lists are still used, but only to
+sub-classify an already `is_fellowship`-gated population into early/middle/senior tiers, never to
+decide CI-vs-Fellow itself. Verified internally consistent: CI-only + Fellow-only + Both = 22,784,
+matching total distinct persons exactly.
+
+**Fellowship career-stage tiers formalized; a confirmed same-grant false-merge bug found and
+fixed.** `config/scope.py` gained a single canonical `FELLOWSHIP_TIER` dict covering all 12
+fellowship role codes (early/mid/senior, user-confirmed), with `ECR_ROLES`/`MCR_ROLES`/`SRF_ROLES`
+now derived from it rather than hand-maintained separately -- also corrects CI-DORA's own label
+and tier (Discovery Outstanding Researcher Award, early-career, not "Declaration on Research
+Assessment"). `analysis/utils/summary_tables.py` wired to `FELLOWSHIP_TIER` instead of a
+hardcoded duplicate; gained its own `reliability_tier` summary table.
+
+Separately, `merge_same_grant_coinvestigators()` (`src/utils/awards_cif.py`) gained a
+`first_names_compatible()` guard -- it previously merged same-grant co-investigators on family
+name + first-initial alone. **Confirmed false merge**: "Yang Xiang" and "Yong Xiang", two
+different real co-investigators on grant `DP1095498`, had been combined into one 24-grant ACIF.
+Fix splits 56 such clusters population-wide (22,888 → 22,944 AwardsCIF).
+
+## ARC-internal Splink dedupe replaced with SQL blocking + rule-based matching; three real false-merges confirmed and fixed (2026-09-19)
+
+Splink's `dedupe_only` clustering (the ARC-internal identity-resolution stage,
+`cluster_items()`/`01_prepare_arc.py`) was found merging distinct real people -- **David Hill,
+Peter Robinson, and Yang/Yong Xiang** (the same case fixed narrowly the day before, now traced to
+a broader root cause) -- due to three confirmed Splink configuration bugs: TF adjustment computed
+against the wrong population, a redundant `full_name_key` comparison level, and silently-untrained
+m/u probabilities. Rather than patch Splink further, `cluster_items()` was rebuilt outright as
+pure SQL blocking plus explicit union-find matching: ORCID exact-match/veto, name/scheme
+compatibility, and a deferred FOR-name-signature propensity pass gated by
+`FOR_NAME_COINCIDENCE_THRESHOLD` (an empirically-derived Bonferroni-style bound, replacing a flat
+token-overlap threshold). This mirrors the ARC↔OAX linking stage, which dropped Splink for the
+same reason back in the `AcifOaxLinker` rebuild (2026-09-09 above).
+
+**Two more real, unrelated bugs fixed alongside the rebuild, both found because rebuilding forced
+a fresh read of adjacent code**: `apply_enriched_orcids()` had been silently dropped from the
+pipeline entirely -- reactivated, along with three bugs in `merge_persons_by_orcid()` (a crude
+initial-only compatibility check, and a shared skip flag that aborted an entire same-ORCID group
+over one unrelated member). `name_part_tokens()` had a real hyphenation bug: a hyphenated
+given-name part must keep its own literal spelling as a token, not only its split components --
+fixed.
+
+Two new `manual_confirmed_not_suspicious.csv` entries for broad-career false positives surfaced
+during verification (Ashish Sharma, hydrology; Peter Robinson, physics-to-neuroscience -- the
+same Peter Robinson confirmed as a real single person here, distinct from the false-merge fixed
+above). 427/427 tests passing.
+
+## Cyclic ACIF-construction rebuild started: `src/acif/` package skeleton + `00c_extract_propensities.py` (2026-09-19, in progress)
+
+First implementation step of a planned architectural replacement for the one-shot ARC clustering
+pipeline (`cluster_items()` → `refine_clusters()` → post-hoc reliability tiering). Full design:
+`/home/lc/.claude/plans/plan-that-in-tiny-immutable-heron.md`. **Not a completed migration** --
+`src/utils/awards_cif.py` stays unmodified and in production until the new engine is built and
+validated; the new package is scaffolding plus one working extraction script so far.
+
+**The idea**: replace one-shot clustering with a *cyclic* construction -- repeated rounds of
+pairwise contraction where each round's ACIFs get their derived features (coawardees, FOR-code
+union, institution set, year range) recomputed bottom-up from their actual current members before
+the next round runs, rather than frozen at whatever they looked like when a merge first happened.
+Identity is a single `cluster_id` (no second synthetic id) with a new tie-break rule (grant year,
+then scheme prefix, then remainder -- replacing plain alphabetical `min(unique_id)`, which let a
+newer `DE` grant outrank an older `DP` grant purely by letter sort). A persisting object gains a
+`cycle_stages: list[int]` provenance trail. The loop is frozen-per-stage and batch-applied (no
+within-stage order-dependence), validated eventually via a 10-different-starting-sorts
+equivalence check -- once that passes, `cluster_items()`, `refine_clusters()`,
+`compute_gap_candidates()`, and `merge_by_coawardee_corroboration()` get deleted outright from
+`awards_cif.py`, not left behind as dead code. The pipeline stage is also planned to be renamed
+`01_build_arc_acifs.py` (from `01_prepare_arc.py`) once the cutover happens, and `AwardsCIF`/
+`AwardCIFItem` are affirmed as the one canonical naming convention going forward (not retrofitted
+onto `AcifOaxLinker` elsewhere -- separate cleanup).
+
+**Built so far**:
+- **`src/acif/`** -- new package, out of `utils/`, reflecting that this is the project's central
+  model and algorithm, not a stateless helper: `models.py` (dataclasses), `build.py` (the cyclic
+  engine), `features.py` (feature wiring).
+- **`models.py`** -- `AwardCIFItem`/`AwardsCIF`/`CandidateWork`, field-for-field copies of the
+  current `awards_cif.py` versions plus new fields the cyclic build needs: `full_name_raws` (item-
+  level raw name form, so `AwardsCIF.full_names` can be computed as a plain union once items
+  merge), `for_name_rarity`, `single_institution_grant`, `institution_rarity`, `cycle_stages`.
+  `AwardsCIF.full_names`/`full_name_keys` stay genuine mutable fields, not `@property` --
+  `widen_names_with_orcid_bulk_db()` unions in ORCID-sourced names/keys that have nothing to do
+  with an ACIF's own items, so a property computed purely from `items` couldn't reproduce that.
+  No methods yet.
+- **`src/00c_extract_propensities.py`** -- a new population-wide propensity/rarity extraction
+  script, same shape as the existing `oax_tf_*.parquet`/`work_tf_*.parquet` precedent (precompute
+  once, persist, never recompute inline inside the algorithm that consumes it). Four grant-level
+  frequency distributions, deliberately no z-score/null-model test and no ORCID/identity
+  dependency anywhere: `for_name_rarity` (replacing `cluster_items()`'s old throwaway local
+  `sig_counts` dict) and `institution_rarity` (new -- **not** gated on `n_eligible_orgs==1`,
+  canonicalized + filtered to genuine HEPs via `admin_orgs.csv`, after finding both
+  `eligible_orgs` string-variant splitting and non-HEP dilution in the raw output), plus
+  `for_name`-pair and institution-pair co-occurrence frequencies, each pair canonically ordered by
+  name alphabetically (not by ARC's own primary/secondary flag, which isn't a reliable ordering
+  signal once FOR codes are themselves projected through the FOR2008/RFCD98→FOR2020 upgrade).
+  **Institution rarity deliberately not gated on single-org grants**: gating would bias the
+  distribution, since a smaller institution is more likely to appear as a co-eligible partner org
+  than as sole admin org -- gating would systematically understate (or for some institutions,
+  wholly exclude) its true frequency. `n_eligible_orgs==1` remains useful for a separate job, the
+  per-item `single_institution_grant` *attribution* flag ("can we say THIS investigator is at
+  THIS institution"), just not for the rarity table itself.
+- `build.py`/`features.py` are still pure scaffolding (module docstrings only, no functions) --
+  the merge-test logic and feature-attachment wiring are the explicit next steps, not yet started.
+
+**Deferred, considered and dropped**: a CIA/CIB institution-attribution idea (assigning a specific
+institution to a specific co-investigator via investigator order) -- checked directly and found
+unverifiable from stored data (`eligible_orgs` order confirmed alphabetical, not admin-first or
+investigator-order-correlated, affecting 2.8% of items).
+
+No executable cyclic-build code exists yet -- `build.py`'s merge tests and `features.py`'s
+read-and-attach wiring are next. This entry documents the plan and the first landed step, not a
+completed rebuild; see `plan-that-in-tiny-immutable-heron.md` for the full, unabridged design.
+
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
 
