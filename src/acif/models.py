@@ -52,6 +52,15 @@ class AwardCIFItem:
     full_name: str
     first_names: list[str] = field(default_factory=list)
     family_names: list[str] = field(default_factory=list)
+
+    # admin_org (current) and announcement_admin_org can genuinely differ -- a fellow moved
+    # institutions mid-grant (confirmed directly, 2026-09-28, by the grant's own former CI:
+    # DE120101452's admin_org is currently Sydney, but was ANU at announcement). admin_org
+    # itself stays a scalar and normally means "the current one" -- but when the two differ,
+    # that scalar alone silently drops the at-award institution. admin_orgs retains both,
+    # same list-retains-every-form/scalar-picks-the-default convention already used for
+    # first_name(s)/family_name(s) -- never collapsed, never silently dropped.
+    admin_orgs: list[str] = field(default_factory=list)
     family_name_main: str | None = None
     first_initial: str | None = None
     first_name_canonical: str | None = None
