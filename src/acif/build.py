@@ -217,13 +217,20 @@ def load_grant_org_facts() -> dict[str, dict]:
     return out
 
 
-def enrich_items(items: list[AwardCIFItem]) -> list[AwardCIFItem]:
+def enrich_items(
+    items: list[AwardCIFItem],
+    for2020: dict[str, list[dict]],
+    org_facts: dict[str, dict],
+) -> list[AwardCIFItem]:
     """Attach the three grant-level derived facts (for2020_codes, hep_codes, inst_ids) computed
     once per grant_code, not per item -- each of an item's grant-mates gets the identical value.
     Items whose grant_code has no facts (should not happen post-scope-filter, checked rather than
-    assumed) keep the dataclass default (empty list), not a KeyError."""
-    for2020 = load_grant_for2020_codes()
-    org_facts = load_grant_org_facts()
+    assumed) keep the dataclass default (empty list), not a KeyError.
+
+    Takes the two lookups as parameters rather than loading them itself (2026-09-28) -- pure
+    transformation, no I/O of its own, so it's testable against small hand-built dicts instead of
+    real parquet/CSV data. Production callers pass load_grant_for2020_codes()/
+    load_grant_org_facts()'s real output; see build_stage_zero() below for the actual wiring."""
     return [
         replace(
             item,
@@ -233,6 +240,15 @@ def enrich_items(items: list[AwardCIFItem]) -> list[AwardCIFItem]:
         )
         for item in items
     ]
+
+
+def build_stage_zero() -> list[AwardsCIF]:
+    """Production entry point: load real ARC data, enrich it with the real grant-level lookups,
+    seed one singleton AwardsCIF per item. The only call site that wires enrich_items() to real
+    I/O -- kept separate so enrich_items() itself stays a pure, directly-testable function."""
+    items = load_items()
+    items = enrich_items(items, load_grant_for2020_codes(), load_grant_org_facts())
+    return seed(items)
 
 
 def seed(items: list[AwardCIFItem]) -> list[AwardsCIF]:
