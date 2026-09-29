@@ -64,15 +64,30 @@ def extract_investigators(attrs: dict, grant_code: str) -> list[dict]:
     both captured.  Deduplication is by unique_id (grant_code + cleaned name),
     so the same name in both sources produces one row; different name forms
     produce two rows — both feeding into the Splink dedupe.
-    When the same unique_id appears in both sources the current-record's ORCID
-    is preferred if the announcement record has none.
+
+    title/role_code/role_name/is_fellowship prefer the CURRENT record (2026-09-29 fix,
+    confirmed via real cases -- e.g. FT100100761/FT100100627, both an identical person/ORCID
+    whose role_code was corrected from a generic "CI" at announcement to the properly-specific
+    "FT"/is_fellowship=True at current -- an ARC administrative correction/refinement over time,
+    not two genuine facts to reconcile), falling back to the announcement record's own value
+    only when current genuinely lacks one (an announcement-only investigator who never appears
+    in the current snapshot at all). is_fellowship in particular was checked directly and found
+    to be entirely DERIVED from role_code -- 0 real cases exist where role_code matches but
+    is_fellowship still differs -- so no separate handling was needed for it beyond following
+    role_code's own precedence.
+
+    ORCID keeps its own separate, unchanged precedence: whichever source is processed first
+    (announcement) wins, backfilling from current only if announcement's own orcid is empty --
+    a real ORCID essentially never legitimately differs between snapshots (confirmed directly:
+    1 conflict in 78,571 real matched pairs), so this precedence rarely matters in practice and
+    wasn't part of what changed here.
     """
     ann  = attrs.get("investigators-at-announcement", [])
     curr = attrs.get("investigators-current", [])
 
     seen: dict[str, dict] = {}
 
-    def _process(inv_list, source):
+    def _process(inv_list, source, prefer_role_fields):
         for inv in inv_list:
             orcid_raw  = inv.get("orcidIdentifier") or ""
             orcid_clean = orcid_raw.strip() or None
@@ -83,8 +98,15 @@ def extract_investigators(attrs: dict, grant_code: str) -> list[dict]:
 
             if unique_id in seen:
                 # Same name in both sources — pick up ORCID from current if missing
+                # (unchanged precedence: announcement's own orcid wins if it has one)
                 if orcid_clean and not seen[unique_id]["orcid"]:
                     seen[unique_id]["orcid"] = orcid_clean
+                if prefer_role_fields:
+                    seen[unique_id]["title"] = safe_str(inv.get("title"))
+                    seen[unique_id]["role_code"] = safe_str(inv.get("roleCode"))
+                    seen[unique_id]["role_name"] = safe_str(inv.get("roleName"))
+                    seen[unique_id]["is_fellowship"] = inv.get("isFellowship", False)
+                    seen[unique_id]["inv_source"] = source
             else:
                 seen[unique_id] = {
                     "unique_id":     unique_id,
@@ -99,8 +121,8 @@ def extract_investigators(attrs: dict, grant_code: str) -> list[dict]:
                     "inv_source":    source,
                 }
 
-    _process(ann,  "announcement")
-    _process(curr, "current")
+    _process(ann,  "announcement", prefer_role_fields=False)
+    _process(curr, "current", prefer_role_fields=True)
 
     # If neither list had entries fall back is implicit (seen will be empty)
     return list(seen.values())

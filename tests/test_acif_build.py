@@ -172,3 +172,35 @@ class TestBuildStageZeroRealData:
             assert len(acif.items) == 1
             assert acif.cluster_id == acif.items[0].unique_id
             assert acif.cycle_stages == [1]
+
+
+class TestRenameCollapseRealData:
+    """award_rename_map.parquet consumption in load_items() -- collapsing a confirmed
+    announcement/current rename into one item before seeding, per the 2026-09-28/29 design
+    decision (no full_name_raws; a real item-level full_name_keys unioning both name forms)."""
+
+    def test_akhtar_case_collapsed_with_unioned_keys(self):
+        items = {it.unique_id: it for it in load_items()}
+        assert "DE120101452_MahmudaAkhtar" not in items  # the announcement form
+        it = items["DE120101452_MShumiAkhtar"]  # the surviving current form
+        assert it.full_name == "M. Shumi Akhtar"
+        assert set(it.full_name_keys) >= {"mahmuda_akhtar", "shumi_akhtar"}
+
+    def test_no_announcement_only_rows_leak_through(self):
+        # every announcement_unique_id present in this population must have been absorbed,
+        # never left standing as its own separate item.
+        import pandas as pd
+        from config.settings import PROCESSED_DATA
+        items = load_items()
+        all_ids = {it.unique_id for it in items}
+        rename_df = pd.read_parquet(PROCESSED_DATA / "award_rename_map.parquet")
+        leaked = set(rename_df["announcement_unique_id"]) & all_ids
+        assert leaked == set()
+
+    def test_every_surviving_current_id_has_keys_populated(self):
+        import pandas as pd
+        from config.settings import PROCESSED_DATA
+        items = {it.unique_id: it for it in load_items()}
+        rename_df = pd.read_parquet(PROCESSED_DATA / "award_rename_map.parquet")
+        for current_id in set(rename_df["current_unique_id"]) & set(items):
+            assert items[current_id].full_name_keys, f"{current_id} missing full_name_keys"

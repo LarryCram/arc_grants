@@ -2688,6 +2688,132 @@ into `load_items()` to actually collapse a confirmed rename pair into one item (
 `full_name`/`unique_id`/`cluster_id`, union of both forms' parsed keys as `full_name_keys`) --
 this is the next concrete step. Coawardees (design settled above) remains queued behind it.
 
+## `full_name_keys` wired into `load_items()`; a systemic 00c_ scope-creep bug found and fixed; a foundational `00a_extract_arc.py` role-precedence bug found, confirmed, and fixed (2026-09-29)
+
+Direct continuation of the cyclic ACIF rebuild. The rename-collapse step planned in the entry
+above got built, then investigating it surfaced two real bugs of increasing scope -- one
+confined to `00c_extract_propensities.py`, the other in the raw extraction stage everything in
+this project (including the still-active production pipeline) depends on.
+
+### `full_name_keys`/rename-collapse built and verified
+
+`AwardCIFItem.full_name_keys: list[str]` added (`src/acif/models.py`) -- normally empty until a
+later, separate general-name-parsing step populates it for every item, but populated NOW for any
+item collapsing a confirmed rename, as the union of BOTH forms' own parsed keys (via
+`HumanNameParser`, not the announcement form's raw string -- "we don't know what OAX will be
+using"). `load_items()` reads the persisted `award_rename_map.parquet`: any row whose
+`unique_id` is a confirmed `announcement_unique_id` is skipped outright (never becomes its own
+item); the surviving `current_unique_id` row gets both forms' keys unioned in.
+Verified directly against the Akhtar case: `DE120101452_MahmudaAkhtar` no longer a separate item,
+`DE120101452_MShumiAkhtar` correctly carries `['m_akhtar','mahmuda_akhtar','s_akhtar','shumi_akhtar']`.
+
+### Systemic scope-creep across all five `00c_extract_propensities.py` tables
+
+User question ("are there any other cases of this class of scope creep in the 00x suite?")
+prompted a full audit rather than a narrow check of just the rename map. Found: every one of
+`00c_extract_propensities.py`'s five table builders scoped to `KEEP_SCHEMES` alone (via a shared
+`_scope_filter()` helper, now removed) -- a second, independent, narrower reimplementation of
+`load_items()`'s real three-part scope (`KEEP_ROLES` ∩ `KEEP_SCHEMES` ∩ HEP-admin_org), the same
+drift-prone pattern this project already found and fixed once for `01a_diagnose.py`'s own scope
+reimplementation (2026-08-21). `00a_extract_arc.py`/`00b_extract_oax.py` checked and confirmed
+clean (deliberately unscoped raw extraction stages; scoping is correctly left to downstream
+consumers).
+
+**Fixed**: new `_load_in_scope_grant_codes()` (reuses `_admin_orgs_canonical()` from
+`src/acif/build.py` -- no circularity, since `build.py` only ever reads `award_rename_map.parquet`
+as a *file*, never imports from `00c_extract_propensities.py`), applied consistently across all
+five builders. `build_award_rename_map()` additionally needed a per-investigator `KEEP_ROLES`
+filter (the other four are grant-level facts, unaffected by individual investigator roles).
+
+### Two further real bugs found investigating why the rescoped rename-map count didn't match expectations -- both fixed, both confirmed against real grant records, not assumed
+
+Direct user correction mid-investigation: "your informal tools and side checks are constantly
+leading to rabbit holes. Try to use the code base itself for development explorations" -- every
+verification from this point on used the real `load_items()`/`extract_investigators()` functions
+directly, or read the actual raw JSON for a specific named case, not fresh ad hoc re-derivations
+of scope logic (which is exactly what had been producing confusing, non-matching side numbers).
+
+1. **Self-pairs**: `build_award_rename_map()`'s `proper_key()` (via `HumanNameParser`) can find a
+   "difference" that the raw regex-based `_raw_unique_id()` construction doesn't -- confirmed on
+   `DP0449429_CaiHengLi`: announcement recorded "CaiHeng"/"Li", current recorded "Cai-Heng"/"Li".
+   The regex strips the hyphen either way, so both sides already collapse to the identical raw id
+   (`00a_extract_arc.py`'s own extraction had already deduplicated this into one
+   `investigators_raw.parquet` row) -- but `HumanNameParser` splits "Cai-Heng" into two given
+   tokens, producing a different `full_name_key`. Recording this as a "rename" told `load_items()`
+   to collapse the id into itself, silently erasing the person (their own single real row gets
+   skipped as if it were someone else's announcement-only leftover). Fixed: skip any detected pair
+   where `announcement_unique_id == current_unique_id` -- nothing to collapse.
+2. **Role swaps mistaken for renames**: confirmed on `LP100100367` (raw JSON pasted and read
+   directly) -- Matthew Taylor (CI→PI) and Charles Gray (PI→CI) literally swapped roles between
+   snapshots, two different real people. Filtering each side's investigator list to `KEEP_ROLES`
+   *independently* before name-matching excluded Taylor from `curr` and Gray from `ann`, making
+   them look like a clean 1:1 rename pair when neither's name changed at all. Fixed: match names
+   across the FULL, unfiltered lists (so Taylor matches Taylor and Gray matches Gray regardless of
+   role, correctly finding no rename here); `KEEP_ROLES` is now checked only against the
+   *surviving* current-side role, since the announcement role never matters once that side is
+   discarded.
+
+Population effect of both fixes together: `award_rename_map.parquet` 1,665 → 1,106 rows, now
+verified 100% internally consistent against `load_items()` itself (zero announcement-side leaks,
+zero surviving current-ids missing `full_name_keys`, exact 1:1 count match).
+
+### `00a_extract_arc.py`: a real, foundational role/title/is_fellowship precedence bug found and fixed
+
+The Taylor/Gray investigation exposed something upstream of the rename-map entirely: **can an
+investigator's role genuinely change between the announcement and current snapshots for ARC's
+own administrative reasons, independent of any rename?** Measured directly across all 78,571
+same-named investigator records matched between announcement/current: `role_code` differs in
+**1,829** cases, `role_name` in 4,589, `title` in 20,585 (mostly ordinary promotions, Dr→A/Prof).
+Checked ORCID and `is_fellowship` too, per direct user skepticism ("I don't see why an orcid can
+change... I would be surprised if is_fellowship changes") -- confirmed the skepticism was
+correct: ORCID conflicts in just **1** of 78,571 (almost certainly a data anomaly/name-collision,
+`DP150104156_NeilFoster`, not a real change -- not touched). `is_fellowship` differs in 62 cases,
+but investigated to a firm conclusion, not left as a mystery: **zero** of those 62 have an
+*identical* `role_code` with `is_fellowship` still differing -- `is_fellowship` is entirely
+DERIVED from `role_code` (ARC's own system flags a role as a fellowship or not based on which
+role code it is), never an independently-tracked fact. Full breakdown of the 62 (CI→FT 15,
+APD→PI/CI 15, QEII→CI 6, ARF→CI/PI 5, LIF→CI/PI 5, CI→APD 4, APDI→CI 3, CI-DORA 2, others
+singletons) confirms this -- not dominated by any one scheme or DORA specifically (only 2/62
+involve DORA).
+
+Two full raw grant records pulled and read directly on user request before any fix was written
+(`FT100100761`/`FT100100627`, Dominic Berry/Hilde Tubex) -- both show an identical person
+(matching ORCID, matching name) whose record was corrected from a generic "CI"/`isFellowship=false`
+at announcement to the properly-specific "FT"/`isFellowship=true` at current, alongside an
+ordinary title promotion (Dr→Prof). Confirmed as ARC's own administrative data-entry/correction
+process, not a genuine ambiguity -- direct user conclusion: "It must be a result of arc admin
+errors or rules. It is right to use 'current' for these."
+
+**Fixed in `extract_investigators()`** (`00a_extract_arc.py`, the raw extraction stage
+`investigators_raw.parquet` is built from -- read by the still-active production pipeline
+`src/utils/awards_cif.py` as well as the new `src/acif/` work, so this is a foundational,
+project-wide fix, not scoped to just the cyclic rebuild): `title`/`role_code`/`role_name`/
+`is_fellowship` now prefer the CURRENT record when an investigator appears in both snapshots,
+falling back to the announcement record's own value only when current genuinely lacks one (an
+announcement-only investigator who never appears in current at all). `inv_source` updated to
+say `"current"` whenever current's values won, not just whichever source happened to be
+processed first. ORCID's own precedence deliberately left unchanged (announcement wins, backfill
+from current only if empty) -- given it essentially never conflicts, this wasn't part of what
+needed fixing.
+
+Verified via the real function directly (`extract_investigators()`, not a side script): Dominic
+Berry now correctly resolves to `role_code='FT'`/`title='Prof'`/`is_fellowship=True`/
+`inv_source='current'`; Taylor now `role_code='PI'` (correctly drops out of `KEEP_ROLES` scope --
+"he will have moved from a HEP to a non-HEP institution," a real signal, not extraction noise);
+Gray now `role_code='CI'` (correctly enters scope, fixing the exclusion found investigating the
+rename map in the first place).
+
+**Full re-extraction run**: `00a_extract_arc.py` rerun end to end (122,828 investigator rows,
+33,588 grants now sourced from 'current' for their role/title/fellowship fields specifically --
+not the same as "current admin_org differs," a separate, already-documented figure). All five
+`00c_extract_propensities.py` tables regenerated against the corrected raw data (`award_rename_map`
+unaffected at 1,106 rows, since it already read role directly from raw JSON rather than through
+the old buggy extraction). `load_items()` reverified end to end: 63,010 items (down from the
+64,830 pre-any-fix baseline, reflecting both the role-precedence correction and the rename
+collapses combined). `tests/test_00c_extract_propensities.py`'s own stale expected-count band
+(1,200–2,200, from the original unscoped 1,665 measurement) updated to the now-doubly-verified
+1,106. 544/544 tests passing throughout every step.
+
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
 

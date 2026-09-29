@@ -90,8 +90,15 @@ class TestInstitutionPairFreq:
 class TestAwardRenameMap:
     def test_shape_and_range(self):
         df = _mod.build_award_rename_map()
-        # 1,665 at last real build (2026-09-28) -- loose band, not an exact pin.
-        assert 1200 <= len(df) <= 2200
+        # 1,106 at last real build (2026-09-29) -- loose band, not an exact pin. The original
+        # 1,665 (2026-09-28) has since dropped through three real, confirmed fixes: scoping to
+        # load_items()'s full population (KEEP_ROLES + HEP-admin_org, not KEEP_SCHEMES alone),
+        # a self-pair guard (proper_key() finding a difference the raw regex-based unique_id
+        # construction doesn't, e.g. hyphenation), and matching names on the FULL unfiltered
+        # investigator lists rather than per-side KEEP_ROLES-filtered ones (independent role
+        # filtering was conflating genuine role swaps between two different real people with a
+        # same-person rename -- confirmed on LP100100367, Taylor/Gray).
+        assert 800 <= len(df) <= 1400
         assert set(df.columns) == {
             "announcement_unique_id", "current_unique_id", "announcement_name", "current_name",
         }

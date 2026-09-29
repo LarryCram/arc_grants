@@ -86,14 +86,29 @@ from config.settings import (
     PROCESSED_DATA, GRANT_SUMMARIES_CSV, ARC_GRANTS_CSV,
     ADMIN_ORGS_CSV as _ADMIN_ORGS_CSV_PATH,
 )
-from config.scope import KEEP_SCHEMES
+from config.scope import KEEP_SCHEMES, KEEP_ROLES
 from src.utils.names import make_expanded_for_tokens, HumanNameParser
 from src.utils.for_resolve import upgrade_for_name
 from src.utils.awards_cif import load_grant_for2020_codes, _FOR_CONCORDANCE_CSV
+from src.acif.build import _admin_orgs_canonical
 
 
-def _scope_filter(grant_code: str) -> bool:
-    return grant_code[:2] in KEEP_SCHEMES
+def _load_in_scope_grant_codes() -> set[str]:
+    """Grant codes actually reachable by src/acif/build.py::load_items() -- KEEP_SCHEMES AND a
+    genuine HEP admin_org.
+
+    2026-09-29 fix: every function in this module used to scope to KEEP_SCHEMES alone (the old
+    `_scope_filter()`, removed) -- a second, narrower reimplementation of load_items()'s real
+    scope (KEEP_ROLES/KEEP_SCHEMES/HEP-admin_org), independently derived rather than reused. Same
+    silent-drift bug class this project already found and fixed once for 01a_diagnose.py's own
+    scope reimplementation (2026-08-21) -- confirmed real here too, not just theoretical: 531 of
+    1,665 award_rename_map candidate pairs had at least one side outside load_items()'s actual
+    population before this fix, purely because the two scope definitions disagreed."""
+    df = pd.read_parquet(PROCESSED_DATA / "grants_flat.parquet", columns=["grant_code", "admin_org"])
+    hep_admin_orgs, _, _ = _admin_orgs_canonical()
+    in_scheme = df["grant_code"].str[:2].isin(KEEP_SCHEMES)
+    in_hep = df["admin_org"].isin(hep_admin_orgs)
+    return set(df.loc[in_scheme & in_hep, "grant_code"])
 
 
 def _load_institution_name_crosswalk() -> tuple[dict[str, str], set[str]]:
@@ -137,8 +152,8 @@ def _load_institution_name_crosswalk() -> tuple[dict[str, str], set[str]]:
 
 def build_for_name_rarity() -> pd.DataFrame:
     """One row per grant's own for_name_tokens signature (primary for_name only, upgraded +
-    synonym-expanded) -- count/frequency across the KEEP_SCHEMES grant population. Ports
-    cluster_items()'s current per-item sig_counts to the correct, grant-level population."""
+    synonym-expanded) -- count/frequency across load_items()'s real in-scope grant population.
+    Ports cluster_items()'s current per-item sig_counts to the correct, grant-level population."""
     con = duckdb.connect()
     try:
         rows = con.execute(f"""
@@ -154,13 +169,14 @@ def build_for_name_rarity() -> pd.DataFrame:
     finally:
         con.close()
 
+    in_scope_grant_codes = _load_in_scope_grant_codes()
     expanded_for_tokens = make_expanded_for_tokens(str(_FOR_CONCORDANCE_CSV))
 
     sig_counts: Counter[str] = Counter()
     n_grants = 0
     for row in rows:
         r = dict(zip(col_names, row))
-        if not _scope_filter(r["grant_code"]):
+        if r["grant_code"] not in in_scope_grant_codes:
             continue
         for_name = upgrade_for_name(r["for2008_code"], r["primary_for_name"])
         if not for_name:
@@ -180,7 +196,15 @@ def build_for_name_rarity() -> pd.DataFrame:
 def build_for_name_pair_freq() -> pd.DataFrame:
     """One row per (name_a, name_b) pair of distinct FOR2020 group names co-occurring on the
     SAME grant -- alphabetically ordered, counted once per grant, no identity/ORCID involved."""
-    grant_codes = load_grant_for2020_codes()  # already KEEP_SCHEMES-scoped
+    in_scope_grant_codes = _load_in_scope_grant_codes()
+    # load_grant_for2020_codes() is only KEEP_SCHEMES-scoped (its own docstring, unchanged --
+    # every existing caller's items are already HEP-filtered by load_items() before this dict is
+    # ever consulted by grant_code, so that function itself doesn't need HEP-awareness); this
+    # table's own population needs the fuller scope, so the extra restriction happens here.
+    grant_codes = {
+        gc: entries for gc, entries in load_grant_for2020_codes().items()
+        if gc in in_scope_grant_codes
+    }
 
     pair_counts: Counter[tuple[str, str]] = Counter()
     n_pairs = 0
@@ -199,11 +223,12 @@ def build_for_name_pair_freq() -> pd.DataFrame:
 
 
 def build_institution_rarity() -> pd.DataFrame:
-    """One row per institution name -- how many KEEP_SCHEMES grants list it anywhere in
-    eligible_orgs (admin org or partner org alike), count/frequency over n_grants_in_scope.
-    Deliberately NOT gated on n_eligible_orgs==1 -- see module docstring."""
+    """One row per institution name -- how many of load_items()'s real in-scope grants list it
+    anywhere in eligible_orgs (admin org or partner org alike), count/frequency over
+    n_grants_in_scope. Deliberately NOT gated on n_eligible_orgs==1 -- see module docstring."""
+    in_scope_grant_codes = _load_in_scope_grant_codes()
     df = pd.read_parquet(PROCESSED_DATA / "grants_flat.parquet", columns=["grant_code", "eligible_orgs"])
-    df = df[df["grant_code"].map(_scope_filter)]
+    df = df[df["grant_code"].isin(in_scope_grant_codes)]
     n_grants = len(df)
     crosswalk, hep_names = _load_institution_name_crosswalk()
 
@@ -226,8 +251,9 @@ def build_institution_rarity() -> pd.DataFrame:
 def build_institution_pair_freq() -> pd.DataFrame:
     """One row per (institution_a, institution_b) pair of distinct institutions co-listed in the
     SAME grant's own eligible_orgs -- alphabetically ordered, counted once per grant."""
+    in_scope_grant_codes = _load_in_scope_grant_codes()
     df = pd.read_parquet(PROCESSED_DATA / "grants_flat.parquet", columns=["grant_code", "eligible_orgs"])
-    df = df[df["grant_code"].map(_scope_filter)]
+    df = df[df["grant_code"].isin(in_scope_grant_codes)]
     crosswalk, hep_names = _load_institution_name_crosswalk()
 
     pair_counts: Counter[tuple[str, str]] = Counter()
@@ -287,8 +313,16 @@ def build_award_rename_map() -> pd.DataFrame:
        the other two categories are deliberately left alone (pure drop/add needs no rename
        record; ambiguous cases stay as separate, unlinked items rather than risk a wrong pairing
        -- same "don't guess, defer" discipline as resolve_cluster_id()'s own StaleClusterIdError).
+
+    2026-09-29 fix: scoped to load_items()'s REAL population, not KEEP_SCHEMES alone -- a grant
+    whose admin_org isn't a genuine HEP is skipped outright (it contributes no items to
+    load_items() at all), and each investigator entry is additionally filtered to KEEP_ROLES
+    (a grant can carry both in-scope and out-of-scope roles, e.g. a CI alongside a community-
+    partner PI) before the set-difference comparison ever runs. Before this fix, 531/1,665
+    candidate pairs had at least one side outside load_items()'s actual scope.
     """
     parser = HumanNameParser()
+    in_scope_grant_codes = _load_in_scope_grant_codes()
 
     def proper_key(fn, ln):
         p = parser.parse(f"{fn or ''} {ln or ''}".strip())
@@ -302,31 +336,58 @@ def build_award_rename_map() -> pd.DataFrame:
         except (TypeError, ValueError):
             continue
         grant_code = rec.get("data", {}).get("id")
-        if not grant_code or grant_code[:2] not in KEEP_SCHEMES:
+        if not grant_code or grant_code not in in_scope_grant_codes:
             continue
         attrs = rec["data"]["attributes"]
+        # NOT role-filtered here (2026-09-29 fix, a real confirmed bug): filtering each side's
+        # list to KEEP_ROLES independently before name-matching conflates "this name changed"
+        # with "this investigator's role moved into/out of scope between snapshots" -- confirmed
+        # concretely on LP100100367, where Matthew Taylor (CI->PI) and Charles Gray (PI->CI)
+        # simply swapped roles, two different real people, but independent per-side role
+        # filtering excluded Taylor from curr and Gray from ann, making them look like a clean
+        # 1:1 rename pair when neither actually changed name at all. Matching on the FULL,
+        # unfiltered lists means Taylor matches Taylor and Gray matches Gray regardless of role
+        # (correctly finding no rename here); KEEP_ROLES is applied below, only to the surviving
+        # CURRENT-side role -- the announcement role never matters, since that side is always
+        # discarded, and only the current form's role determines whether load_items() would ever
+        # construct an item for this investigator at all.
         ann = attrs.get("investigators-at-announcement") or []
         curr = attrs.get("investigators-current") or []
 
-        # proper_key -> (real unique_id, display name), one dict per side
+        # proper_key -> (real unique_id, display name, role_code), one dict per side
         ann_by_key = {
             proper_key(i.get("firstName"), i.get("familyName")):
                 (_raw_unique_id(grant_code, i.get("firstName"), i.get("familyName")),
-                 f"{i.get('firstName', '')} {i.get('familyName', '')}".strip())
+                 f"{i.get('firstName', '')} {i.get('familyName', '')}".strip(), i.get("roleCode"))
             for i in ann
         }
         curr_by_key = {
             proper_key(i.get("firstName"), i.get("familyName")):
                 (_raw_unique_id(grant_code, i.get("firstName"), i.get("familyName")),
-                 f"{i.get('firstName', '')} {i.get('familyName', '')}".strip())
+                 f"{i.get('firstName', '')} {i.get('familyName', '')}".strip(), i.get("roleCode"))
             for i in curr
         }
 
         only_ann = set(ann_by_key) - set(curr_by_key)
         only_curr = set(curr_by_key) - set(ann_by_key)
         if len(only_ann) == 1 and len(only_curr) == 1:
-            ann_id, ann_name = ann_by_key[next(iter(only_ann))]
-            curr_id, curr_name = curr_by_key[next(iter(only_curr))]
+            ann_id, ann_name, _ann_role = ann_by_key[next(iter(only_ann))]
+            curr_id, curr_name, curr_role = curr_by_key[next(iter(only_curr))]
+            if curr_role not in KEEP_ROLES:
+                continue  # the surviving form would never become a load_items() item anyway
+            if ann_id == curr_id:
+                # A real, confirmed case (2026-09-29): proper_key() found a difference where
+                # the RAW id construction (_raw_unique_id(), regex-based) didn't -- e.g.
+                # DP0449429's "CaiHeng"/"Li" (announcement) vs "Cai-Heng"/"Li" (current):
+                # the regex strips the hyphen, so both already collapse to the SAME raw id
+                # (00a_extract_arc.py's own extraction already deduplicated this pair into one
+                # investigators_raw.parquet row), but HumanNameParser splits "Cai-Heng" into
+                # two given tokens, producing a different full_name_key. Recording this as a
+                # "rename" would tell load_items() to collapse this id into itself, silently
+                # erasing the person (its own "current form" IS itself, so the
+                # already-collapsed row gets skipped as if it were someone else's
+                # announcement-only leftover). Nothing to collapse here -- skip.
+                continue
             rows.append({
                 "announcement_unique_id": ann_id, "current_unique_id": curr_id,
                 "announcement_name": ann_name, "current_name": curr_name,

@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
 from config.settings import PROCESSED_DATA, GRANT_SUMMARIES_CSV, ADMIN_ORGS_CSV, ARC_GRANTS_CSV
 from src.utils.for_resolve import upgrade_for_name, upgrade_for_code, resolve_arc_for_entry, for2020_group_name
+from src.utils.names import HumanNameParser
 from src.acif.models import AwardCIFItem, AwardsCIF
 
 
@@ -86,6 +87,17 @@ def load_items(con: duckdb.DuckDBPyConnection | None = None) -> list[AwardCIFIte
     silently drops the at-award institution whenever it differs from the current one (a fellow
     moved institutions mid-grant -- DE120101452 is admin_org=Sydney now, was ANU at
     announcement). admin_org itself stays "the current one," but admin_orgs retains both.
+
+    Confirmed announcement/current renames (award_rename_map.parquet,
+    00c_extract_propensities.py::build_award_rename_map()) are collapsed into ONE item here,
+    before anything downstream ever sees them as two people -- the announcement-form row is
+    dropped outright; full_name/unique_id/cluster_id all follow the surviving current-form row
+    unchanged, and full_name_keys becomes the union of BOTH forms' own parsed matching keys
+    (since OpenAlex may have indexed either form -- "we don't know what OAX will be using").
+    Resolved here and never revisited, per direct design decision (2026-09-28/29). NOTE for
+    whoever wires general name-parsing into this function next: that step must UNION into
+    full_name_keys for these items, never overwrite it -- the announcement form's keys have no
+    other source once this collapse has happened.
     """
     own_con = con is None
     con = con or duckdb.connect()
@@ -117,11 +129,31 @@ def load_items(con: duckdb.DuckDBPyConnection | None = None) -> list[AwardCIFIte
 
     hep_admin_orgs, _alias_to_hep_code, _alias_to_institution_id = _admin_orgs_canonical()
 
+    rename_map_path = PROCESSED_DATA / "award_rename_map.parquet"
+    announcement_ids: set[str] = set()
+    current_to_announcement_name: dict[str, str] = {}
+    if rename_map_path.exists():
+        rename_df = pd.read_parquet(rename_map_path)
+        announcement_ids = set(rename_df["announcement_unique_id"])
+        current_to_announcement_name = dict(
+            zip(rename_df["current_unique_id"], rename_df["announcement_name"])
+        )
+    name_parser = HumanNameParser()
+
     items: list[AwardCIFItem] = []
     for row in rows:
         r = dict(zip(col_names, row))
         if r["admin_org"] not in hep_admin_orgs:
             continue
+        if r["unique_id"] in announcement_ids:
+            continue  # collapsed into its current-form counterpart below, not its own item
+        full_name = f"{r['first_name']} {r['family_name']}"
+        full_name_keys: list[str] = []
+        announcement_name = current_to_announcement_name.get(r["unique_id"])
+        if announcement_name:
+            keys = set(name_parser.parse(full_name).full_name_keys)
+            keys |= set(name_parser.parse(announcement_name).full_name_keys)
+            full_name_keys = sorted(keys)
         items.append(AwardCIFItem(
             unique_id=r["unique_id"],
             grant_code=r["grant_code"],
@@ -135,7 +167,8 @@ def load_items(con: duckdb.DuckDBPyConnection | None = None) -> list[AwardCIFIte
             funding_commence_year=r["funding_commence_year"],
             for_name=upgrade_for_name(r["for2008_code"], r["primary_for_name"]),
             for_code=upgrade_for_code(r["for2008_code"]) or r["for2008_code"],
-            full_name=f"{r['first_name']} {r['family_name']}",
+            full_name=full_name,
+            full_name_keys=full_name_keys,
             is_fellowship=bool(r["is_fellowship"]),
         ))
     return items

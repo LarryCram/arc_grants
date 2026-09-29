@@ -67,8 +67,17 @@ class AwardCIFItem:
     full_name_key: str | None = None
     for_name_tokens: list[str] = field(default_factory=list)
 
-    # the name parser's own full output for this item's raw name, carried whole
+    # the name parser's own full output for this item's raw name, carried whole. For a plain
+    # (non-collapsed) item, holds one ParsedName -- the sole source of full_name_keys below.
     parsed: ParsedName | None = None
+
+    # 2026-09-29: every given/nickname x family matching key this item could be found under.
+    # For an ordinary item, this is just parsed.full_name_keys. For an item collapsing a
+    # confirmed announcement/current rename (award_rename_map.parquet), this is the UNION of
+    # BOTH name forms' own parsed.full_name_keys -- "we don't know what OAX will be using"
+    # (direct instruction): full_name/unique_id/cluster_id all follow the current name only,
+    # but the matching vocabulary must still reach OpenAlex records indexed under either name.
+    full_name_keys: list[str] = field(default_factory=list)
 
     # every field-of-research entry ARC recorded for this grant, each resolved to a FOR2020
     # 4-digit group. One dict per entry: {"code": "3705", "name": "Geology",
