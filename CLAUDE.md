@@ -2814,7 +2814,38 @@ collapses combined). `tests/test_00c_extract_propensities.py`'s own stale expect
 (1,200–2,200, from the original unscoped 1,665 measurement) updated to the now-doubly-verified
 1,106. 544/544 tests passing throughout every step.
 
-## Next Priority (start of next session)
+### `manual_name_corrections.csv` emptied: two rows made fully redundant by the rename map, not merely stale
+
+Follow-on design discussion distinguishing two separate staleness questions raised by this
+session's work: **going forward**, the `00a_extract_arc.py` current-wins-fallback-to-announcement
+fix is self-correcting by construction (re-derived fresh from source every run, nothing to
+drift). **Going backward**, existing `unique_id`-keyed manual override files
+(`manual_name_corrections.csv`, `manual_orcid_corrections.csv`) needed checking against the new
+`award_rename_map.parquet`, since an announcement-side `unique_id` now gets collapsed away by
+`load_items()` and could leave an old override unreachable. Checked directly: `manual_orcid_
+corrections.csv`'s 17 rows have zero collisions; both of `manual_name_corrections.csv`'s rows do.
+
+**Resolved as removal, not key-translation** — both `LP0211975_MarieMalherbe` and
+`DP0451513_MartinNakata` are now **fully redundant**, not just stale: the rename map already
+resolves `LP0211975_MarieMalherbe -> LP0211975_FranoisMalherbe` ("Marie Malherbe" ->
+"François Malherbe" -- the missing "ç" is `_raw_unique_id()`'s regex stripping the diacritic, a
+cosmetic id artifact, not a wrong name) and `DP0451513_MartinNakata -> DP0451513_NicholasNakata`
+("Martin Nakata" -> "Nicholas Nakata") -- the exact same two corrections these rows were
+hand-written for in the first place (per their own notes: an announcement-vs-current name-form
+typo, confirmed against `raw_json.csv`). The general rename-detection mechanism now produces the
+identical outcome automatically, so the manual overrides serve no further purpose. File emptied
+to its header row alone, kept (not deleted outright) so a genuinely different future case --
+e.g. a typo within a single snapshot, which the rename map has no mechanism to catch at all --
+still has a home.
+
+**Explicit design principle, stated directly and adopted**: a "repair once" fix (correct the
+data, once, and move on) is the right response to a *one-time, bounded* cause of drift -- like
+today's rename-collapse mechanism landing, a finished, discrete change, not an ongoing process.
+This is the opposite of `cluster_id` relabeling during cyclic merging, which needs the persistent
+parent-map/`find()` mechanism (see the entry two above this one) precisely because *that* drift
+is continuous and expected to keep happening as the pipeline runs, not a one-off event to fix and
+forget. Same underlying principle -- match the fix's permanence to the cause's -- opposite
+conclusion, because the two causes have different shapes.
 Analysis pipeline complete as of 2026-06-18.
 
 **The actively-maintained, full pipeline TODO list lives in `docs/pipeline_todo.md`** (19
