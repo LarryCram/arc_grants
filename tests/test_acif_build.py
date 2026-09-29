@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
-from src.acif.models import AwardCIFItem
+from src.acif.models import AwardCIFItem, AwardsCIF
 from src.acif.build import (
     enrich_items,
     seed,
@@ -23,24 +23,34 @@ from src.acif.build import (
     load_grant_org_facts,
     _admin_orgs_canonical,
     build_stage_zero,
+    load_manual_orcid_corrections,
+    apply_manual_orcid_corrections,
+    compute_orcids,
+    _family_names_compatible,
+    merge_by_orcid,
+    render_orcid_mismatch_report,
+    UnionFind,
+    DATA_PERSISTED,
 )
+from src.utils.names import HumanNameParser
 
 
-def _item(unique_id, grant_code=None, admin_org=None, admin_orgs=None) -> AwardCIFItem:
+def _item(unique_id, grant_code=None, admin_org=None, admin_orgs=None, orcid=None,
+          full_name="John Smith") -> AwardCIFItem:
     return AwardCIFItem(
         unique_id=unique_id,
         grant_code=grant_code or unique_id.split("_")[0],
         first_name="John",
         family_name="Smith",
         role_code="CI",
-        orcid=None,
+        orcid=orcid,
         admin_org=admin_org,
         admin_orgs=admin_orgs or [],
         institution_oax_id=None,
         funding_commence_year=None,
         for_name=None,
         for_code=None,
-        full_name="John Smith",
+        full_name=full_name,
     )
 
 
@@ -204,3 +214,191 @@ class TestRenameCollapseRealData:
         rename_df = pd.read_parquet(PROCESSED_DATA / "award_rename_map.parquet")
         for current_id in set(rename_df["current_unique_id"]) & set(items):
             assert items[current_id].full_name_keys, f"{current_id} missing full_name_keys"
+
+
+def _acif(cluster_id, items) -> AwardsCIF:
+    return AwardsCIF(cluster_id=cluster_id, items=items, cycle_stages=[1])
+
+
+class TestManualOrcidCorrections:
+    def test_apply_replaces_matching_wrong_orcid(self):
+        items = [_item("DP01_JohnSmith", orcid="0000-0000-0000-0001")]
+        corrections = {"DP01_JohnSmith": ("0000-0000-0000-0001", "0000-0000-0000-0002")}
+        out = apply_manual_orcid_corrections(items, corrections)
+        assert out[0].orcid == "0000-0000-0000-0002"
+
+    def test_apply_nulls_when_correct_orcid_unknown(self):
+        items = [_item("DP01_JohnSmith", orcid="0000-0000-0000-0001")]
+        corrections = {"DP01_JohnSmith": ("0000-0000-0000-0001", None)}
+        out = apply_manual_orcid_corrections(items, corrections)
+        assert out[0].orcid is None
+
+    def test_apply_ignores_non_matching_current_orcid(self):
+        # the item's CURRENT orcid must match wrong_orcid exactly -- if it's already been
+        # corrected some other way (or never had the wrong value), leave it alone.
+        items = [_item("DP01_JohnSmith", orcid="0000-0000-0000-9999")]
+        corrections = {"DP01_JohnSmith": ("0000-0000-0000-0001", "0000-0000-0000-0002")}
+        out = apply_manual_orcid_corrections(items, corrections)
+        assert out[0].orcid == "0000-0000-0000-9999"
+
+    def test_apply_does_not_mutate_input(self):
+        items = [_item("DP01_JohnSmith", orcid="0000-0000-0000-0001")]
+        apply_manual_orcid_corrections(
+            items, {"DP01_JohnSmith": ("0000-0000-0000-0001", "0000-0000-0000-0002")},
+        )
+        assert items[0].orcid == "0000-0000-0000-0001"
+
+    def test_load_real_file_shape(self):
+        # real-data check: the actual file, not a fixture -- confirms the loader reads the real
+        # data_persisted/manual_orcid_corrections.csv correctly.
+        corrections = load_manual_orcid_corrections()
+        assert "DP150102405_WeiLiu" in corrections
+        wrong, correct = corrections["DP150102405_WeiLiu"]
+        assert wrong == "0000-0002-7409-0948"
+        assert correct is None
+
+
+class TestComputeOrcids:
+    def test_no_orcid(self):
+        acif = _acif("DP01_JohnSmith", [_item("DP01_JohnSmith", orcid=None)])
+        compute_orcids(acif)
+        assert acif.orcid_status == "NO_ORCID"
+        assert acif.orcids == []
+
+    def test_has_orcid(self):
+        acif = _acif("DP01_JohnSmith", [_item("DP01_JohnSmith", orcid="0000-0000-0000-0001")])
+        compute_orcids(acif)
+        assert acif.orcid_status == "HAS_ORCID"
+        assert acif.orcids == ["0000-0000-0000-0001"]
+
+    def test_multi_orcid(self):
+        acif = _acif("DP01_JohnSmith", [
+            _item("DP01_JohnSmith", orcid="0000-0000-0000-0001"),
+            _item("DP02_JohnSmith", orcid="0000-0000-0000-0002"),
+        ])
+        compute_orcids(acif)
+        assert acif.orcid_status == "MULTI_ORCID"
+        assert acif.orcids == ["0000-0000-0000-0001", "0000-0000-0000-0002"]
+
+    def test_recomputed_not_cached(self):
+        # calling it again after items change must reflect the new items, not the old result.
+        acif = _acif("DP01_JohnSmith", [_item("DP01_JohnSmith", orcid="0000-0000-0000-0001")])
+        compute_orcids(acif)
+        acif.items.append(_item("DP02_JaneDoe", orcid="0000-0000-0000-0002"))
+        compute_orcids(acif)
+        assert acif.orcid_status == "MULTI_ORCID"
+
+
+class TestFamilyNamesCompatible:
+    def setup_method(self):
+        self.parser = HumanNameParser()
+
+    def test_identical_names_compatible(self):
+        assert _family_names_compatible("John Smith", "John Smith", self.parser)
+
+    def test_diacritic_variant_compatible(self):
+        # real case from this session: Goetz/Götz already overlap via ParsedName's own
+        # diacritic-widened family_names, no extra handling needed here.
+        assert _family_names_compatible("Hans Goetz", "Hans Götz", self.parser)
+
+    def test_postnominal_compatible(self):
+        assert _family_names_compatible("Jane Elliott", "Jane Elliott AM", self.parser)
+
+    def test_spacing_hyphenation_compatible(self):
+        # real case from this session's own scan: "de Gier"/"deGier".
+        assert _family_names_compatible("Piet de Gier", "Piet deGier", self.parser)
+
+    def test_genuinely_different_families_incompatible(self):
+        # real confirmed conflict case: Wang/Duan.
+        assert not _family_names_compatible("Chien Ming Wang", "Wenhui Duan", self.parser)
+
+    def test_name_order_swap_not_treated_as_compatible(self):
+        # real case from this project's history (Kotagiri Ramamohanarao / Ramamohanarao
+        # Kotagiri) -- deliberately NOT caught here; needs human review, not a guess.
+        assert not _family_names_compatible(
+            "Kotagiri Ramamohanarao", "Ramamohanarao Kotagiri", self.parser,
+        )
+
+
+class TestMergeByOrcid:
+    def test_compatible_pair_merges(self):
+        acifs = [
+            _acif("DP01_JohnSmith", [_item("DP01_JohnSmith", orcid="0000-0000-0000-0001")]),
+            _acif("DP02_JohnSmith", [_item("DP02_JohnSmith", orcid="0000-0000-0000-0001")]),
+        ]
+        survivors, mismatches = merge_by_orcid(acifs, UnionFind())
+        assert len(survivors) == 1
+        assert mismatches == []
+        assert survivors[0].cluster_id == "DP01_JohnSmith"  # min() of the two ids
+        assert len(survivors[0].items) == 2
+        assert survivors[0].orcid_status == "HAS_ORCID"
+
+    def test_incompatible_pair_not_merged_and_reported(self):
+        acifs = [
+            _acif("DP01_ChienMingWang", [_item(
+                "DP01_ChienMingWang", orcid="0000-0002-8147-7673", full_name="Chien Ming Wang",
+            )]),
+            _acif("DP02_WenhuiDuan", [_item(
+                "DP02_WenhuiDuan", orcid="0000-0002-8147-7673", full_name="Wenhui Duan",
+            )]),
+        ]
+        survivors, mismatches = merge_by_orcid(acifs, UnionFind())
+        assert len(survivors) == 2  # neither merged
+        assert len(mismatches) == 1
+        assert mismatches[0]["orcid"] == "0000-0002-8147-7673"
+        assert sorted(mismatches[0]["groups"]) == [
+            ["DP01_ChienMingWang"], ["DP02_WenhuiDuan"],
+        ]
+
+    def test_no_orcid_no_merge(self):
+        acifs = [
+            _acif("DP01_JohnSmith", [_item("DP01_JohnSmith", orcid=None)]),
+            _acif("DP02_JaneDoe", [_item("DP02_JaneDoe", orcid=None)]),
+        ]
+        survivors, mismatches = merge_by_orcid(acifs, UnionFind())
+        assert len(survivors) == 2
+        assert mismatches == []
+
+    def test_shared_parent_map_used_across_calls(self):
+        # the persistent parent-map design: passing the SAME UnionFind across two calls means
+        # find() can resolve an id absorbed in the first call, from the second call onward.
+        uf = UnionFind()
+        acifs = [
+            _acif("DP01_JohnSmith", [_item("DP01_JohnSmith", orcid="0000-0000-0000-0001")]),
+            _acif("DP02_JohnSmith", [_item("DP02_JohnSmith", orcid="0000-0000-0000-0001")]),
+        ]
+        merge_by_orcid(acifs, uf)
+        assert uf.find("DP02_JohnSmith") == "DP01_JohnSmith"
+
+    def test_render_report_mentions_both_names(self):
+        mismatches = [{
+            "orcid": "0000-0002-8147-7673",
+            "groups": [["DP01_ChienMingWang"], ["DP02_WenhuiDuan"]],
+            "names": {"DP01_ChienMingWang": "Chien Ming Wang", "DP02_WenhuiDuan": "Wenhui Duan"},
+        }]
+        text = render_orcid_mismatch_report(mismatches)
+        assert "Chien Ming Wang" in text
+        assert "Wenhui Duan" in text
+
+
+class TestManualOrcidCorrectionsPreventsWrongMerge:
+    """Integration test: applying the REAL manual_orcid_corrections.csv before merge_by_orcid()
+    must prevent the exact wrong merge this session found by hand (two different real "Wei Liu"s
+    wrongly sharing one ORCID). Built as a real, automated test per direct instruction -- not
+    re-verified by a throwaway script each time."""
+
+    def test_wei_liu_case_not_merged_after_correction(self):
+        wrong_orcid = "0000-0002-7409-0948"
+        items = [
+            _item("DP150102405_WeiLiu", orcid=wrong_orcid, full_name="Wei Liu"),
+            _item("LP0218928_WeiLiu", orcid=wrong_orcid, full_name="Wei Liu"),
+        ]
+        corrections = load_manual_orcid_corrections()  # the real, current file
+        corrected = apply_manual_orcid_corrections(items, corrections)
+        assert corrected[0].orcid is None  # the Sydney record's wrong orcid is nulled
+        assert corrected[1].orcid == wrong_orcid  # the genuine RMIT record is untouched
+
+        acifs = [_acif(it.unique_id, [it]) for it in corrected]
+        survivors, mismatches = merge_by_orcid(acifs, UnionFind())
+        assert len(survivors) == 2  # NOT merged, unlike the uncorrected case
+        assert mismatches == []  # no orcid shared between them anymore -- nothing to flag either

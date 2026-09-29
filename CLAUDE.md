@@ -2846,6 +2846,74 @@ parent-map/`find()` mechanism (see the entry two above this one) precisely becau
 is continuous and expected to keep happening as the pipeline runs, not a one-off event to fix and
 forget. Same underlying principle -- match the fix's permanence to the cause's -- opposite
 conclusion, because the two causes have different shapes.
+
+## ORCID merge test built for the cyclic ACIF rebuild; `manual_orcid_corrections.csv` finally wired into `load_items()`; a real Wei Liu conflict confirmed and closed (2026-09-29)
+
+Direct continuation of the cyclic ACIF rebuild, the first actual merge test in `src/acif/build.py`
+(`seed()`'s singleton ACIFs were the only thing built before this).
+
+**`merge_by_orcid()`**: groups seeded ACIFs by exact ORCID (`HAS_ORCID` only -- an ACIF with
+`MULTI_ORCID`/`NO_ORCID` can't participate in an ORCID-based merge test at all), then, within
+each ORCID group, partitions further by pairwise family-name compatibility via
+`_family_names_compatible()` (built on `HumanNameParser`/`ParsedName.family_names`, which already
+carries diacritic-widened variants -- deliberately not a raw-string comparison, to avoid exactly
+the noise a first, cruder scan produced, see below). A group that fully agrees merges (via
+`UnionFind`, survivor `cluster_id = min(unique_id)` per the tie-break design settled in the plan
+file two sessions ago); a group that splits is never guessed at -- it's recorded as a mismatch and
+left unmerged, surfaced through `render_orcid_mismatch_report()` for human review. This report
+generator falls directly out of the same grouping logic the merge itself needs, rather than being
+a separate tool -- the two were built together on purpose, per direct instruction, in place of
+verifying the merge function via one-off interactive scripts.
+
+`UnionFind.parent` is the persistent map settled on two sessions ago: `find()` on it is what makes
+"where did this old id go" resolution free, with no need to port the old pipeline's
+`resolve_cluster_id()`. `compute_orcids()` recomputes `AwardsCIF.orcids`/`orcid_status` fresh from
+current members every time it's called -- never cached across merges, per the cyclic-build's own
+"recompute bottom-up, don't incrementally patch" principle already applied to `for2020_codes`/
+`inst_arr` elsewhere in this rebuild.
+
+**A real conflict found and closed**: an early, uncorrected run of `merge_by_orcid()` over real
+data wrongly merged two different real "Wei Liu"s under a shared ORCID
+(`0000-0002-7409-0948`) -- `DP150102405_WeiLiu` and `LP0218928_WeiLiu` share an identical full
+name, so family-name compatibility alone cannot tell them apart; this is the same structural blind
+spot already named elsewhere in this project (a same-full-name collision under a wrongly-recorded
+shared ORCID). `data_persisted/manual_orcid_corrections.csv` already had a hand-written row for
+this exact case from an earlier session, but **nothing in the codebase had ever actually loaded and
+applied it** -- confirmed by direct inspection, not assumed: the file existed, the fix it encodes
+had been verified once in an ad hoc script and then never wired in.
+
+**Fixed properly**: `load_manual_orcid_corrections()` (reads `unique_id -> (wrong_orcid,
+correct_orcid_or_None)` from the CSV) and `apply_manual_orcid_corrections()` (replaces an item's
+`orcid` via `dataclasses.replace()` only when it exactly matches the recorded wrong value) added to
+`src/acif/build.py` and wired into `load_items()`'s own return statement, so every item is
+corrected before any merge test ever sees it -- not a workaround applied after the fact. Verified
+via a real test proving the correction actually prevents the wrong merge end to end
+(`TestManualOrcidCorrectionsPreventsWrongMerge::test_wei_liu_case_not_merged_after_correction`):
+loads the real, current `manual_orcid_corrections.csv`, applies it to the two real Wei Liu items,
+confirms the wrong ORCID is nulled on exactly the one row the CSV names, then runs `merge_by_orcid()`
+and confirms both survive as separate ACIFs with zero mismatches reported.
+
+**Process correction, stated directly and acted on**: prior verification of `merge_by_orcid()` had
+been done entirely via throwaway `python -c` scripts, and the manual-correction loader had been
+discussed and never actually built despite believing otherwise -- both corrected this session per
+direct instruction to stop verifying new code in sandboxes and build real, committed, automated
+tests instead. `tests/test_acif_build.py` gained `TestManualOrcidCorrections` (5 tests, including
+a shape check against the real file), `TestComputeOrcids` (4), `TestFamilyNamesCompatible` (6,
+calibrated against real historical cases -- Goetz/Götz diacritic widening, Elliott/"Elliott AM"
+postnominal stripping, "de Gier"/"deGier" spacing, the genuine Wang/Duan conflict, and Kotagiri
+Ramamohanarao/Ramamohanarao Kotagiri correctly staying incompatible despite sharing both tokens --
+a name-order swap is not the same relationship as a real match), `TestMergeByOrcid` (5), and the
+Wei-Liu-prevention integration test above. 565/565 tests passing (full suite, `tests/` +
+`analysis/tests/`, excluding `ZARCHIVE/`).
+
+**Explicitly not fixed, accepted as a residual limitation**: ORCID+family-name compatibility
+cannot, in principle, distinguish two different real people who share both an identical full name
+and a wrongly-recorded shared ORCID -- only individually-discovered instances (like Wei Liu here,
+and the Chien Ming Wang/Tracey Bunda/Enid Gallagher cases already in the same CSV from earlier
+sessions) are closed, one at a time, via `manual_orcid_corrections.csv`. No general code fix closes
+this class of case; it isn't the kind of thing a general fix could close.
+
+## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
 
 **The actively-maintained, full pipeline TODO list lives in `docs/pipeline_todo.md`** (19

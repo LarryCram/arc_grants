@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from collections import defaultdict
 from dataclasses import replace
 from pathlib import Path
@@ -67,6 +68,53 @@ def _admin_orgs_canonical() -> tuple[set[str], dict[str, str], dict[str, str]]:
     return hep_admin_org_aliases, alias_to_hep_code, alias_to_institution_id
 
 
+DATA_PERSISTED = Path(__file__).resolve().parents[2] / "data_persisted"
+
+
+def load_manual_orcid_corrections(
+    path: Path | None = None,
+) -> dict[str, tuple[str, str | None]]:
+    """unique_id -> (wrong_orcid, correct_orcid_or_None) from
+    data_persisted/manual_orcid_corrections.csv. Pure I/O, kept separate from
+    apply_manual_orcid_corrections() so the actual correction logic is directly testable against
+    a small hand-built dict, not real file I/O."""
+    path = path or (DATA_PERSISTED / "manual_orcid_corrections.csv")
+    if not path.exists():
+        return {}
+    out: dict[str, tuple[str, str | None]] = {}
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            uid = row["unique_id"].strip()
+            wrong = row["wrong_orcid"].strip()
+            correct = row["correct_orcid"].strip() or None
+            if uid and wrong:
+                out[uid] = (wrong, correct)
+    return out
+
+
+def apply_manual_orcid_corrections(
+    items: list[AwardCIFItem], corrections: dict[str, tuple[str, str | None]],
+) -> list[AwardCIFItem]:
+    """Apply data_persisted/manual_orcid_corrections.csv: for any item whose unique_id is a key
+    and whose CURRENT orcid matches the recorded wrong_orcid, replace it with correct_orcid (or
+    None if blank -- "field nulled, not substituted," this project's own established convention
+    when the true correct ORCID for a wrongly-labeled person isn't independently known).
+
+    Applied inside load_items(), before any merge test ever runs, so the bad evidence never gets
+    a chance to cause a wrong merge in the first place -- confirmed necessary directly, not just
+    in theory: without this, merge_by_orcid() silently merges two different real "Wei Liu"s
+    (DP150102405, wrongly carrying the RMIT Wei Liu's own ORCID) into one ACIF, since a
+    family-name compatibility check has no way to distinguish two different people who happen to
+    share an identical full name."""
+    out = []
+    for item in items:
+        correction = corrections.get(item.unique_id)
+        if correction and item.orcid == correction[0]:
+            item = replace(item, orcid=correction[1])
+        out.append(item)
+    return out
+
+
 def load_items(con: duckdb.DuckDBPyConnection | None = None) -> list[AwardCIFItem]:
     """Raw ARC facts only -- investigators_raw.parquet joined to grants_flat.parquet and
     grant_summaries.csv, filtered to KEEP_ROLES / KEEP_SCHEMES / genuine-HEP admin_org (the same
@@ -80,8 +128,9 @@ def load_items(con: duckdb.DuckDBPyConnection | None = None) -> list[AwardCIFIte
     family_name_main, first_initial, first_name_canonical, full_name_key, for_name_tokens,
     parsed, for2020_codes, hep_codes, inst_ids, for_name_rarity, single_institution_grant,
     institution_rarity) -- name parsing, FOR2020 resolution, HEP/institution-set derivation,
-    manual name/ORCID correction application, and 00c_extract_propensities.py attachment are
-    each their own later step, not folded in here.
+    and 00c_extract_propensities.py attachment are each their own later step, not folded in here.
+    manual_orcid_corrections.csv IS applied here, though (see apply_manual_orcid_corrections()),
+    since it must happen before any merge test ever sees the data.
 
     admin_orgs (2026-09-28 finding, confirmed by the grant's own former CI): admin_org alone
     silently drops the at-award institution whenever it differs from the current one (a fellow
@@ -171,7 +220,7 @@ def load_items(con: duckdb.DuckDBPyConnection | None = None) -> list[AwardCIFIte
             full_name_keys=full_name_keys,
             is_fellowship=bool(r["is_fellowship"]),
         ))
-    return items
+    return apply_manual_orcid_corrections(items, load_manual_orcid_corrections())
 
 
 def load_grant_for2020_codes() -> dict[str, list[dict]]:
@@ -293,3 +342,174 @@ def seed(items: list[AwardCIFItem]) -> list[AwardsCIF]:
         AwardsCIF(cluster_id=item.unique_id, items=[item], cycle_stages=[1])
         for item in items
     ]
+
+
+class UnionFind:
+    """Path-compressing union-find over cluster_id strings. `parent` is meant to be a
+    PERSISTED, ever-accumulating map (2026-09-29 design decision, plan-that-in-tiny-immutable-
+    heron.md's "One index, not two" section): once an id has been absorbed, find() recovers its
+    current representative in one or two hops, no population-wide grant_ids scan ever needed --
+    the old pipeline's resolve_cluster_id() does NOT need porting into this package because of
+    this. Pass the same `parent` dict across every stage/every merge test to keep it complete."""
+
+    def __init__(self, parent: dict[str, str] | None = None):
+        self.parent: dict[str, str] = parent if parent is not None else {}
+
+    def find(self, x: str) -> str:
+        self.parent.setdefault(x, x)
+        while self.parent[x] != x:
+            self.parent[x] = self.parent[self.parent[x]]  # path compression
+            x = self.parent[x]
+        return x
+
+    def union(self, a: str, b: str) -> str:
+        """Survivor = min() of the two representatives (2026-09-29 settled tie-break -- any
+        deterministic, order-independent rule is equally correct, plain min() is simplest)."""
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb:
+            return ra
+        survivor, absorbed = (ra, rb) if ra < rb else (rb, ra)
+        self.parent[absorbed] = survivor
+        return survivor
+
+
+def compute_orcids(acif: AwardsCIF) -> None:
+    """Recompute orcids/orcid_status fresh from an ACIF's CURRENT items, mutating in place --
+    never cached across stages. No individual item's own orcid ever changes, but which items
+    currently belong to this ACIF can, so the aggregate must be recomputed every time it's
+    needed, per the plan's "recompute bottom-up, never patch" principle."""
+    distinct = sorted({it.orcid for it in acif.items if it.orcid})
+    acif.orcids = distinct
+    acif.orcid_status = (
+        "MULTI_ORCID" if len(distinct) > 1 else
+        "HAS_ORCID" if len(distinct) == 1 else
+        "NO_ORCID"
+    )
+
+
+def _family_names_compatible(name_a: str, name_b: str, parser: HumanNameParser) -> bool:
+    """Are these two full names' family names plausibly the same person's? Two independent
+    checks, either sufficient:
+    1. HumanNameParser's own ParsedName.family_names -- already diacritic-widened
+       (diacritic_variants()) and already benefits from HumanName's native postnominal/
+       maiden-name handling -- so "Goetz"/"Götz" and "Elliott"/"Elliott AM" already overlap
+       without any extra work here.
+    2. A spacing/hyphenation-insensitive fallback (strip every non-alphanumeric character,
+       lowercase) -- diacritic_variants() does NOT normalize whitespace, so "de Gier"/"deGier"
+       or "Prieto Simon"/"Prieto-Simon" would otherwise wrongly disagree.
+    Deliberately does NOT catch a given/family name-order swap (e.g. "Kotagiri Ramamohanarao"/
+    "Ramamohanarao Kotagiri") or a compound-vs-bare surname ("Smith"/"Smith-Miles") -- both are
+    real, confirmed patterns in this project's own history, and both need human judgement, not
+    a guess (matching every other "don't guess, defer" mechanism already established here)."""
+    pa, pb = parser.parse(name_a), parser.parse(name_b)
+    if set(pa.family_names) & set(pb.family_names):
+        return True
+    def _strip(s: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", s.lower())
+    a_stripped = {_strip(f) for f in pa.family_names} - {""}
+    b_stripped = {_strip(f) for f in pb.family_names} - {""}
+    return bool(a_stripped & b_stripped)
+
+
+def merge_by_orcid(
+    acifs: list[AwardsCIF], uf: UnionFind,
+) -> tuple[list[AwardsCIF], list[dict]]:
+    """First real merge test: group ACIFs sharing an identical ORCID. Auto-merges a group only
+    when EVERY pairwise family-name comparison inside it is compatible; any group that doesn't
+    fully agree is left unmerged entirely and reported instead -- "don't guess, defer to human
+    review," the same discipline already established for every other ORCID-conflict mechanism
+    in this project (matching the real, confirmed conflict cases this exact check is built to
+    catch: Wang/Duan, Bunda/Lasczik, Curran/Gallagher).
+
+    orcids/orcid_status are recomputed fresh for every ACIF first (see compute_orcids()) --
+    required even though ORCID itself never changes, since which items an ACIF currently holds
+    can change between stages.
+
+    Returns (updated_acifs, orcid_name_mismatches). The second list IS the reusable report this
+    function's own grouping step naturally produces -- one entry per ORCID whose current members
+    didn't all agree on family name, with the sub-groups and names needed to review it, rather
+    than a separate ad hoc diagnostic re-deriving the same grouping logic with cruder tools.
+
+    Only compares each ACIF's first item's own full_name -- correct for singletons (the only
+    case that exists today, since this is the first merge test ever run), but a simplification
+    whoever extends this to multi-item ACIFs will need to widen (e.g. any-pair-compatible across
+    both sides' full item lists, not just one representative name each)."""
+    parser = HumanNameParser()
+    for acif in acifs:
+        compute_orcids(acif)
+
+    by_orcid: dict[str, list[AwardsCIF]] = defaultdict(list)
+    for acif in acifs:
+        if acif.orcid_status == "HAS_ORCID":
+            by_orcid[acif.orcids[0]].append(acif)
+
+    mismatches: list[dict] = []
+    to_merge: list[tuple[str, str]] = []
+
+    for orcid, group in by_orcid.items():
+        if len(group) < 2:
+            continue
+        local = UnionFind()  # throwaway, scoped to partitioning just this one orcid's group
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                name_a = group[i].items[0].full_name
+                name_b = group[j].items[0].full_name
+                if _family_names_compatible(name_a, name_b, parser):
+                    local.union(group[i].cluster_id, group[j].cluster_id)
+
+        sub_groups: dict[str, list[AwardsCIF]] = defaultdict(list)
+        for acif in group:
+            sub_groups[local.find(acif.cluster_id)].append(acif)
+
+        if len(sub_groups) > 1:
+            mismatches.append({
+                "orcid": orcid,
+                "groups": sorted(
+                    sorted(a.cluster_id for a in sub) for sub in sub_groups.values()
+                ),
+                "names": {a.cluster_id: a.items[0].full_name for a in group},
+            })
+            continue
+
+        acif_ids = [a.cluster_id for a in group]
+        for other in acif_ids[1:]:
+            to_merge.append((acif_ids[0], other))
+
+    if not to_merge:
+        return acifs, mismatches
+
+    for a, b in to_merge:
+        uf.union(a, b)
+
+    grouped: dict[str, list[AwardsCIF]] = defaultdict(list)
+    for acif in acifs:
+        grouped[uf.find(acif.cluster_id)].append(acif)
+
+    survivors: list[AwardsCIF] = []
+    for root, members in grouped.items():
+        if len(members) == 1:
+            survivors.append(members[0])
+            continue
+        merged_items = [it for m in members for it in m.items]
+        cluster_id = min(it.unique_id for it in merged_items)
+        cycle_stages = sorted({s for m in members for s in m.cycle_stages})
+        survivor = AwardsCIF(cluster_id=cluster_id, items=merged_items, cycle_stages=cycle_stages)
+        compute_orcids(survivor)
+        survivors.append(survivor)
+
+    return survivors, mismatches
+
+
+def render_orcid_mismatch_report(mismatches: list[dict]) -> str:
+    """Plain-text rendering of merge_by_orcid()'s own mismatch report -- for human review, not
+    a separate diagnostic script re-deriving the same grouping logic."""
+    if not mismatches:
+        return "No ORCID/name mismatches found."
+    lines = [f"{len(mismatches)} ORCID(s) shared across incompatible family names:\n"]
+    for m in mismatches:
+        lines.append(f"ORCID {m['orcid']}:")
+        for group in m["groups"]:
+            names = ", ".join(f"{cid} ({m['names'][cid]})" for cid in group)
+            lines.append(f"  - {names}")
+        lines.append("")
+    return "\n".join(lines)
