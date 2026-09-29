@@ -338,3 +338,40 @@ class TestMaidenNameHandling:
         r = self.p.parse("William (Bill) Harley")
         assert "bill" not in r.family_names
         assert "bill" in r.nickname_tokens
+
+
+class TestTupleInputAndCompactFamilyForms:
+    """parse((first, family)) keeps ARC's own family field as the surname; every family name also
+    carries its compact form (spaces, hyphens, apostrophes, underscores removed). 2026-09-29, from
+    real ARC variants of one person's surname (checked against the raw JSON)."""
+
+    def setup_method(self):
+        self.p = HumanNameParser()
+
+    def test_tuple_keeps_compound_surname(self):
+        assert self.p.parse(("Beatriz", "Prieto Simon")).family_name_main == "prieto simon"
+
+    def test_string_still_parses_by_position(self):
+        # HumanName has no compound-surname rule in "First ... Last" order
+        assert self.p.parse("Beatriz Prieto Simon").family_name_main == "simon"
+
+    def test_comma_inside_family_field(self):
+        assert self.p.parse(("Anthony", "Kinloch FRS, FREng")).full_name_key == "anthony_kinloch"
+
+    @pytest.mark.parametrize("first,a,b", [
+        ("David", "St John", "StJohn"),
+        ("Jan", "de Gier", "DeGier"),
+        ("Sarah", "O' Shea", "O'Shea"),
+        ("Harald", "van Heerde", "van_Heerde"),
+        ("Beatriz", "Prieto Simon", "Prieto-Simon"),
+        ("Taha", "Hossein Rashidi", "HosseinRashidi"),
+    ])
+    def test_separator_variants_share_a_key(self, first, a, b):
+        ka = set(self.p.parse((first, a)).full_name_keys)
+        kb = set(self.p.parse((first, b)).full_name_keys)
+        assert ka & kb
+
+    def test_compact_form_is_additive(self):
+        r = self.p.parse(("Jan", "de Gier"))
+        assert r.full_name_key == "jan_de gier"
+        assert r.family_names == ("de gier", "degier")

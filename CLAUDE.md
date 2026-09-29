@@ -11,6 +11,8 @@ Link ARC Chief Investigators/Fellows (CIFs) to their OpenAlex author records for
 ## Pipeline Architecture (Splink-based)
 ```
 00_extract_arc.py       → grants_flat.parquet, investigators_raw.parquet
+                           (now 00a_extract_arc.py; also arc_names.parquet + arc_name_renames.parquet --
+                           the ONLY place ARC names are parsed, 2026-09-29, see dated entry)
 01_prepare_arc.py       → arc_investigators_prep.parquet, arc_persons.parquet
                            (ARC name/inst/FOR prep + Splink dedupe_only: 65k rows → 23,056 persons)
 02_prepare_oax.py       → openalex_authors_prep.parquet, oax_tf_*.parquet
@@ -2912,6 +2914,110 @@ and a wrongly-recorded shared ORCID -- only individually-discovered instances (l
 and the Chien Ming Wang/Tracey Bunda/Enid Gallagher cases already in the same CSV from earlier
 sessions) are closed, one at a time, via `manual_orcid_corrections.csv`. No general code fix closes
 this class of case; it isn't the kind of thing a general fix could close.
+
+## ARC names parsed once, in `00a_`; ids from `NameParser()`; parser takes (first, family) and adds compact family forms; `manual_*.csv` rekeyed (2026-09-29)
+
+**Rule, stated repeatedly by the user and now enforced by structure:** the ONLY source of truth
+for anything about a person's name is `HumanNameParser().parse()`. ARC names are parsed exactly
+once, in `00a_extract_arc.py`, and written to `arc_names.parquet`; nothing else parses an ARC
+name or builds a name form of its own. This session broke that rule several times before getting
+here -- a private regex-strip comparison (`_family_names_compatible()`, now removed), a new
+`name_id()` method with its own concatenation/regex/fallbacks (reverted), a pre-parse "nee"
+patch (reverted), and testing nameparser's `HumanName` directly with hand-built strings instead
+of calling `NameParser()` -- each a second name implementation next to the parser.
+
+**What was wrong before:**
+- The name part of every `unique_id` (e.g. `DP0988563_JanDeGier`) was minted by a plain regex on
+  ARC's raw strings in `00a_`, never by the parser -- so "Jan DeGier" and "Jan de Gier" (one
+  person, same ORCID, same grant) got two ids.
+- `00c_extract_propensities.py::build_award_rename_map()` joined announcement/current name pairs
+  with a "one name dropped + one name added on a grant = the same person" rule that ignored the
+  names entirely. On a multi-investigator grant that is usually a membership change: moving the
+  rule into `00a_` and printing the events showed "Jessica Hyles -> Ben Trevaskis", "Paul Young ->
+  Daniela Traini", "Ute Roessner -> Ulrike Mathesius". `load_items()` had been merging these.
+- The parser was called with "First Family" joined into one string, throwing away ARC's own
+  first/family split. HumanName has no compound-surname rule in that order -- it is positional
+  (last word = surname, words between = middle, except its fixed particle list de/van/la/st/...),
+  so "Beatriz Prieto Simon" parsed as middle `Prieto`, last `Simon`. Checked against the raw JSON:
+  ARC's `familyName` field always holds the whole surname (Prieto Simon, Lee Koo, Banivanua Mar,
+  Hossein Rashidi, Afaghi Khatibi, Aminorroaya Yamini, Wilson Rajaratnam, Lê Cao, La Caze, ...).
+
+**What changed:**
+- `names.py` (`HumanNameParser`):
+  - `parse()` / `_structural()` accept one string (OpenAlex `display_name`, parsed by position as
+    before) or a `(first, family)` tuple (ARC), handed to HumanName as "Family, First" so ARC's
+    split is kept. Commas inside a field are removed first (`Kinloch FRS, FREng`, which HumanName
+    would otherwise read as a second separator).
+  - `_with_compact_forms()`: every family name also carries its compact form (spaces, hyphens,
+    apostrophes, underscores removed), so separator variants of one surname share a key: "St
+    John"/"StJohn", "van Swinderen"/"vanSwinderen", "de Gier"/"DeGier", "O' Shea"/"O'Shea",
+    "Prieto Simon"/"Prieto-Simon", "van Heerde"/"van_Heerde" -- all real ARC variants of one
+    person. Additive only: compact forms are never longer, so `family_name_main`/`full_name_key`
+    (and ids) are unchanged by it. Chosen over hand-listing variants (the spelling table first
+    planned) because ORCID covers only ~40% of records: a rule derived from the found cases also
+    covers people with no evidence, a per-case list can't.
+- `00a_extract_arc.py::extract_investigators()` -- the only ARC loader and only ARC name parse:
+  - every name parsed once with `parse((first_name, family_name))`; id = `grant_code + "_" +
+    full_name_key` (`full_name_key_raw` if empty, per ParsedName's contract). Ids now look like
+    `DP0988563_jan_de gier` (the parser's key, space included).
+  - announcement and current names are the same investigator when they have the same id, or
+    their `full_name_keys` overlap one-to-one (e.g. "Mahmuda Akhtar"/"M. Shumi Akhtar" share
+    `m_akhtar`; an announcement name overlapping 2+ current names is left unmerged). Everything
+    else is an addition or deletion.
+  - new outputs: `arc_names.parquet` (per id: the parser's fields, `full_name_keys` unioned over
+    every raw form, `name_forms`, `in_announcement`/`in_current`, `renamed_from`) and
+    `arc_name_renames.parquet` (each merge with its `shared_keys`); the profile reports counts.
+  - first/family name now prefer current too (with title/role/is_fellowship); ORCID precedence
+    unchanged (announcement first, backfilled from current).
+  - Run: 120,879 investigator rows; 1,334 renames (e.g. Susan->Sue Walker, Timothy->Tim Stinear,
+    Daniel->Danielle Navarro, Chunhui->Richard (Chunhui) Yang); 6,664 deletions; 4,650 additions.
+- `00c_extract_propensities.py`: `build_award_rename_map()` and its regex id copy
+  `_raw_unique_id()` removed -- `00c_` touches no ARC names. `award_rename_map.parquet` is now
+  orphaned on disk (nothing reads it).
+- `src/acif/build.py`: `load_items()` reads `full_name_keys` from `arc_names.parquet` (no parsing,
+  no rename handling); `merge_by_orcid()` compares `full_name_keys` (groups linked A-B-C merge)
+  instead of the removed `_family_names_compatible()`.
+- `manual_*.csv` + `enrichment_blocklist.csv` rekeyed once to the new ids -- id tokens only, every
+  other byte (CRLF, quoting, notes) kept; the old regex used only to decode the old key format in
+  that one-off migration. 0 unmapped, 0 ambiguous keys referenced. 9 hand merges in
+  `manual_merges.csv` removed as redundant -- the parser now joins those same-grant name forms
+  itself (Geoff/Geoffrey Shaw, Jeff/Jeffrey Richardson, "A Guyan Robertson", Yingzi (Jenny) Wang,
+  Harold "Hatch" Stokes, Jenny/Jennifer Hammond, Rob/Robert McQueen, Yafeng Yang, Su-Ming Zhu).
+- Tests: new `tests/test_00a_extract_arc.py` (7: same name, overlap rename, spelling variant,
+  different people not merged, ambiguous left alone, role/ORCID precedence, compound surname);
+  `tests/test_names.py::TestTupleInputAndCompactFamilyForms`; `test_acif_build.py` moved to
+  parser ids and `full_name_keys` fixtures; `test_00c`'s rename-map tests removed. 573/573 pass.
+
+**In-scope ORCID self-compare after the change** (`merge_by_orcid()` on `build_stage_zero()`):
+63,097 in-scope items -> 41,835 ACIFs; **89 ORCIDs left unmerged** because their ids'
+`full_name_keys` don't link. Every spelling case the change targeted is gone (St John, van
+Swinderen, O'Shea, Prieto Simon, Hossein Rashidi, Lee Koo, Lê Cao, de Gier). Up from the earlier
+29 because the old name-blind rename rule had been gluing many of these together (and merging
+different people). Remaining groups:
+- short vs compound surname (~25): Smith/Smith-Miles, Fry/Fry-McKibbin, Tovar/Tovar-Lopez,
+  Hirsch/Greatley-Hirsch, Buzatto/Alves Buzatto, Aguero/Aguero Vasquez, Tabor/Lew-Tabor, ... --
+  a pattern a parser rule could cover, but it would widen matching for everyone (Kate Smith-Miles
+  would then match any Kate Smith); **decision pending**.
+- same surname, different given name (~35): nicknames (Bob/Robert Hall, Bill/William Palmer,
+  Libby/Elizabeth Rumpff, Tony/Antony Bacic), other given forms (Trevor/David Waite, Jane/Rosemary
+  Elith, André/Floris van Schaik), and likely wrong ORCIDs (Anne/Daniel Harris, Ann/Heather Evans,
+  Fenghua/Mary She).
+- different surname, mostly marriage (~22): Ford/Marsh, Seton/Sdrolias, Vallmuur/McKenzie,
+  Meade/Covic, Cripps/Wood, Pietsch/Clark.
+- one-offs: Bagirov/Baghirov, Mueller/Muller, Wiesel/Vizel (spelling); Ranjith/Pathegama and
+  Kotagiri/Ramamohanarao (name order); Clare Murphy's unbracketed "nee Paton-Walsh" (the
+  bracketed form is handled, the bare one isn't).
+
+**Regression, caused earlier this session:** Marie/François Malherbe and Martin/Nicholas Nakata
+are split again. `manual_name_corrections.csv` was emptied because the old rename rule covered
+them; their parsed keys don't overlap, so the new rule doesn't.
+
+**Not done:** the old production pipeline (`01_prepare_arc.py`, `awards_cif.py` -- which still
+has its own `_name_forms()` parsing) was not rerun against the new ids; its persisted outputs are
+stale. Candidates for hand review come from two parser-output-only sources: the in-scope ORCID
+self-compare (above) and in-scope same-grant splits (722 grants with exactly one unmatched name
+at announcement and one in current whose keys don't overlap -- mostly genuine membership
+changes).
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.

@@ -266,6 +266,19 @@ class ParsedName:
 
 _RAW_SPLIT = re.compile(r"[\s\-]+")
 
+# Separators ARC's own family-name field varies on for one person (confirmed 2026-09-29 against the
+# raw JSON: "St John"/"StJohn", "van Swinderen"/"vanSwinderen", "de Gier"/"DeGier", "Prieto Simon"/
+# "Prieto-Simon", "O' Shea"/"O'Shea", "van Heerde"/"van_Heerde").
+_FAMILY_SEPARATORS = re.compile(r"[\s\-'_]+")
+
+
+def _with_compact_forms(family_names: tuple[str, ...]) -> tuple[str, ...]:
+    """Each family name plus its compact form (spaces, hyphens, apostrophes, underscores removed),
+    so every separator variant of one surname shares a form: "de gier" and "degier" both carry
+    "degier". Additive only -- every existing form is kept, and compact forms are never longer, so
+    family_name_main/full_name_key are unchanged."""
+    return tuple(dict.fromkeys(family_names + tuple(_FAMILY_SEPARATORS.sub("", f) for f in family_names)))
+
 # Matches a leading "nee"/"née" maiden-name marker, capturing the former surname that follows --
 # see HumanNameParser._maiden_name()'s own docstring for why this needs to be distinguished from
 # a genuine given-name nickname before either is incorporated.
@@ -321,14 +334,28 @@ class HumanNameParser:
             return (stripped,) if stripped else ()
         return self.diacritic_variants(s)
 
-    def _structural(self, raw_name: str) -> HumanName | None:
+    def _structural(self, name: str | tuple[str | None, str | None]) -> HumanName | None:
         """canonicalize -> HumanName parse (postnominal suffixes handled natively via the
         CONSTANTS.suffix_acronyms registration above, no pre-stripping) -> single-token-name
         fallback. The one place this sequence is implemented; every method below builds on
-        this."""
-        if not raw_name:
+        this.
+
+        `name` is either one string (e.g. OpenAlex display_name -- HumanName decides the
+        given/family split by position) or a (first, family) tuple (ARC's own separate fields).
+        A tuple is handed to HumanName as "Family, First", so ARC's split is kept: HumanName has
+        no compound-surname rule in "First ... Last" order ("Beatriz Prieto Simon" -> middle
+        Prieto, last Simon; confirmed 2026-09-29), but in comma order the whole family field is
+        the surname ("Prieto Simon, Beatriz" -> last "Prieto Simon"). Commas inside a field are
+        removed first -- ARC has "Kinloch FRS, FREng", which HumanName would read as a second
+        separator."""
+        if isinstance(name, tuple):
+            first, family = (self.canonicalize(part or "").replace(",", " ").strip() for part in name)
+            raw = f"{family}, {first}" if family and first else (family or first)
+        else:
+            raw = self.canonicalize(name) if name else ""
+        if not raw:
             return None
-        hn = HumanName(self.canonicalize(raw_name))
+        hn = HumanName(raw)
         if not hn.last and hn.first:
             # A bare, title-less single-word name (e.g. "Smith") is nameparser's own default
             # given-name guess -- moved to .last since this project's matching is surname-
@@ -372,8 +399,9 @@ class HumanNameParser:
         m = _NEE_RE.match(nick.strip())
         return m.group(1) if m else None
 
-    def parse(self, raw_name: str) -> ParsedName:
-        """Full chain -> ParsedName, both the ASCII-reduced and non-ASCII raw representations."""
+    def parse(self, raw_name: str | tuple[str | None, str | None]) -> ParsedName:
+        """Full chain -> ParsedName, both the ASCII-reduced and non-ASCII raw representations.
+        raw_name: one string, or a (first, family) tuple -- see _structural()."""
         hn = self._structural(raw_name)
         if hn is None:
             return ParsedName(
@@ -401,7 +429,7 @@ class HumanNameParser:
             tok for variant in self._given_name_diacritic_variants(hn.middle) for tok in name_part_tokens(variant)
         ] if hn.middle else []
         given_ascii = first_tokens + middle_tokens
-        family_names = self.diacritic_variants(hn.last) if hn.last else ()
+        family_names = _with_compact_forms(self.diacritic_variants(hn.last)) if hn.last else ()
         family_name_main = max(family_names, key=len) if family_names else None
         # Fallback for a last-name-only input (HumanName found no first/middle at all): use the
         # family name's own first letter as a stand-in given-name token, so given_tokens isn't
@@ -435,7 +463,7 @@ class HumanNameParser:
         # own docstring for why nameparser can't tell these apart on its own.
         maiden = self._maiden_name(hn)
         if maiden:
-            family_names = tuple(dict.fromkeys(family_names + self.diacritic_variants(maiden)))
+            family_names = tuple(dict.fromkeys(family_names + _with_compact_forms(self.diacritic_variants(maiden))))
             nick = None
         else:
             nick = self._guarded_nickname(hn)

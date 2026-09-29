@@ -26,17 +26,15 @@ from src.acif.build import (
     load_manual_orcid_corrections,
     apply_manual_orcid_corrections,
     compute_orcids,
-    _family_names_compatible,
     merge_by_orcid,
     render_orcid_mismatch_report,
     UnionFind,
     DATA_PERSISTED,
 )
-from src.utils.names import HumanNameParser
 
 
 def _item(unique_id, grant_code=None, admin_org=None, admin_orgs=None, orcid=None,
-          full_name="John Smith") -> AwardCIFItem:
+          full_name="John Smith", full_name_keys=("john_smith", "j_smith")) -> AwardCIFItem:
     return AwardCIFItem(
         unique_id=unique_id,
         grant_code=grant_code or unique_id.split("_")[0],
@@ -51,6 +49,7 @@ def _item(unique_id, grant_code=None, admin_org=None, admin_orgs=None, orcid=Non
         for_name=None,
         for_code=None,
         full_name=full_name,
+        full_name_keys=list(full_name_keys),
     )
 
 
@@ -129,7 +128,7 @@ class TestLoadItemsRealData:
 
     def test_known_item(self):
         items = {it.unique_id: it for it in load_items()}
-        it = items["DE120100016_KhoaNguyen"]
+        it = items["DE120100016_khoa_nguyen"]
         assert it.admin_org == "University of South Australia"
         assert it.for_code == "4613"
         assert it.is_fellowship is True
@@ -138,7 +137,7 @@ class TestLoadItemsRealData:
         # the DE120101452 case found live this session (Sydney now, ANU at announcement --
         # confirmed directly by the grant's own former CI).
         items = {it.unique_id: it for it in load_items()}
-        it = items["DE120101452_MShumiAkhtar"]
+        it = items["DE120101452_shumi_akhtar"]
         assert it.admin_org == "The University of Sydney"
         assert set(it.admin_orgs) == {"The Australian National University", "The University of Sydney"}
 
@@ -184,36 +183,26 @@ class TestBuildStageZeroRealData:
             assert acif.cycle_stages == [1]
 
 
-class TestRenameCollapseRealData:
-    """award_rename_map.parquet consumption in load_items() -- collapsing a confirmed
-    announcement/current rename into one item before seeding, per the 2026-09-28/29 design
-    decision (no full_name_raws; a real item-level full_name_keys unioning both name forms)."""
+class TestRenamesFrom00aRealData:
+    """00a_extract_arc.py merges an announcement/current name pair when the parser's
+    full_name_keys overlap; load_items() only reads the result (arc_names.parquet)."""
 
-    def test_akhtar_case_collapsed_with_unioned_keys(self):
+    def test_akhtar_merged_with_both_forms_keys(self):
         items = {it.unique_id: it for it in load_items()}
-        assert "DE120101452_MahmudaAkhtar" not in items  # the announcement form
-        it = items["DE120101452_MShumiAkhtar"]  # the surviving current form
+        assert "DE120101452_mahmuda_akhtar" not in items  # the announcement form
+        it = items["DE120101452_shumi_akhtar"]  # the surviving current form
         assert it.full_name == "M. Shumi Akhtar"
         assert set(it.full_name_keys) >= {"mahmuda_akhtar", "shumi_akhtar"}
 
-    def test_no_announcement_only_rows_leak_through(self):
-        # every announcement_unique_id present in this population must have been absorbed,
-        # never left standing as its own separate item.
+    def test_no_announcement_form_survives_as_an_item(self):
         import pandas as pd
         from config.settings import PROCESSED_DATA
-        items = load_items()
-        all_ids = {it.unique_id for it in items}
-        rename_df = pd.read_parquet(PROCESSED_DATA / "award_rename_map.parquet")
-        leaked = set(rename_df["announcement_unique_id"]) & all_ids
-        assert leaked == set()
+        ids = {it.unique_id for it in load_items()}
+        renames = pd.read_parquet(PROCESSED_DATA / "arc_name_renames.parquet")
+        assert set(renames["announcement_unique_id"]) & ids == set()
 
-    def test_every_surviving_current_id_has_keys_populated(self):
-        import pandas as pd
-        from config.settings import PROCESSED_DATA
-        items = {it.unique_id: it for it in load_items()}
-        rename_df = pd.read_parquet(PROCESSED_DATA / "award_rename_map.parquet")
-        for current_id in set(rename_df["current_unique_id"]) & set(items):
-            assert items[current_id].full_name_keys, f"{current_id} missing full_name_keys"
+    def test_every_item_has_full_name_keys(self):
+        assert all(it.full_name_keys for it in load_items())
 
 
 def _acif(cluster_id, items) -> AwardsCIF:
@@ -252,8 +241,8 @@ class TestManualOrcidCorrections:
         # real-data check: the actual file, not a fixture -- confirms the loader reads the real
         # data_persisted/manual_orcid_corrections.csv correctly.
         corrections = load_manual_orcid_corrections()
-        assert "DP150102405_WeiLiu" in corrections
-        wrong, correct = corrections["DP150102405_WeiLiu"]
+        assert "DP150102405_wei_liu" in corrections
+        wrong, correct = corrections["DP150102405_wei_liu"]
         assert wrong == "0000-0002-7409-0948"
         assert correct is None
 
@@ -289,37 +278,6 @@ class TestComputeOrcids:
         assert acif.orcid_status == "MULTI_ORCID"
 
 
-class TestFamilyNamesCompatible:
-    def setup_method(self):
-        self.parser = HumanNameParser()
-
-    def test_identical_names_compatible(self):
-        assert _family_names_compatible("John Smith", "John Smith", self.parser)
-
-    def test_diacritic_variant_compatible(self):
-        # real case from this session: Goetz/Götz already overlap via ParsedName's own
-        # diacritic-widened family_names, no extra handling needed here.
-        assert _family_names_compatible("Hans Goetz", "Hans Götz", self.parser)
-
-    def test_postnominal_compatible(self):
-        assert _family_names_compatible("Jane Elliott", "Jane Elliott AM", self.parser)
-
-    def test_spacing_hyphenation_compatible(self):
-        # real case from this session's own scan: "de Gier"/"deGier".
-        assert _family_names_compatible("Piet de Gier", "Piet deGier", self.parser)
-
-    def test_genuinely_different_families_incompatible(self):
-        # real confirmed conflict case: Wang/Duan.
-        assert not _family_names_compatible("Chien Ming Wang", "Wenhui Duan", self.parser)
-
-    def test_name_order_swap_not_treated_as_compatible(self):
-        # real case from this project's history (Kotagiri Ramamohanarao / Ramamohanarao
-        # Kotagiri) -- deliberately NOT caught here; needs human review, not a guess.
-        assert not _family_names_compatible(
-            "Kotagiri Ramamohanarao", "Ramamohanarao Kotagiri", self.parser,
-        )
-
-
 class TestMergeByOrcid:
     def test_compatible_pair_merges(self):
         acifs = [
@@ -337,9 +295,11 @@ class TestMergeByOrcid:
         acifs = [
             _acif("DP01_ChienMingWang", [_item(
                 "DP01_ChienMingWang", orcid="0000-0002-8147-7673", full_name="Chien Ming Wang",
+                full_name_keys=("chien_wang", "ming_wang", "c_wang", "m_wang"),
             )]),
             _acif("DP02_WenhuiDuan", [_item(
                 "DP02_WenhuiDuan", orcid="0000-0002-8147-7673", full_name="Wenhui Duan",
+                full_name_keys=("wenhui_duan", "w_duan"),
             )]),
         ]
         survivors, mismatches = merge_by_orcid(acifs, UnionFind())
@@ -349,6 +309,17 @@ class TestMergeByOrcid:
         assert sorted(mismatches[0]["groups"]) == [
             ["DP01_ChienMingWang"], ["DP02_WenhuiDuan"],
         ]
+
+    def test_linked_through_a_third_merges_all(self):
+        # A shares a key with B, B with C, A and C share none: one linked group, merged.
+        o = "0000-0000-0000-0001"
+        acifs = [
+            _acif("DP01_a", [_item("DP01_a", orcid=o, full_name_keys=("jan_degier", "j_degier"))]),
+            _acif("DP02_b", [_item("DP02_b", orcid=o, full_name_keys=("jan_degier", "jan_de gier"))]),
+            _acif("DP03_c", [_item("DP03_c", orcid=o, full_name_keys=("jan_de gier", "j_de gier"))]),
+        ]
+        survivors, mismatches = merge_by_orcid(acifs, UnionFind())
+        assert len(survivors) == 1 and mismatches == []
 
     def test_no_orcid_no_merge(self):
         acifs = [
@@ -390,8 +361,10 @@ class TestManualOrcidCorrectionsPreventsWrongMerge:
     def test_wei_liu_case_not_merged_after_correction(self):
         wrong_orcid = "0000-0002-7409-0948"
         items = [
-            _item("DP150102405_WeiLiu", orcid=wrong_orcid, full_name="Wei Liu"),
-            _item("LP0218928_WeiLiu", orcid=wrong_orcid, full_name="Wei Liu"),
+            _item("DP150102405_wei_liu", orcid=wrong_orcid, full_name="Wei Liu",
+                  full_name_keys=("wei_liu", "w_liu")),
+            _item("LP0218928_wei_liu", orcid=wrong_orcid, full_name="Wei Liu",
+                  full_name_keys=("wei_liu", "w_liu")),
         ]
         corrections = load_manual_orcid_corrections()  # the real, current file
         corrected = apply_manual_orcid_corrections(items, corrections)

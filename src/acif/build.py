@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import csv
 import json
-import re
 from collections import defaultdict
 from dataclasses import replace
 from pathlib import Path
@@ -28,7 +27,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from config.scope import KEEP_ROLES, KEEP_SCHEMES
 from config.settings import PROCESSED_DATA, GRANT_SUMMARIES_CSV, ADMIN_ORGS_CSV, ARC_GRANTS_CSV
 from src.utils.for_resolve import upgrade_for_name, upgrade_for_code, resolve_arc_for_entry, for2020_group_name
-from src.utils.names import HumanNameParser
 from src.acif.models import AwardCIFItem, AwardsCIF
 
 
@@ -123,30 +121,25 @@ def load_items(con: duckdb.DuckDBPyConnection | None = None) -> list[AwardCIFIte
 
     Populates every AwardCIFItem field that has no default -- unique_id, grant_code, first_name,
     family_name, role_code, orcid, admin_org, institution_oax_id, funding_commence_year, for_name,
-    for_code, full_name -- plus is_fellowship, plus admin_orgs (see below). Deliberately leaves
-    every other DERIVED field at its dataclass default (first_names, family_names,
-    family_name_main, first_initial, first_name_canonical, full_name_key, for_name_tokens,
-    parsed, for2020_codes, hep_codes, inst_ids, for_name_rarity, single_institution_grant,
-    institution_rarity) -- name parsing, FOR2020 resolution, HEP/institution-set derivation,
-    and 00c_extract_propensities.py attachment are each their own later step, not folded in here.
-    manual_orcid_corrections.csv IS applied here, though (see apply_manual_orcid_corrections()),
-    since it must happen before any merge test ever sees the data.
+    for_code, full_name -- plus is_fellowship, plus admin_orgs (see below), plus full_name_keys.
+    Deliberately leaves every other DERIVED field at its dataclass default (first_names,
+    family_names, family_name_main, first_initial, first_name_canonical, full_name_key,
+    for_name_tokens, parsed, for2020_codes, hep_codes, inst_ids, for_name_rarity,
+    single_institution_grant, institution_rarity) -- FOR2020 resolution and HEP/institution-set
+    derivation are each their own later step, not folded in here. manual_orcid_corrections.csv IS
+    applied here, though (see apply_manual_orcid_corrections()), since it must happen before any
+    merge test ever sees the data.
+
+    Names: nothing here parses a name. full_name_keys is read from arc_names.parquet, which
+    00a_extract_arc.py writes from its one NameParser() pass -- and announcement/current renames
+    are already merged there (the surviving id carries both forms' keys), so there is no rename
+    handling here either (2026-09-29; previously this function parsed names itself and applied
+    00c_extract_propensities.py's award_rename_map).
 
     admin_orgs (2026-09-28 finding, confirmed by the grant's own former CI): admin_org alone
     silently drops the at-award institution whenever it differs from the current one (a fellow
     moved institutions mid-grant -- DE120101452 is admin_org=Sydney now, was ANU at
     announcement). admin_org itself stays "the current one," but admin_orgs retains both.
-
-    Confirmed announcement/current renames (award_rename_map.parquet,
-    00c_extract_propensities.py::build_award_rename_map()) are collapsed into ONE item here,
-    before anything downstream ever sees them as two people -- the announcement-form row is
-    dropped outright; full_name/unique_id/cluster_id all follow the surviving current-form row
-    unchanged, and full_name_keys becomes the union of BOTH forms' own parsed matching keys
-    (since OpenAlex may have indexed either form -- "we don't know what OAX will be using").
-    Resolved here and never revisited, per direct design decision (2026-09-28/29). NOTE for
-    whoever wires general name-parsing into this function next: that step must UNION into
-    full_name_keys for these items, never overwrite it -- the announcement form's keys have no
-    other source once this collapse has happened.
     """
     own_con = con is None
     con = con or duckdb.connect()
@@ -159,8 +152,11 @@ def load_items(con: duckdb.DuckDBPyConnection | None = None) -> list[AwardCIFIte
                 i.orcid, i.is_fellowship, g.admin_org, g.announcement_admin_org,
                 o.institution_id AS institution_oax_id,
                 g.funding_commence_year, g.primary_for_name,
-                regexp_extract(s.primary_field_of_research, '^\\d{{4}}') AS for2008_code
+                regexp_extract(s.primary_field_of_research, '^\\d{{4}}') AS for2008_code,
+                n.full_name_keys
             FROM read_parquet('{PROCESSED_DATA}/investigators_raw.parquet') i
+            LEFT JOIN read_parquet('{PROCESSED_DATA}/arc_names.parquet') n
+                ON i.unique_id = n.unique_id
             LEFT JOIN read_parquet('{PROCESSED_DATA}/grants_flat.parquet') g
                 ON i.grant_code = g.grant_code
             LEFT JOIN read_csv_auto('{GRANT_SUMMARIES_CSV}') s
@@ -178,31 +174,15 @@ def load_items(con: duckdb.DuckDBPyConnection | None = None) -> list[AwardCIFIte
 
     hep_admin_orgs, _alias_to_hep_code, _alias_to_institution_id = _admin_orgs_canonical()
 
-    rename_map_path = PROCESSED_DATA / "award_rename_map.parquet"
-    announcement_ids: set[str] = set()
-    current_to_announcement_name: dict[str, str] = {}
-    if rename_map_path.exists():
-        rename_df = pd.read_parquet(rename_map_path)
-        announcement_ids = set(rename_df["announcement_unique_id"])
-        current_to_announcement_name = dict(
-            zip(rename_df["current_unique_id"], rename_df["announcement_name"])
-        )
-    name_parser = HumanNameParser()
-
     items: list[AwardCIFItem] = []
     for row in rows:
         r = dict(zip(col_names, row))
         if r["admin_org"] not in hep_admin_orgs:
             continue
-        if r["unique_id"] in announcement_ids:
-            continue  # collapsed into its current-form counterpart below, not its own item
+        if r["full_name_keys"] is None:
+            raise ValueError(f"{r['unique_id']} has no row in arc_names.parquet -- rerun 00a_extract_arc.py")
         full_name = f"{r['first_name']} {r['family_name']}"
-        full_name_keys: list[str] = []
-        announcement_name = current_to_announcement_name.get(r["unique_id"])
-        if announcement_name:
-            keys = set(name_parser.parse(full_name).full_name_keys)
-            keys |= set(name_parser.parse(announcement_name).full_name_keys)
-            full_name_keys = sorted(keys)
+        full_name_keys = list(r["full_name_keys"])
         items.append(AwardCIFItem(
             unique_id=r["unique_id"],
             grant_code=r["grant_code"],
@@ -387,39 +367,23 @@ def compute_orcids(acif: AwardsCIF) -> None:
     )
 
 
-def _family_names_compatible(name_a: str, name_b: str, parser: HumanNameParser) -> bool:
-    """Are these two full names' family names plausibly the same person's? Two independent
-    checks, either sufficient:
-    1. HumanNameParser's own ParsedName.family_names -- already diacritic-widened
-       (diacritic_variants()) and already benefits from HumanName's native postnominal/
-       maiden-name handling -- so "Goetz"/"Götz" and "Elliott"/"Elliott AM" already overlap
-       without any extra work here.
-    2. A spacing/hyphenation-insensitive fallback (strip every non-alphanumeric character,
-       lowercase) -- diacritic_variants() does NOT normalize whitespace, so "de Gier"/"deGier"
-       or "Prieto Simon"/"Prieto-Simon" would otherwise wrongly disagree.
-    Deliberately does NOT catch a given/family name-order swap (e.g. "Kotagiri Ramamohanarao"/
-    "Ramamohanarao Kotagiri") or a compound-vs-bare surname ("Smith"/"Smith-Miles") -- both are
-    real, confirmed patterns in this project's own history, and both need human judgement, not
-    a guess (matching every other "don't guess, defer" mechanism already established here)."""
-    pa, pb = parser.parse(name_a), parser.parse(name_b)
-    if set(pa.family_names) & set(pb.family_names):
-        return True
-    def _strip(s: str) -> str:
-        return re.sub(r"[^a-z0-9]", "", s.lower())
-    a_stripped = {_strip(f) for f in pa.family_names} - {""}
-    b_stripped = {_strip(f) for f in pb.family_names} - {""}
-    return bool(a_stripped & b_stripped)
+def _full_name_keys(acif: AwardsCIF) -> set[str]:
+    """Every full_name_key across an ACIF's current items -- values straight from
+    arc_names.parquet (00a_extract_arc.py's one NameParser() pass), no name handling here."""
+    return {k for it in acif.items for k in it.full_name_keys}
 
 
 def merge_by_orcid(
     acifs: list[AwardsCIF], uf: UnionFind,
 ) -> tuple[list[AwardsCIF], list[dict]]:
     """First real merge test: group ACIFs sharing an identical ORCID. Auto-merges a group only
-    when EVERY pairwise family-name comparison inside it is compatible; any group that doesn't
-    fully agree is left unmerged entirely and reported instead -- "don't guess, defer to human
-    review," the same discipline already established for every other ORCID-conflict mechanism
-    in this project (matching the real, confirmed conflict cases this exact check is built to
-    catch: Wang/Duan, Bunda/Lasczik, Curran/Gallagher).
+    when all its ACIFs are linked by shared full_name_keys (A shares a key with B, B with C, ...;
+    keys are the parser's own output, from arc_names.parquet -- no name handling here); a group
+    that splits into unlinked parts is left unmerged entirely and reported instead -- "don't
+    guess, defer to human review," the same
+    discipline already established for every other ORCID-conflict mechanism in this project
+    (matching the real, confirmed conflict cases this exact check is built to catch: Wang/Duan,
+    Bunda/Lasczik, Curran/Gallagher).
 
     orcids/orcid_status are recomputed fresh for every ACIF first (see compute_orcids()) --
     required even though ORCID itself never changes, since which items an ACIF currently holds
@@ -427,14 +391,8 @@ def merge_by_orcid(
 
     Returns (updated_acifs, orcid_name_mismatches). The second list IS the reusable report this
     function's own grouping step naturally produces -- one entry per ORCID whose current members
-    didn't all agree on family name, with the sub-groups and names needed to review it, rather
-    than a separate ad hoc diagnostic re-deriving the same grouping logic with cruder tools.
-
-    Only compares each ACIF's first item's own full_name -- correct for singletons (the only
-    case that exists today, since this is the first merge test ever run), but a simplification
-    whoever extends this to multi-item ACIFs will need to widen (e.g. any-pair-compatible across
-    both sides' full item lists, not just one representative name each)."""
-    parser = HumanNameParser()
+    don't all share a full_name_key, with the sub-groups and names needed to review it, rather
+    than a separate ad hoc diagnostic re-deriving the same grouping logic with cruder tools."""
     for acif in acifs:
         compute_orcids(acif)
 
@@ -450,11 +408,10 @@ def merge_by_orcid(
         if len(group) < 2:
             continue
         local = UnionFind()  # throwaway, scoped to partitioning just this one orcid's group
+        keys = [_full_name_keys(a) for a in group]
         for i in range(len(group)):
             for j in range(i + 1, len(group)):
-                name_a = group[i].items[0].full_name
-                name_b = group[j].items[0].full_name
-                if _family_names_compatible(name_a, name_b, parser):
+                if keys[i] & keys[j]:
                     local.union(group[i].cluster_id, group[j].cluster_id)
 
         sub_groups: dict[str, list[AwardsCIF]] = defaultdict(list)

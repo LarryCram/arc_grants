@@ -17,8 +17,6 @@ OUTPUT (all under PROCESSED_DATA):
     for_name_pair_freq.parquet     -- {name_a, name_b, count, frequency}
     institution_rarity.parquet     -- {institution_name, count, frequency}
     institution_pair_freq.parquet  -- {institution_a, institution_b, count, frequency}
-    award_rename_map.parquet       -- {announcement_unique_id, current_unique_id,
-                                        announcement_name, current_name}
 
 DECISIONS ENCODED HERE (all direct 2026-09-19 corrections to an earlier draft of this design --
 see /home/lc/.claude/plans/plan-that-in-tiny-immutable-heron.md's "Feature-availability gaps"
@@ -71,8 +69,6 @@ section for the full back-and-forth):
       source with more than one FOR value per grant to pair against another.
 """
 
-import json
-import re
 import sys
 from collections import Counter
 from itertools import combinations
@@ -83,11 +79,11 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import (
-    PROCESSED_DATA, GRANT_SUMMARIES_CSV, ARC_GRANTS_CSV,
+    PROCESSED_DATA, GRANT_SUMMARIES_CSV,
     ADMIN_ORGS_CSV as _ADMIN_ORGS_CSV_PATH,
 )
-from config.scope import KEEP_SCHEMES, KEEP_ROLES
-from src.utils.names import make_expanded_for_tokens, HumanNameParser
+from config.scope import KEEP_SCHEMES
+from src.utils.names import make_expanded_for_tokens
 from src.utils.for_resolve import upgrade_for_name
 from src.utils.awards_cif import load_grant_for2020_codes, _FOR_CONCORDANCE_CSV
 from src.acif.build import _admin_orgs_canonical
@@ -274,130 +270,6 @@ def build_institution_pair_freq() -> pd.DataFrame:
     ).sort_values(["institution_a", "institution_b"]).reset_index(drop=True)
 
 
-def _raw_unique_id(grant_code: str, first_name: str, family_name: str) -> str:
-    """Exactly src/00a_extract_arc.py::extract_investigators()'s own clean_name/unique_id
-    construction -- reproduced here (not imported; that script isn't a reusable module) so this
-    function's output matches the REAL unique_id strings already sitting in
-    investigators_raw.parquet. Deliberately NOT switched to proper name-parsing for this specific
-    id -- that would change every unique_id project-wide, a far bigger, separate change than
-    this table's actual job (deciding which of the EXISTING ids are a rename pair)."""
-    clean = re.sub(r"[^a-zA-Z0-9]", "", f"{first_name or ''}{family_name or ''}")
-    return f"{grant_code}_{clean}"
-
-
-def build_award_rename_map() -> pd.DataFrame:
-    """One row per grant per CONFIRMED same-person rename between investigators-at-announcement
-    and investigators-current -- announcement_unique_id/current_unique_id are real, existing ids
-    (see _raw_unique_id()), safe to look up directly against investigators_raw.parquet.
-
-    Two real, distinct problems, both found 2026-09-28 while trying to detect renames with a
-    quick regex-based name comparison, kept separate here rather than conflated into one fix:
-
-    1. The regex 00a_extract_arc.py's own dedup key uses (strip non-alphanumerics, nothing else)
-       misses case/diacritic-only differences (e.g. FOR2008-vintage "KalantarZadeh" vs
-       "Kalantarzadeh") -- confirmed directly: switching the SAME-vs-DIFFERENT comparison from
-       that regex to the real HumanNameParser's full_name_key/full_name_key_raw drops the count
-       of grants with ANY announcement/current name difference from 5,079 to 4,795 -- 284 grants
-       were never a real difference at all, just parsing noise. Fixed here by using the proper
-       parser for the SAME-OR-DIFFERENT decision -- but NOT for the unique_id values themselves
-       (see _raw_unique_id()'s own docstring for why those stay regex-based).
-    2. Even with proper parsing, "the announcement list and current list differ" is not always a
-       clean 1-person rename -- measured directly across the real, non-noise 4,795 grants:
-       1,665 are a clean 1:1 rename (exactly one name dropped, exactly one added -- for a
-       single-investigator-slot scheme like DECRA this is structurally certain, not a guess,
-       since there is only one slot to begin with); 2,483 are a pure drop or pure add (unmatched
-       on only one side -- a genuine membership change, nothing to pair); 647 are genuinely
-       ambiguous (2+ unmatched on at least one side -- e.g. LP230201137: one person dropped,
-       TWO different people added -- guessing a pairing here risks attributing one real person's
-       name to a completely different real person). Only the 1,665 clean cases are emitted here;
-       the other two categories are deliberately left alone (pure drop/add needs no rename
-       record; ambiguous cases stay as separate, unlinked items rather than risk a wrong pairing
-       -- same "don't guess, defer" discipline as resolve_cluster_id()'s own StaleClusterIdError).
-
-    2026-09-29 fix: scoped to load_items()'s REAL population, not KEEP_SCHEMES alone -- a grant
-    whose admin_org isn't a genuine HEP is skipped outright (it contributes no items to
-    load_items() at all), and each investigator entry is additionally filtered to KEEP_ROLES
-    (a grant can carry both in-scope and out-of-scope roles, e.g. a CI alongside a community-
-    partner PI) before the set-difference comparison ever runs. Before this fix, 531/1,665
-    candidate pairs had at least one side outside load_items()'s actual scope.
-    """
-    parser = HumanNameParser()
-    in_scope_grant_codes = _load_in_scope_grant_codes()
-
-    def proper_key(fn, ln):
-        p = parser.parse(f"{fn or ''} {ln or ''}".strip())
-        return p.full_name_key or p.full_name_key_raw
-
-    df = pd.read_csv(ARC_GRANTS_CSV)
-    rows = []
-    for _, row in df.iterrows():
-        try:
-            rec = json.loads(row["single_grant"])
-        except (TypeError, ValueError):
-            continue
-        grant_code = rec.get("data", {}).get("id")
-        if not grant_code or grant_code not in in_scope_grant_codes:
-            continue
-        attrs = rec["data"]["attributes"]
-        # NOT role-filtered here (2026-09-29 fix, a real confirmed bug): filtering each side's
-        # list to KEEP_ROLES independently before name-matching conflates "this name changed"
-        # with "this investigator's role moved into/out of scope between snapshots" -- confirmed
-        # concretely on LP100100367, where Matthew Taylor (CI->PI) and Charles Gray (PI->CI)
-        # simply swapped roles, two different real people, but independent per-side role
-        # filtering excluded Taylor from curr and Gray from ann, making them look like a clean
-        # 1:1 rename pair when neither actually changed name at all. Matching on the FULL,
-        # unfiltered lists means Taylor matches Taylor and Gray matches Gray regardless of role
-        # (correctly finding no rename here); KEEP_ROLES is applied below, only to the surviving
-        # CURRENT-side role -- the announcement role never matters, since that side is always
-        # discarded, and only the current form's role determines whether load_items() would ever
-        # construct an item for this investigator at all.
-        ann = attrs.get("investigators-at-announcement") or []
-        curr = attrs.get("investigators-current") or []
-
-        # proper_key -> (real unique_id, display name, role_code), one dict per side
-        ann_by_key = {
-            proper_key(i.get("firstName"), i.get("familyName")):
-                (_raw_unique_id(grant_code, i.get("firstName"), i.get("familyName")),
-                 f"{i.get('firstName', '')} {i.get('familyName', '')}".strip(), i.get("roleCode"))
-            for i in ann
-        }
-        curr_by_key = {
-            proper_key(i.get("firstName"), i.get("familyName")):
-                (_raw_unique_id(grant_code, i.get("firstName"), i.get("familyName")),
-                 f"{i.get('firstName', '')} {i.get('familyName', '')}".strip(), i.get("roleCode"))
-            for i in curr
-        }
-
-        only_ann = set(ann_by_key) - set(curr_by_key)
-        only_curr = set(curr_by_key) - set(ann_by_key)
-        if len(only_ann) == 1 and len(only_curr) == 1:
-            ann_id, ann_name, _ann_role = ann_by_key[next(iter(only_ann))]
-            curr_id, curr_name, curr_role = curr_by_key[next(iter(only_curr))]
-            if curr_role not in KEEP_ROLES:
-                continue  # the surviving form would never become a load_items() item anyway
-            if ann_id == curr_id:
-                # A real, confirmed case (2026-09-29): proper_key() found a difference where
-                # the RAW id construction (_raw_unique_id(), regex-based) didn't -- e.g.
-                # DP0449429's "CaiHeng"/"Li" (announcement) vs "Cai-Heng"/"Li" (current):
-                # the regex strips the hyphen, so both already collapse to the SAME raw id
-                # (00a_extract_arc.py's own extraction already deduplicated this pair into one
-                # investigators_raw.parquet row), but HumanNameParser splits "Cai-Heng" into
-                # two given tokens, producing a different full_name_key. Recording this as a
-                # "rename" would tell load_items() to collapse this id into itself, silently
-                # erasing the person (its own "current form" IS itself, so the
-                # already-collapsed row gets skipped as if it were someone else's
-                # announcement-only leftover). Nothing to collapse here -- skip.
-                continue
-            rows.append({
-                "announcement_unique_id": ann_id, "current_unique_id": curr_id,
-                "announcement_name": ann_name, "current_name": curr_name,
-            })
-        # pure drop/add (only one side has unmatched names) and ambiguous (2+ unmatched on
-        # either side) are both deliberately not recorded -- see docstring.
-
-    return pd.DataFrame(rows).sort_values("current_unique_id").reset_index(drop=True)
-
-
 def main() -> None:
     for_name_rarity = build_for_name_rarity()
     for_name_rarity.to_parquet(PROCESSED_DATA / "for_name_rarity.parquet", index=False)
@@ -415,9 +287,6 @@ def main() -> None:
     institution_pair_freq.to_parquet(PROCESSED_DATA / "institution_pair_freq.parquet", index=False)
     print(f"institution_pair_freq: {len(institution_pair_freq)} pairs")
 
-    award_rename_map = build_award_rename_map()
-    award_rename_map.to_parquet(PROCESSED_DATA / "award_rename_map.parquet", index=False)
-    print(f"award_rename_map: {len(award_rename_map)} confirmed announcement/current renames")
 
 
 if __name__ == "__main__":

@@ -138,7 +138,8 @@ class TestNameForms:
 
     def test_compound_surname_not_split(self):
         _, family_names = _name_forms("Anna", "van der Berg")
-        assert family_names == ["van der berg"]
+        # kept whole, plus its compact form (names.py::_with_compact_forms, 2026-09-29)
+        assert family_names == ["van der berg", "vanderberg"]
 
     def test_empty_first_name_falls_back_to_family_name(self):
         # Fixed 2026-09-08 (names.py::HumanNameParser._structural()): the full family-name word
