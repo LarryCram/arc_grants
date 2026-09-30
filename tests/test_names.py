@@ -190,13 +190,14 @@ class TestHumanNameParser:
         assert r.full_name_key is None
         assert r.full_name_key_raw == "иван_иванов"
 
-    def test_last_name_only_fallback(self):
-        # No given name at all -- HumanName recognizes "Dr." as a title prefix (consuming what
-        # would otherwise be the "first" slot), leaving only a surname. The family name's own
-        # first letter is used as a stand-in given-name token, matching
-        # awards_cif.py::_name_forms()'s existing, tested convention exactly.
+    def test_last_name_only_has_no_given(self):
+        # No given name at all -- HumanName recognizes "Dr." as a title prefix, leaving only a
+        # surname. No stand-in initial is invented (removed 2026-09-30), so there is no
+        # full_name_key; the family name is still parsed.
         r = self.p.parse("Dr. Smith")
-        assert r.given_tokens == ("s",)
+        assert r.given_tokens == ()
+        assert r.full_name_key is None
+        assert r.full_name_keys == ()
         assert r.family_name_main == "smith"
 
     def test_postnominal_and_contamination_combined(self):
@@ -340,10 +341,8 @@ class TestMaidenNameHandling:
         assert "bill" in r.nickname_tokens
 
 
-class TestTupleInputAndCompactFamilyForms:
-    """parse((first, family)) keeps ARC's own family field as the surname; every family name also
-    carries its compact form (spaces, hyphens, apostrophes, underscores removed). 2026-09-29, from
-    real ARC variants of one person's surname (checked against the raw JSON)."""
+class TestTupleInput:
+    """parse((first, family)) keeps ARC's own family field as the surname (2026-09-29)."""
 
     def setup_method(self):
         self.p = HumanNameParser()
@@ -357,21 +356,3 @@ class TestTupleInputAndCompactFamilyForms:
 
     def test_comma_inside_family_field(self):
         assert self.p.parse(("Anthony", "Kinloch FRS, FREng")).full_name_key == "anthony_kinloch"
-
-    @pytest.mark.parametrize("first,a,b", [
-        ("David", "St John", "StJohn"),
-        ("Jan", "de Gier", "DeGier"),
-        ("Sarah", "O' Shea", "O'Shea"),
-        ("Harald", "van Heerde", "van_Heerde"),
-        ("Beatriz", "Prieto Simon", "Prieto-Simon"),
-        ("Taha", "Hossein Rashidi", "HosseinRashidi"),
-    ])
-    def test_separator_variants_share_a_key(self, first, a, b):
-        ka = set(self.p.parse((first, a)).full_name_keys)
-        kb = set(self.p.parse((first, b)).full_name_keys)
-        assert ka & kb
-
-    def test_compact_form_is_additive(self):
-        r = self.p.parse(("Jan", "de Gier"))
-        assert r.full_name_key == "jan_de gier"
-        assert r.family_names == ("de gier", "degier")

@@ -80,6 +80,15 @@ for _pn in _POSTNOMINAL_ACRONYMS:
 #   tirthankar  1 ARC investigator  (Tirthankar Bandyopadhyay)
 #   king        4 ARC investigators (King Fung Wong, King Lai, King Yuk Chan, King Yang)
 #   sheikh      2 ARC investigators (Sheikh Mohammad Fazle Rabbi, Sheikh Rahman)
+#   md          18 ARC name records (2026-09-30, found by analysis/14_arc_name_survey.py): "Md"/"Md."
+#               is the written abbreviation of Mohammad/Muhammad, part of the name -- "Md Jahangir
+#               Hossain", "Md. Rahim", "Md.Shahriar Hossain"; every one of these ARC entries already
+#               carries its real title (Dr/Prof/A/Prof) in ARC's separate title field
+#   field       1 ARC investigator  (Prof Field Rickards, Dean, Melbourne Graduate School of
+#               Education from 2004) -- nameparser has "field" from "Field Marshal" (2026-09-30)
+#   sheik       1 ARC investigator  (Prof Sheik S Rahman, School of Minerals and Energy Resources
+#               Engineering, UNSW; ARC spells him "Sheikh" at announcement and "Sheik" in the
+#               current list on LP110200799 -- the "sheikh" spelling was already removed above)
 #
 # Several other words (prince, gen, imam, sultana, lama, guru, princess, baba, se) also turned out
 # to be real given names being thrown away on the OpenAlex side, sometimes for many more people
@@ -97,7 +106,7 @@ for _pn in _POSTNOMINAL_ACRONYMS:
 # Not all 619 words were checked this closely, only the ones with enough real OpenAlex occurrences
 # to be worth checking -- another one could still turn out to be a hidden case like this. Fix more
 # as they're found and confirmed against a real ARC investigator the same way.
-_TITLE_COLLISIONS_REMOVED = ("wing", "mahdi", "sultan", "do", "tirthankar", "king", "sheikh")
+_TITLE_COLLISIONS_REMOVED = ("wing", "mahdi", "sultan", "do", "tirthankar", "king", "sheikh", "md", "field", "sheik")
 for _tc in _TITLE_COLLISIONS_REMOVED:
     CONSTANTS.titles.remove(_tc)
 
@@ -266,19 +275,6 @@ class ParsedName:
 
 _RAW_SPLIT = re.compile(r"[\s\-]+")
 
-# Separators ARC's own family-name field varies on for one person (confirmed 2026-09-29 against the
-# raw JSON: "St John"/"StJohn", "van Swinderen"/"vanSwinderen", "de Gier"/"DeGier", "Prieto Simon"/
-# "Prieto-Simon", "O' Shea"/"O'Shea", "van Heerde"/"van_Heerde").
-_FAMILY_SEPARATORS = re.compile(r"[\s\-'_]+")
-
-
-def _with_compact_forms(family_names: tuple[str, ...]) -> tuple[str, ...]:
-    """Each family name plus its compact form (spaces, hyphens, apostrophes, underscores removed),
-    so every separator variant of one surname shares a form: "de gier" and "degier" both carry
-    "degier". Additive only -- every existing form is kept, and compact forms are never longer, so
-    family_name_main/full_name_key are unchanged."""
-    return tuple(dict.fromkeys(family_names + tuple(_FAMILY_SEPARATORS.sub("", f) for f in family_names)))
-
 # Matches a leading "nee"/"née" maiden-name marker, capturing the former surname that follows --
 # see HumanNameParser._maiden_name()'s own docstring for why this needs to be distinguished from
 # a genuine given-name nickname before either is incorporated.
@@ -429,14 +425,13 @@ class HumanNameParser:
             tok for variant in self._given_name_diacritic_variants(hn.middle) for tok in name_part_tokens(variant)
         ] if hn.middle else []
         given_ascii = first_tokens + middle_tokens
-        family_names = _with_compact_forms(self.diacritic_variants(hn.last)) if hn.last else ()
+        family_names = self.diacritic_variants(hn.last) if hn.last else ()
         family_name_main = max(family_names, key=len) if family_names else None
-        # Fallback for a last-name-only input (HumanName found no first/middle at all): use the
-        # family name's own first letter as a stand-in given-name token, so given_tokens isn't
-        # left completely empty when something is known. Matches awards_cif.py::_name_forms()'s
-        # existing, tested convention exactly.
-        extra = [family_name_main[0]] if not given_ascii and family_name_main else []
-        given_tokens = tuple(dict.fromkeys(given_ascii + [t[0] for t in given_ascii if t] + extra))
+        # No given name recorded -> no given tokens. (Until 2026-09-30 the family name's first
+        # letter was added as a stand-in given initial, only because Splink's family+first_initial
+        # blocking key needed one; Splink is gone, and the invented initial split one person in two
+        # -- ARC DP0210314: blank given name at announcement -> "y_yeadon" vs "p_yeadon".)
+        given_tokens = tuple(dict.fromkeys(given_ascii + [t[0] for t in given_ascii if t]))
         # Prefer the first name's own longest widened form; only fall back to the middle name
         # when the first name is itself degenerate (a bare initial, or absent) -- e.g. "C. David
         # Thomas" correctly canonicalizes to "david", since "c" has no substantive (>1-char) form
@@ -463,7 +458,7 @@ class HumanNameParser:
         # own docstring for why nameparser can't tell these apart on its own.
         maiden = self._maiden_name(hn)
         if maiden:
-            family_names = tuple(dict.fromkeys(family_names + _with_compact_forms(self.diacritic_variants(maiden))))
+            family_names = tuple(dict.fromkeys(family_names + self.diacritic_variants(maiden)))
             nick = None
         else:
             nick = self._guarded_nickname(hn)

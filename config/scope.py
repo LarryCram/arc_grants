@@ -3,6 +3,10 @@ Scope definitions for the ARC grants productivity study.
 Edit here to change which schemes and roles are included in analysis.
 """
 
+import csv
+
+from config.settings import ADMIN_ORGS_CSV
+
 # Investigator role codes to retain.
 # Excludes travel/mobility fellowships (ECIF, MCIF, LXF*, ILF, DIA, LIF, RC-ATSI)
 # and non-investigator roles (PI, NP, OI, IC, AC, TCD, MEN, HD, SUP, CD, etc.)
@@ -74,3 +78,56 @@ KEEP_SCHEMES = frozenset({
     "FL",   # Laureate Fellowships
     "FF",   # Federation Fellowships
 })
+
+
+# ---------------------------------------------------------------------------------------------
+# Scope tests (2026-09-30): one definition shared by 00a_extract_arc.py (which writes only in-scope
+# records) and src/acif/build.py.
+# ---------------------------------------------------------------------------------------------
+
+def admin_orgs_canonical() -> tuple[set[str], dict[str, str], dict[str, str]]:
+    """admin_orgs.csv, read once, resolved via the canonical organisationName GROUP rather than
+    trusting each alias row individually (an alias row can be correctly flagged HEP='y' but have
+    a blank hep_code/institution_id cell while a sibling alias for the same real institution
+    carries the real data -- the archived awards_cif.py::_load_admin_orgs_rows()'s own finding).
+    Moved here from src/acif/build.py 2026-09-30 so 00a_extract_arc.py and build.py share one
+    scope test.
+
+    Returns (hep_admin_org_aliases, alias_to_hep_code, alias_to_institution_id)."""
+    rows = list(csv.DictReader(open(ADMIN_ORGS_CSV, newline="", encoding="utf-8")))
+    canonical_hep_code: dict[str, str] = {}
+    canonical_institution_id: dict[str, str] = {}
+    for row in rows:
+        name = row.get("organisationName", "").strip()
+        hep_code = row.get("hep_code", "").strip()
+        inst_id = row.get("institution_id", "").strip()
+        if name and hep_code and name not in canonical_hep_code:
+            canonical_hep_code[name] = hep_code
+        if name and inst_id and name not in canonical_institution_id:
+            canonical_institution_id[name] = inst_id
+
+    hep_admin_org_aliases: set[str] = set()
+    alias_to_hep_code: dict[str, str] = {}
+    alias_to_institution_id: dict[str, str] = {}
+    for row in rows:
+        alias = row.get("organisationName_alias", "").strip()
+        name = row.get("organisationName", "").strip()
+        if not alias:
+            continue
+        if name in canonical_hep_code:
+            hep_admin_org_aliases.add(alias)
+            alias_to_hep_code[alias] = canonical_hep_code[name]
+        if name in canonical_institution_id:
+            alias_to_institution_id[alias] = canonical_institution_id[name]
+    return hep_admin_org_aliases, alias_to_hep_code, alias_to_institution_id
+
+
+def grant_in_scope(grant_code: str, admin_org: str, hep_admin_orgs: set[str]) -> bool:
+    """A KEEP_SCHEMES grant administered by a Higher Education Provider. admin_org is the current
+    administering organisation, falling back to the announcement one (grants_flat.admin_org)."""
+    return grant_code[:2] in KEEP_SCHEMES and admin_org in hep_admin_orgs
+
+
+def record_in_scope(grant_code: str, admin_org: str, role_code: str, hep_admin_orgs: set[str]) -> bool:
+    """An investigator record on an in-scope grant whose role is in KEEP_ROLES."""
+    return role_code in KEEP_ROLES and grant_in_scope(grant_code, admin_org, hep_admin_orgs)

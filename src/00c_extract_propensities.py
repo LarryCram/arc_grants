@@ -85,8 +85,10 @@ from config.settings import (
 from config.scope import KEEP_SCHEMES
 from src.utils.names import make_expanded_for_tokens
 from src.utils.for_resolve import upgrade_for_name
-from src.utils.awards_cif import load_grant_for2020_codes, _FOR_CONCORDANCE_CSV
-from src.acif.build import _admin_orgs_canonical
+from config.scope import admin_orgs_canonical as _admin_orgs_canonical, grant_in_scope
+from src.acif.build import load_grant_for2020_codes, DATA_PERSISTED
+
+_FOR_CONCORDANCE_CSV = DATA_PERSISTED / "for_concordance.csv"
 
 
 def _load_in_scope_grant_codes() -> set[str]:
@@ -102,9 +104,8 @@ def _load_in_scope_grant_codes() -> set[str]:
     population before this fix, purely because the two scope definitions disagreed."""
     df = pd.read_parquet(PROCESSED_DATA / "grants_flat.parquet", columns=["grant_code", "admin_org"])
     hep_admin_orgs, _, _ = _admin_orgs_canonical()
-    in_scheme = df["grant_code"].str[:2].isin(KEEP_SCHEMES)
-    in_hep = df["admin_org"].isin(hep_admin_orgs)
-    return set(df.loc[in_scheme & in_hep, "grant_code"])
+    # grants_flat.parquet is in-scope only since 2026-09-30; the shared test is kept as a check
+    return {g for g, a in zip(df["grant_code"], df["admin_org"]) if grant_in_scope(g, a, hep_admin_orgs)}
 
 
 def _load_institution_name_crosswalk() -> tuple[dict[str, str], set[str]]:

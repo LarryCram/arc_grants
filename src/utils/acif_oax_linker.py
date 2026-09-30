@@ -30,7 +30,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from config.settings import PROCESSED_DATA
-from src.utils.awards_cif import load_grant_for2020_codes
+from src.acif.build import load_grant_for2020_codes
 from src.utils.for_resolve import for2020_group_name, oax_subfield_name
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]

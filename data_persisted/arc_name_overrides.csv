@@ -1,0 +1,23 @@
+action,grant_code,orcid,first_name,family_name,first_name_2,family_name_2,notes
+correct,DP0773860,,ABM,Ashrafi,A B M,Ashrafi,initials run together; with a vowel the parser reads 'ABM' as a given name
+correct,LP0211607,,AFM F,Islam,A F M F,Islam,initials run together; with a vowel the parser reads 'AFM' as a given name
+correct,DP0211847,,AW,Snyder,A W,Snyder,initials run together; with a vowel the parser reads 'AW' as a given name
+correct,LP0211488,,AZ,Kouzani,A Z,Kouzani,initials run together; with a vowel the parser reads 'AZ' as a given name
+correct,LP0212110,,Y-W,Mai,Y W,Mai,hyphenated initials kept by the parser as a given name 'y-w'
+correct,LP0220231,,S-C,Lo,S C,Lo,hyphenated initials kept by the parser as a given name 's-c'
+correct,LP0219322,,Y-X,Lin,Y X,Lin,hyphenated initials kept by the parser as a given name 'y-x'
+correct,DP110101948,,Clare,Murphy  nee Paton-Walsh,Clare,Murphy (nee Paton-Walsh),unbracketed 'nee'; the parser handles the bracketed form
+no,LP140100413,,Anne,Pedersen,Anne,Kavanagh,two people: each has her own Australian ORCID (Curtin/Murdoch vs Melbourne)
+no,LP0562607,,Christopher,Hawley,Christopher,Cook,judged two people by name (2026-09-30 review)
+no,LP110200787,,David,Jones,David,Beynon,two people: each name carries its own ORCID on other grants
+no,LP0882316,,Jennifer,Ovenden,Jennifer,Seddon,two people: both listed on LP110200793; different ORCIDs
+no,DP210100546,,Melissa,Bull,Melissa,Jardine,two people: Jardine's ORCID (ARC) differs from Bull's (ORCID registry)
+no,LP0776778,,Peter,Vinden,Peter,Farrell,judged two people by name (2026-09-30 review)
+no,LP150101014,,Richard,Williams,Richard,Tilley,judged two people by name (2026-09-30 review)
+no,LP0881993,,Jacqueline,Croke,Barry,Croke,"two people (user, 2026-09-30)"
+no,LP0455155,,Neil,Robinson,Peter,Robinson,two people: each name carries its own ORCID on other grants
+no,LP0220954,,Malcolm,Smith,George,Smith,not established as one person
+no,DP0346497,,David,Saunders,George,Saunders,not established as one person
+no,LP0453892,,Mark,Gabbott,Thomas,Gabbott,not established as one person
+no,,0000-0002-8147-7673,Chien Ming,Wang,Wenhui,Duan,ORCID belongs to Wenhui Duan; ARC also records it on Wang (see manual_orcid_corrections.csv)
+no,,0000-0001-7013-2090,Tracey,Bunda,Alexandra,Lasczik,ORCID belongs to Alexandra Lasczik; ARC also records it on Bunda (see manual_orcid_corrections.csv)

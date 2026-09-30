@@ -138,8 +138,7 @@ class TestNameForms:
 
     def test_compound_surname_not_split(self):
         _, family_names = _name_forms("Anna", "van der Berg")
-        # kept whole, plus its compact form (names.py::_with_compact_forms, 2026-09-29)
-        assert family_names == ["van der berg", "vanderberg"]
+        assert family_names == ["van der berg"]
 
     def test_empty_first_name_falls_back_to_family_name(self):
         # Fixed 2026-09-08 (names.py::HumanNameParser._structural()): the full family-name word
@@ -148,10 +147,10 @@ class TestNameForms:
         # already flagged for the initial-only fallback below (see that fallback's own comment;
         # given=None is the still-not-built, fully-correct fix). Only the initial is a
         # legitimate stand-in, needed because Splink's blocking key requires one.
+        # 2026-09-30: nor is the surname's initial invented as a given name any more.
         first_names, family_names = _name_forms("", "Smith")
         assert family_names == ["smith"]
-        assert "smith" not in first_names
-        assert "s" in first_names
+        assert first_names == []
 
 
 class TestFirstInitial:

@@ -8,24 +8,25 @@
 ## Project Goal
 Link ARC Chief Investigators/Fellows (CIFs) to their OpenAlex author records for bibliometric analysis.
 
-## Pipeline Architecture (Splink-based)
+## Pipeline Architecture (current, 2026-09-30)
 ```
-00_extract_arc.py       → grants_flat.parquet, investigators_raw.parquet
-                           (now 00a_extract_arc.py; also arc_names.parquet + arc_name_renames.parquet --
-                           the ONLY place ARC names are parsed, 2026-09-29, see dated entry)
-01_prepare_arc.py       → arc_investigators_prep.parquet, arc_persons.parquet
-                           (ARC name/inst/FOR prep + Splink dedupe_only: 65k rows → 23,056 persons)
-02_prepare_oax.py       → openalex_authors_prep.parquet, oax_tf_*.parquet
-03_link_arc_oax.py      → arc_oax_links.parquet (link_only: ARC persons → OAX authors)
-04_resolve_links.py     → arc_oax_resolved.parquet, arc_ambiguous_deferred.parquet
-                           (ARCHIVED 2026-09-09 to ZARCHIVE/src_archive_20260909/ -- confirmed
-                           structurally broken, see dated entry below. Rebuild in progress as
-                           04_filter_candidates.py/FilterCandidates; resolve() not yet built, so
-                           this pipeline stage currently produces no output at all.)
+src/00a_extract_arc.py          → grants_flat, investigators_raw, arc_names, arc_name_renames (.parquet),
+                                  arc_name_changes.csv -- the only ARC loader and the only place an ARC
+                                  name is parsed; reads every grant, writes in-scope records only
+src/00b_extract_oax.py          → openalex_authors_prep.parquet, oax_tf_*.parquet (OpenAlex side)
+src/00c_extract_propensities.py → FOR/institution rarity and pair-frequency tables (grant-level)
+src/acif/                       → the cyclic ACIF build (models, build, features); so far
+                                  load_items() → seed() → merge_by_orcid(); it does not yet write a
+                                  list of people
+src/utils/acif_oax_linker.py    → ARC↔OpenAlex candidate linking (with sql/01-04); still reads the
+                                  old awards_cif_arc_only.parquet until src/acif writes its own list
 ```
-The Splink pipeline replaces the entire old multi-layer pipeline, archived at
-`ZARCHIVE/src_archive_20260520/` (moved there 2026-08-14, nothing references it).
-`02_run_splink.py` is the old wrong approach — superseded, can be deleted.
+Everything else that used to be in `src/` (01_prepare_arc, 01a_diagnose, 04a_orcid_assist,
+06_build_oeuvre, awards_cif, cluster_checks, oeuvre_build, work_piling, the ORCID tools, ...) was
+archived 2026-09-30 to `ZARCHIVE/src_archive_20260930/` -- see the dated entry. Older archives:
+`ZARCHIVE/src_archive_20260520/`, `_20260825/`, `_20260909/`, `_20260918/`. `analysis/` scripts are
+resting tools, not updated; some import archived modules and will not run as they are.
+`run_pipeline.sh` / `run_piling.sh` are stale (left as they are, 2026-09-30).
 
 ## Key Paths
 - Config: `config/settings.py`
@@ -33,6 +34,7 @@ The Splink pipeline replaces the entire old multi-layer pipeline, archived at
   work or a hard-to-reacquire external source — hand-curated matching/override CSVs
   (`manual_resolutions.csv`, `manual_splits.csv`, `manual_splits_hand_counts.csv`,
   `manual_orcids.csv`, `manual_merges.csv`, `manual_name_corrections.csv`, `manual_orcid_corrections.csv`,
+  `arc_name_overrides.csv` (ARC name corrections / don't-join / add rows, read by 00a_, 2026-09-30),
   `manual_splits_by_grant.csv`, `manual_confirmed_not_suspicious.csv`,
   `enrichment_blocklist.csv`,
   `for_concordance.csv`, `for_divisions.csv`, `for_adjacent_divisions.csv`) plus the ANZSRC/Scopus/OpenAlex/ERA source
@@ -3018,6 +3020,86 @@ stale. Candidates for hand review come from two parser-output-only sources: the 
 self-compare (above) and in-scope same-grant splits (722 grants with exactly one unmatched name
 at announcement and one in current whose keys don't overlap -- mostly genuine membership
 changes).
+
+## ARC name cleaning built into `00a_`; ORCID and announcement/current evidence; old pipeline archived (2026-09-30)
+
+**Parser (`src/utils/names.py`) changes, all made only on the user's instruction:**
+- The compact-family-form rule added 2026-09-29 (StJohn = St John etc.) is **removed**: it joined
+  names regardless of which award they came from, so it would equate different people. The
+  `(first, family)` tuple input stays (it keeps ARC's own surname field whole).
+- nameparser title words that are real given names in ARC's data are removed from its title list:
+  wing, mahdi, sultan, do, tirthankar, king, sheikh, **md, field, sheik** (evidence in the code
+  comments: 18 "Md" records whose real titles are in ARC's title field; Prof Field Rickards;
+  Prof Sheik S Rahman). ARC's `title` field holds all titles, so none belong in a name field.
+- A record with **no given name gets no given tokens** -- the parser used to invent the family
+  name's initial (only for Splink's blocking key), which split ARC DP0210314 "Yeadon" / "P Yeadon".
+  In 00a_ such a record's id is the family name alone, and it joins a same-family name on the
+  other list.
+
+**ARC name survey** (`analysis/14_arc_name_survey.py`, `analysis/utils/arc_name_survey.py`): reads
+raw_json.csv, in-scope only; flags oddities within one record and labels differences between name
+forms (announcement/current on one grant; one ORCID; rare vs common spelling). A resting diagnostic
+tool; nothing reads its output. Its labeller was copied to `src/utils/name_differences.py` (used
+only for the `kind` column of arc_name_changes.csv -- describes, never decides).
+
+**Findings that shaped the rules** (in-scope; details and scripts in
+`scratch/arc_name_checks_20260930/`, git-ignored):
+- Every announcement/current join 00a_ made shared the first or the final name token; unjoined
+  pairs sharing one were mostly the same person (married names, hyphenation, nicknames) with ~20
+  exceptions, only one (Ovenden/Seddon) contradicted by ORCID.
+- No evidence of a wrong ARC ORCID where the names agree (the one such row on file, Wei Liu in
+  manual_orcid_corrections.csv, rests on judgement, not a registry check). A few people have two
+  ORCIDs.
+- Name-change evidence is **only** used for the records it was found on (the grant, or the records
+  under that ORCID) -- never extended to other records with the same name form ("Ben White" is
+  Benedict for one ORCID and Benjamin for another).
+
+**`00a_extract_arc.py` now** (see its module docstring):
+1. applies `correct` rows from `data_persisted/arc_name_overrides.csv` before parsing;
+2. joins an announcement-only name to a current-only name on one grant by: hand `add` → same ARC
+   ORCID → overlapping full_name_keys → same first or family name; each one-to-one, never guessed;
+   a `no` row blocks a pair;
+3. gives records under one ARC ORCID each other's full_name_keys (`keys_via_orcid`), unless a `no`
+   row under that ORCID blocks it; ids unchanged;
+4. writes **in-scope records only** (scope test now in `config/scope.py`: `admin_orgs_canonical()`,
+   `grant_in_scope()`, `record_in_scope()`; the final role decides, so a CI joined to a current PI
+   record is dropped -- Paul 't Hart, Maria/Isabel Metz, Andrea (de Silva-)Sanigorski, accepted);
+5. writes `processed/arc_name_changes.csv`: every join and every candidate not joined, with
+   apply/reason/rule/kind -- the list to review. A row of the overrides file that matches nothing
+   stops the run.
+
+`arc_name_overrides.csv` is hand-kept, keyed on grant or ORCID + ARC's raw first/family names
+(never an id). Seeded with 8 corrections (run-together or hyphenated initials: ABM Ashrafi, AFM F
+Islam, AW Snyder, AZ Kouzani, Y-W Mai, S-C Lo, Y-X Lin; unbracketed "nee": Clare Murphy) and 14
+`no` rows (two people or not established: Pedersen/Kavanagh, Hawley/Cook, Jones/Beynon,
+Ovenden/Seddon, Bull/Jardine, Vinden/Farrell, Williams/Tilley, Jacqueline/Barry Croke, Neil/Peter
+Robinson, Malcolm/George Smith, David/George Saunders, Mark/Thomas Gabbott; wrong ORCID:
+Wang/Duan, Bunda/Lasczik). "Rachel Ong ViforJ" is a real surname, not junk. New cases found during
+ACIF construction are meant to be added here.
+
+**Run (2026-09-30):** 33,650 grants / 120,342 records read; 30,310 / 62,779 in scope. Joins:
+502 same_orcid, 377 automatic, 141 first_or_last; 12 candidates blocked by `no`. 336 ORCIDs carry
+2+ name forms; 546 records gained keys. `merge_by_orcid()` then leaves 0 same-ORCID groups
+unmerged (was 89). All in-scope id changes reconciled (joins, the Md/Field/Sheik parser fix, the
+Yeadon fix, the Murphy correction, the four CI→PI drops).
+
+**`data_persisted/manual_*.csv` rekeyed** to the new ids (19 id strings in 4 files, matched through
+ARC's raw name strings on the same grant; nothing else changed) and 7 `manual_merges.csv` rows
+removed because 00a_ now joins those pairs itself (Smyth, Dancer, Yu, Lauck/McBain, Adelaar,
+Graham, Izan). 44 referenced ids no longer exist because their records are out of scope; those
+rows are inert. `award_rename_map.parquet` (orphan) deleted.
+
+**Archived to `ZARCHIVE/src_archive_20260930/`** (git mv): everything in `src/` not used by
+00a/00b/00c/acif/acif_oax_linker -- 01_prepare_arc, 01a_diagnose, 04a_orcid_assist,
+06_build_oeuvre, "design 04_ filter.md", utils/awards_cif, cluster_checks, oeuvre_build,
+work_piling, pipeline_freshness, verify_family_name_blocking, name_set_processing, era_journals,
+orcid_processor, orcid_client, orcid_cache, fetch_orcid, orcid_processor_arc_adapter, and their 7
+tests. `00c_` and `acif_oax_linker.py` now take `load_grant_for2020_codes` from `src/acif/build.py`
+(identical output, 30,475 grants). `analysis/` untouched by decision.
+
+**Open:** `src/acif` must write its own list of people before the OpenAlex linker can stop reading
+the old `awards_cif_arc_only.parquet`; later merge tests need a hard veto on two different ARC
+ORCIDs (not built); the two shell scripts are stale.
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.

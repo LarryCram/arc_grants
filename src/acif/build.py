@@ -24,46 +24,10 @@ import pandas as pd
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from config.scope import KEEP_ROLES, KEEP_SCHEMES
+from config.scope import KEEP_ROLES, KEEP_SCHEMES, admin_orgs_canonical as _admin_orgs_canonical
 from config.settings import PROCESSED_DATA, GRANT_SUMMARIES_CSV, ADMIN_ORGS_CSV, ARC_GRANTS_CSV
 from src.utils.for_resolve import upgrade_for_name, upgrade_for_code, resolve_arc_for_entry, for2020_group_name
 from src.acif.models import AwardCIFItem, AwardsCIF
-
-
-def _admin_orgs_canonical() -> tuple[set[str], dict[str, str], dict[str, str]]:
-    """admin_orgs.csv, read once, resolved via the canonical organisationName GROUP rather than
-    trusting each alias row individually (an alias row can be correctly flagged HEP='y' but have
-    a blank hep_code/institution_id cell while a sibling alias for the same real institution
-    carries the real data -- src/utils/awards_cif.py::_load_admin_orgs_rows()'s own finding,
-    ported once here rather than as three separate near-duplicate readers).
-
-    Returns (hep_admin_org_aliases, alias_to_hep_code, alias_to_institution_id)."""
-    rows = list(csv.DictReader(open(ADMIN_ORGS_CSV, newline="", encoding="utf-8")))
-    canonical_hep_code: dict[str, str] = {}
-    canonical_institution_id: dict[str, str] = {}
-    for row in rows:
-        name = row.get("organisationName", "").strip()
-        hep_code = row.get("hep_code", "").strip()
-        inst_id = row.get("institution_id", "").strip()
-        if name and hep_code and name not in canonical_hep_code:
-            canonical_hep_code[name] = hep_code
-        if name and inst_id and name not in canonical_institution_id:
-            canonical_institution_id[name] = inst_id
-
-    hep_admin_org_aliases: set[str] = set()
-    alias_to_hep_code: dict[str, str] = {}
-    alias_to_institution_id: dict[str, str] = {}
-    for row in rows:
-        alias = row.get("organisationName_alias", "").strip()
-        name = row.get("organisationName", "").strip()
-        if not alias:
-            continue
-        if name in canonical_hep_code:
-            hep_admin_org_aliases.add(alias)
-            alias_to_hep_code[alias] = canonical_hep_code[name]
-        if name in canonical_institution_id:
-            alias_to_institution_id[alias] = canonical_institution_id[name]
-    return hep_admin_org_aliases, alias_to_hep_code, alias_to_institution_id
 
 
 DATA_PERSISTED = Path(__file__).resolve().parents[2] / "data_persisted"

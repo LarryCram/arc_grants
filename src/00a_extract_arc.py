@@ -1,35 +1,53 @@
 """
-00_profile_arc.py
+00a_extract_arc.py -- the only ARC loader, and the only place an ARC name is parsed.
 
 PURPOSE:
-    Parse and profile the raw ARC grants CSV.
-    Each row contains a JSON blob in the 'single_grant' column.
-    This script extracts, flattens, and profiles the data without
-    modifying the source file.
+    Read every grant in the raw ARC CSV (a JSON blob per row in 'single_grant'), clean the
+    investigator names, and write only the in-scope grants and records. The source is not modified.
 
 INPUT:
     DATA_ROOT/raw/raw_json.csv
+    data_persisted/arc_name_overrides.csv   -- hand-kept name decisions (see NameOverrides):
+                                               correct / no / add rows, keyed on grant or ORCID plus
+                                               ARC's raw first and family names. A row that matches
+                                               nothing stops the run.
 
-OUTPUT:
-    DATA_ROOT/processed/grants_flat.parquet      -- Flattened grant records (enriched with primary_field_of_research)
-    DATA_ROOT/processed/investigators_raw.parquet -- Extracted investigator records
-    DATA_ROOT/processed/arc_names.parquet        -- NameParser() output per unique_id: the ONLY
-                                                    parsed ARC names; nothing else parses one
-    DATA_ROOT/processed/arc_name_renames.parquet -- announcement/current forms merged because
-                                                    their parsed full_name_keys overlap
-    OUTPUT_ROOT/profiles/grant_profile.txt       -- Human readable summary
+OUTPUT (in-scope only: KEEP_SCHEMES grant, HEP administering organisation, KEEP_ROLES final role):
+    DATA_ROOT/processed/grants_flat.parquet       -- flattened grants (+ primary_for_name)
+    DATA_ROOT/processed/investigators_raw.parquet -- one row per investigator id
+    DATA_ROOT/processed/arc_names.parquet         -- NameParser() output per id: the ONLY parsed ARC
+                                                     names. full_name_keys = keys of every form joined
+                                                     into the id + keys_via_orcid
+    DATA_ROOT/processed/arc_name_renames.parquet  -- announcement ids joined into a current id, with
+                                                     the rule that joined them
+    DATA_ROOT/processed/arc_name_changes.csv      -- every join made and every candidate not made,
+                                                     same grant and ORCID, with apply yes/no, reason,
+                                                     rule and kind of difference -- the list to review
+    OUTPUT_ROOT/profiles/grant_profile.txt        -- human-readable summary
 
-DECISIONS ENCODED HERE:
-    - investigators-at-announcement used as primary (investigators-current often empty)
+NAME CLEANING (2026-09-30):
+    1. 'correct' overrides rewrite a raw name before parsing (e.g. "AW Snyder" -> "A W Snyder").
+    2. On one grant, an announcement name missing from the current list joins a current name
+       missing from the announcement list: hand 'add', then the same ARC ORCID, then overlapping
+       full_name_keys, then same first or family name -- each one-to-one, never guessed; a 'no'
+       override blocks a pair.
+       See extract_investigators().
+    3. Records under one ARC ORCID share their full_name_keys (ids unchanged), unless a 'no'
+       override under that ORCID blocks the pair. See orcid_name_links().
+
+OTHER DECISIONS ENCODED HERE:
+    - title/role/is_fellowship/first and family name prefer the current list; ORCID prefers the
+      announcement list, backfilled from current
     - ORCIDs trimmed of whitespace on extraction
-    - FOR type retained to distinguish FOR08 vs FOR20 (pre/post 2018)
-    - Partner Investigators (PI) retained but flagged separately
     - Both administering-organisation and announcement-administering-organisation retained
 """
 
 import json
 import sys
-from dataclasses import asdict
+from collections import Counter
+from dataclasses import asdict, dataclass, field
+from itertools import combinations
+from typing import NamedTuple
 import pandas as pd
 from pathlib import Path
 
@@ -38,9 +56,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.settings import ARC_GRANTS_CSV, GRANT_SUMMARIES_CSV, PROFILES_OUT, PROCESSED_DATA
 from src.utils.paths import ensure_dirs
 from src.utils.io import setup_stdout_utf8
+from config.scope import KEEP_ROLES, admin_orgs_canonical, grant_in_scope
 from src.utils.names import HumanNameParser, ParsedName
+from src.utils.name_differences import difference_label, keys_relation
 
 _NAME_PARSER = HumanNameParser()
+ANNOUNCEMENT, CURRENT = "announcement", "current"
+NAME_OVERRIDES_CSV = Path(__file__).resolve().parents[1] / "data_persisted" / "arc_name_overrides.csv"
 
 
 def safe_str(val) -> str:
@@ -63,134 +85,324 @@ def parse_row(row_json: str, row_index: int) -> dict | None:
         return None
 
 
-def _parse_investigator_list(inv_list: list, grant_code: str) -> dict[str, list[tuple[dict, ParsedName]]]:
-    """unique_id -> [(raw investigator dict, ParsedName), ...] for one snapshot list, in list
-    order. Every name is parsed here, once, by NameParser(); the id's name part is the parser's
-    full_name_key (full_name_key_raw when the ASCII key is empty, per ParsedName's own contract)."""
-    out: dict[str, list] = {}
+# ── Hand-kept name overrides ────────────────────────────────────────────────
+
+@dataclass
+class NameOverrides:
+    """data_persisted/arc_name_overrides.csv, keyed on ARC's raw names (never on an id, so parser or
+    id changes can't make a row stale). Actions:
+      correct -- (grant_code, first_name, family_name) is rewritten to (first_name_2, family_name_2)
+                 before parsing, e.g. "AW Snyder" -> "A W Snyder"
+      no      -- the two names are not to be joined: on grant_code (same-grant join) or under orcid
+                 (ORCID key sharing)
+      add     -- the two names on grant_code are one person, joined although no rule finds them
+    `used` collects every row that matched something; a row that matches nothing is an error."""
+    corrections: dict = field(default_factory=dict)  # (grant, first, family) -> (first, family)
+    no_grant: dict = field(default_factory=dict)     # (grant, frozenset{form, form}) -> note
+    no_orcid: dict = field(default_factory=dict)     # (orcid, frozenset{form, form}) -> note
+    add_grant: dict = field(default_factory=dict)    # (grant, frozenset{form, form}) -> note
+    used: set = field(default_factory=set)
+
+    def lookup(self, table: str, scope: str, forms_a, forms_b) -> str | None:
+        """Note of the first `table` row joining any form in forms_a to any form in forms_b."""
+        rows = getattr(self, table)
+        for fa in sorted(forms_a):
+            for fb in sorted(forms_b):
+                k = (scope, frozenset((fa, fb)))
+                if k in rows:
+                    self.used.add((table, k))
+                    return rows[k]
+        return None
+
+    def unused(self) -> list[str]:
+        out = [f"correct {g} {f!r} {l!r}" for (g, f, l) in self.corrections
+               if ("corrections", (g, f, l)) not in self.used]
+        for table in ("no_grant", "no_orcid", "add_grant"):
+            out += [f"{table} {k[0]} {sorted(k[1])}" for k in getattr(self, table)
+                    if (table, k) not in self.used]
+        return out
+
+
+def load_name_overrides(path: Path = NAME_OVERRIDES_CSV) -> NameOverrides:
+    ov = NameOverrides()
+    if not path.exists():
+        return ov
+    df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    for i, r in df.iterrows():
+        where = f"{path.name} row {i + 2}"
+        form_a = (r["first_name"], r["family_name"])
+        form_b = (r["first_name_2"], r["family_name_2"])
+        grant, orcid = r["grant_code"].strip(), r["orcid"].strip()
+        if r["action"] == "correct":
+            if not grant or orcid:
+                raise ValueError(f"{where}: 'correct' needs grant_code and no orcid")
+            ov.corrections[(grant, *form_a)] = form_b
+        elif r["action"] in ("no", "add"):
+            if form_a == form_b:
+                raise ValueError(f"{where}: the two names are identical")
+            pair = frozenset((form_a, form_b))
+            if r["action"] == "add":
+                if not grant or orcid:
+                    raise ValueError(f"{where}: 'add' needs grant_code and no orcid")
+                ov.add_grant[(grant, pair)] = r["notes"]
+            elif bool(grant) == bool(orcid):
+                raise ValueError(f"{where}: 'no' needs exactly one of grant_code / orcid")
+            elif grant:
+                ov.no_grant[(grant, pair)] = r["notes"]
+            else:
+                ov.no_orcid[(orcid, pair)] = r["notes"]
+        else:
+            raise ValueError(f"{where}: unknown action {r['action']!r}")
+    return ov
+
+
+# ── Investigators: parse, then join announcement and current forms ──────────
+
+class _Entry(NamedTuple):
+    """One investigator entry in one of a grant's two lists. raw_* are ARC's own strings;
+    first/family are what was parsed (after any 'correct' override)."""
+    inv: dict
+    source: str
+    raw_first: str
+    raw_family: str
+    first: str
+    family: str
+    parsed: ParsedName
+
+
+class GrantNames(NamedTuple):
+    investigators: list[dict]           # one row per unique_id
+    names: list[dict]                   # arc_names rows
+    renames: list[dict]                 # announcement id merged into a current id
+    pairs: list[dict]                   # same-grant candidate pairs, applied or not
+    entries: dict[str, list[_Entry]]    # unique_id -> its entries (for the ORCID step)
+
+
+def _parse_investigator_list(inv_list: list, grant_code: str, source: str,
+                             overrides: NameOverrides) -> dict[str, list[_Entry]]:
+    """unique_id -> entries for one list, in list order. Every name is parsed here, once, by
+    NameParser(), after any 'correct' override; the id's name part is the parser's full_name_key
+    (full_name_key_raw when the ASCII key is empty, per ParsedName's own contract)."""
+    out: dict[str, list[_Entry]] = {}
     for inv in inv_list:
-        first_name = safe_str(inv.get("firstName"))
-        family_name = safe_str(inv.get("familyName"))
-        parsed = _NAME_PARSER.parse((first_name, family_name))
-        key = parsed.full_name_key or parsed.full_name_key_raw
+        raw_first = safe_str(inv.get("firstName"))
+        raw_family = safe_str(inv.get("familyName"))
+        k = (grant_code, raw_first, raw_family)
+        first, family = overrides.corrections.get(k, (raw_first, raw_family))
+        if k in overrides.corrections:
+            overrides.used.add(("corrections", k))
+        parsed = _NAME_PARSER.parse((first, family))
+        # A record with no given name has no full_name_key; its id is the family name alone.
+        key = parsed.full_name_key or parsed.full_name_key_raw or parsed.family_name_main
         if key is None:
-            raise ValueError(f"{grant_code}: NameParser returned no key for {first_name!r} {family_name!r}")
-        out.setdefault(f"{grant_code}_{key}", []).append((inv, parsed))
+            raise ValueError(f"{grant_code}: NameParser returned no key for {first!r} {family!r}")
+        out.setdefault(f"{grant_code}_{key}", []).append(
+            _Entry(inv, source, raw_first, raw_family, first, family, parsed))
     return out
 
 
-def _display_name(inv: dict) -> str:
-    return f"{safe_str(inv.get('firstName'))} {safe_str(inv.get('familyName'))}".strip()
+def _display_name(first: str, family: str) -> str:
+    return f"{first} {family}".strip()
 
 
-def extract_investigators(attrs: dict, grant_code: str) -> tuple[list[dict], list[dict], list[dict]]:
+def _forms(entries: list[_Entry]) -> set[tuple[str, str]]:
+    return {(e.raw_first, e.raw_family) for e in entries}
+
+
+def _keys(entries: list[_Entry]) -> set[str]:
+    return {k for e in entries for k in e.parsed.full_name_keys}
+
+
+def _same_name(a_entries, c_entries) -> bool:
+    """Overlapping full_name_keys; or, when one side has no given name recorded at all (ARC
+    DP0210314: blank at announcement, "P Yeadon" current), the same family name."""
+    if _keys(a_entries) & _keys(c_entries):
+        return True
+    no_given = (not any(e.parsed.given_tokens for e in a_entries)
+                or not any(e.parsed.given_tokens for e in c_entries))
+    families = lambda es: {f for e in es for f in e.parsed.family_names}
+    return no_given and bool(families(a_entries) & families(c_entries))
+
+
+def _same_orcid(a_entries, c_entries) -> bool:
+    """Both sides carry the same ARC ORCID."""
+    orcids = lambda es: {(e.inv.get("orcidIdentifier") or "").strip() for e in es} - {""}
+    return bool(orcids(a_entries) & orcids(c_entries))
+
+
+def _shares_first_or_last(a_entries, c_entries) -> bool:
+    """Same first name (first_name_canonical) or same family name (family_name_main)."""
+    for a in a_entries:
+        for c in c_entries:
+            pa, pc = a.parsed, c.parsed
+            if pa.first_name_canonical and pa.first_name_canonical == pc.first_name_canonical:
+                return True
+            if pa.family_name_main and pa.family_name_main == pc.family_name_main:
+                return True
+    return False
+
+
+def _one_to_one(edges: set[tuple[str, str]]) -> set[tuple[str, str]]:
+    """Edges whose announcement end and current end each have exactly one edge."""
+    deg_a = Counter(a for a, _ in edges)
+    deg_c = Counter(c for _, c in edges)
+    return {(a, c) for a, c in edges if deg_a[a] == 1 and deg_c[c] == 1}
+
+
+def extract_investigators(attrs: dict, grant_code: str,
+                          overrides: NameOverrides | None = None) -> GrantNames:
     """
     Extract investigators from a grant's attributes dict -- the only place an ARC name is parsed.
-    Returns (investigator_rows, arc_name_rows, rename_rows).
 
     Unions investigators-at-announcement and investigators-current. Every name is parsed once by
-    NameParser(); the id is grant_code + "_" + the parser's full_name_key. An announcement name and
-    a current name are the same investigator when their parsed names agree:
-      - same id, or
-      - their full_name_keys sets overlap (e.g. DE120101452 "Mahmuda Akhtar" / "M. Shumi Akhtar"
-        share m_akhtar), one-to-one only -- an announcement name overlapping 2+ current names (or
-        the reverse) is left unmerged, never guessed. The pair merges into the current id and is
-        reported in rename_rows.
-    Anything else is an addition or deletion between snapshots. (2026-09-29: replaces a "one
-    dropped + one added = rename" rule, first in 00c_extract_propensities.py's award_rename_map,
-    that ignored the names and merged different people, e.g. "Jessica Hyles" / "Ben Trevaskis".)
+    NameParser() (after any 'correct' override); the id is grant_code + "_" + the parser's
+    full_name_key. Whole lists are compared, whatever the roles (filtering each list by role first
+    turned a role swap between two people into a false rename -- LP100100367, Taylor/Gray). An
+    announcement name that is not in the current list joins a current name that is not in the
+    announcement list, into the current id, by the first of these that applies:
+      1. hand_add      -- an 'add' row in arc_name_overrides.csv
+      2. same_orcid    -- both carry the same ARC ORCID (DP0772887 "Shu Ng" / "Shu-Kay Angus Ng";
+                          DP0209969 "Kotagiri Ramamohanarao" / "Ramamohanarao Kotagiri"); one-to-one
+                          only (2026-09-30)
+      3. automatic     -- their full_name_keys overlap (DE120101452 "Mahmuda Akhtar" / "M. Shumi
+                          Akhtar" share m_akhtar), or one side has no given name and the family
+                          names agree (DP0210314 blank / "P Yeadon"); one-to-one only
+      4. first_or_last -- same first name or same family name (Karen Ford / Karen Marsh, Tom Davis /
+                          Thomas Davis); one-to-one only (2026-09-30)
+    A 'no' row in arc_name_overrides.csv blocks 2-4 for that pair. Anything left is an addition
+    or deletion. (2026-09-29: replaces a "one dropped + one added = rename" rule that ignored the
+    names and merged different people, e.g. "Jessica Hyles" / "Ben Trevaskis".)
 
-    arc_name_rows: one row per id -- the parser's fields for the display form (current if present),
-    full_name_keys unioned over every raw form merged into the id, the raw name_forms, which
-    snapshot(s) the id appeared in (in_announcement / in_current), and renamed_from (the
-    announcement id merged in, if any).
+    title/role_code/role_name/is_fellowship/first_name/family_name prefer the CURRENT record (ARC
+    corrects these over time -- FT100100761/FT100100627, "CI" at announcement, "FT" current),
+    falling back to the announcement record only when the id is not in the current list.
+    is_fellowship is derived from role_code in ARC's data (0 cases where role_code matches and
+    is_fellowship differs). ORCID keeps announcement-first precedence, backfilled from current (1
+    conflict in 78,571 matched pairs).
 
-    title/role_code/role_name/is_fellowship/first_name/family_name prefer the CURRENT record (2026-09-29 fix,
-    confirmed via real cases -- e.g. FT100100761/FT100100627, both an identical person/ORCID
-    whose role_code was corrected from a generic "CI" at announcement to the properly-specific
-    "FT"/is_fellowship=True at current -- an ARC administrative correction/refinement over time,
-    not two genuine facts to reconcile), falling back to the announcement record's own value
-    only when current genuinely lacks one (an announcement-only investigator who never appears
-    in the current snapshot at all). is_fellowship in particular was checked directly and found
-    to be entirely DERIVED from role_code -- 0 real cases exist where role_code matches but
-    is_fellowship still differs -- so no separate handling was needed for it beyond following
-    role_code's own precedence.
-
-    ORCID keeps its own separate, unchanged precedence: whichever source is processed first
-    (announcement) wins, backfilling from current only if announcement's own orcid is empty --
-    a real ORCID essentially never legitimately differs between snapshots (confirmed directly:
-    1 conflict in 78,571 real matched pairs), so this precedence rarely matters in practice and
-    wasn't part of what changed here.
+    Returns GrantNames: investigator rows; arc_names rows (parser fields for the display form,
+    full_name_keys unioned over every form merged into the id, name_forms, corrected_from,
+    in_announcement / in_current, renamed_from, rename_rule); rename rows; candidate pair rows
+    (every join made, plus every first_or_last candidate not made, with the reason); and each id's
+    entries for the ORCID step in main().
     """
-    ann = _parse_investigator_list(attrs.get("investigators-at-announcement") or [], grant_code)
-    curr = _parse_investigator_list(attrs.get("investigators-current") or [], grant_code)
+    ov = overrides if overrides is not None else NameOverrides()
+    ann = _parse_investigator_list(attrs.get("investigators-at-announcement") or [], grant_code, ANNOUNCEMENT, ov)
+    curr = _parse_investigator_list(attrs.get("investigators-current") or [], grant_code, CURRENT, ov)
 
-    def _keys(entries):
-        return {k for _, parsed in entries for k in parsed.full_name_keys}
+    def blocked(a, c):
+        return ov.lookup("no_grant", grant_code, _forms(ann[a]), _forms(curr[c]))
 
-    only_ann, only_curr = set(ann) - set(curr), set(curr) - set(ann)
-    overlaps = {a: {c for c in only_curr if _keys(ann[a]) & _keys(curr[c])} for a in only_ann}
     renamed: dict[str, str] = {}
-    for a, cs in overlaps.items():
-        if len(cs) == 1:
-            c = next(iter(cs))
-            if sum(c in other for other in overlaps.values()) == 1:
-                renamed[a] = c
+    rule: dict[str, str] = {}
+    pairs: dict[tuple[str, str], dict] = {}
+
+    def pair_row(a, c, how, apply, reason=""):
+        ea, ec = ann[a][0], curr[c][0]
+        return {
+            "apply": apply, "reason": reason, "rule": how, "evidence": "same grant",
+            "grant_code": grant_code, "orcid": None,
+            "source_first": ea.raw_first, "source_family": ea.raw_family,
+            "target_first": ec.raw_first, "target_family": ec.raw_family,
+            "kind": difference_label(ea.parsed, ec.parsed),
+            "keys_relation": keys_relation(ea.parsed, ec.parsed),
+            "source_unique_id": a, "target_unique_id": c,
+            "source_role": safe_str(ea.inv.get("roleCode")), "target_role": safe_str(ec.inv.get("roleCode")),
+        }
+
+    def rest():
+        done_c = set(renamed.values())
+        return ([a for a in sorted(set(ann) - set(curr)) if a not in renamed],
+                [c for c in sorted(set(curr) - set(ann)) if c not in done_c])
+
+    # 1. hand_add
+    rest_a, rest_c = rest()
+    for a in rest_a:
+        for c in rest_c:
+            note = ov.lookup("add_grant", grant_code, _forms(ann[a]), _forms(curr[c]))
+            if note is None:
+                continue
+            if a in renamed or c in renamed.values():
+                raise ValueError(f"{grant_code}: 'add' rows join {a} or {c} twice")
+            renamed[a], rule[a] = c, "hand_add"
+            pairs[(a, c)] = pair_row(a, c, "hand_add", "yes", note)
+
+    # 2. same_orcid, 3. automatic, 4. first_or_last -- each one-to-one among what is still unjoined
+    for how, test in (("same_orcid", _same_orcid), ("automatic", _same_name),
+                      ("first_or_last", _shares_first_or_last)):
+        rest_a, rest_c = rest()
+        edges, notes = set(), {}
+        for a in rest_a:
+            for c in rest_c:
+                if not test(ann[a], curr[c]):
+                    continue
+                note = blocked(a, c)
+                if note is not None:
+                    pairs.setdefault((a, c), pair_row(a, c, how, "no", note))
+                else:
+                    edges.add((a, c))
+        joined = _one_to_one(edges)
+        for a, c in joined:
+            renamed[a], rule[a] = c, how
+            pairs[(a, c)] = pair_row(a, c, how, "yes")
+        if how in ("same_orcid", "first_or_last"):
+            for a, c in edges - joined:
+                pairs[(a, c)] = pair_row(a, c, how, "no", "not one-to-one")
 
     seen: dict[str, dict] = {}
-    forms: dict[str, dict[str, list]] = {}  # unique_id -> {source: [(inv, ParsedName), ...]}
+    forms: dict[str, dict[str, list[_Entry]]] = {}
 
     def _process(by_id, source):
         for raw_id, entries in by_id.items():
             unique_id = renamed.get(raw_id, raw_id)
-            forms.setdefault(unique_id, {"announcement": [], "current": []})[source].extend(entries)
-            inv = entries[0][0]
+            forms.setdefault(unique_id, {ANNOUNCEMENT: [], CURRENT: []})[source].extend(entries)
+            e = entries[0]
+            inv = e.inv
             orcid_clean = (inv.get("orcidIdentifier") or "").strip() or None
+            fields = {
+                "title":         safe_str(inv.get("title")),
+                "first_name":    e.first,
+                "family_name":   e.family,
+                "role_code":     safe_str(inv.get("roleCode")),
+                "role_name":     safe_str(inv.get("roleName")),
+                "is_fellowship": inv.get("isFellowship", False),
+            }
             if unique_id not in seen:
-                seen[unique_id] = {
-                    "unique_id":     unique_id,
-                    "grant_code":    grant_code,
-                    "title":         safe_str(inv.get("title")),
-                    "first_name":    safe_str(inv.get("firstName")),
-                    "family_name":   safe_str(inv.get("familyName")),
-                    "role_code":     safe_str(inv.get("roleCode")),
-                    "role_name":     safe_str(inv.get("roleName")),
-                    "is_fellowship": inv.get("isFellowship", False),
-                    "orcid":         orcid_clean,
-                    "inv_source":    source,
-                }
+                seen[unique_id] = {"unique_id": unique_id, "grant_code": grant_code, **fields,
+                                   "orcid": orcid_clean, "inv_source": source}
                 continue
-            # Present in both lists (or merged as a rename): ORCID keeps announcement-first
-            # precedence, backfilled from current; everything else prefers current.
+            # Present in both lists (or joined): ORCID keeps announcement-first precedence,
+            # backfilled from current; everything else prefers current.
             row = seen[unique_id]
             if orcid_clean and not row["orcid"]:
                 row["orcid"] = orcid_clean
-            if source == "current":
-                row["title"] = safe_str(inv.get("title"))
-                row["first_name"] = safe_str(inv.get("firstName"))
-                row["family_name"] = safe_str(inv.get("familyName"))
-                row["role_code"] = safe_str(inv.get("roleCode"))
-                row["role_name"] = safe_str(inv.get("roleName"))
-                row["is_fellowship"] = inv.get("isFellowship", False)
+            if source == CURRENT:
+                row.update(fields)
                 row["inv_source"] = source
 
-    _process(ann, "announcement")
-    _process(curr, "current")
+    _process(ann, ANNOUNCEMENT)
+    _process(curr, CURRENT)
 
     announcement_id_for = {c: a for a, c in renamed.items()}
-    name_rows = []
+    name_rows, entries_by_id = [], {}
     for unique_id, by_source in forms.items():
-        all_forms = by_source["current"] + by_source["announcement"]
-        display = all_forms[0][1]
+        all_entries = by_source[CURRENT] + by_source[ANNOUNCEMENT]
+        entries_by_id[unique_id] = all_entries
+        display = all_entries[0].parsed
         name_row = {k: (list(v) if isinstance(v, tuple) else v) for k, v in asdict(display).items()}
-        name_row["full_name_keys"] = list(dict.fromkeys(k for _, p in all_forms for k in p.full_name_keys))
+        name_row["full_name_keys"] = list(dict.fromkeys(k for e in all_entries for k in e.parsed.full_name_keys))
+        a = announcement_id_for.get(unique_id)
         name_rows.append({
             "unique_id": unique_id,
             "grant_code": grant_code,
-            "in_announcement": bool(by_source["announcement"]),
-            "in_current": bool(by_source["current"]),
-            "renamed_from": announcement_id_for.get(unique_id),
-            "name_forms": list(dict.fromkeys(_display_name(inv) for inv, _ in all_forms)),
+            "in_announcement": bool(by_source[ANNOUNCEMENT]),
+            "in_current": bool(by_source[CURRENT]),
+            "renamed_from": a,
+            "rename_rule": rule.get(a) if a else None,
+            "name_forms": list(dict.fromkeys(_display_name(e.first, e.family) for e in all_entries)),
+            "corrected_from": list(dict.fromkeys(
+                _display_name(e.raw_first, e.raw_family) for e in all_entries
+                if (e.raw_first, e.raw_family) != (e.first, e.family))),
             **name_row,
         })
 
@@ -199,13 +411,69 @@ def extract_investigators(attrs: dict, grant_code: str) -> tuple[list[dict], lis
             "grant_code": grant_code,
             "announcement_unique_id": a,
             "current_unique_id": c,
-            "announcement_name": _display_name(ann[a][0][0]),
-            "current_name": _display_name(curr[c][0][0]),
+            "announcement_name": _display_name(ann[a][0].raw_first, ann[a][0].raw_family),
+            "current_name": _display_name(curr[c][0].raw_first, curr[c][0].raw_family),
+            "rule": rule[a],
             "shared_keys": sorted(_keys(ann[a]) & _keys(curr[c])),
         }
         for a, c in renamed.items()
     ]
-    return list(seen.values()), name_rows, rename_rows
+    return GrantNames(list(seen.values()), name_rows, rename_rows, list(pairs.values()), entries_by_id)
+
+
+# ── ORCID: name forms under one ORCID share their keys ──────────────────────
+
+def orcid_name_links(inv: pd.DataFrame, entries: dict[str, list[_Entry]],
+                     year_by_grant: dict[str, float],
+                     overrides: NameOverrides) -> tuple[list[dict], dict[str, set[str]]]:
+    """Records (rows of `inv`, already in scope) carrying the same ARC ORCID are one person's, so
+    each record gains the full_name_keys of every other record under that ORCID -- Karen Ford /
+    Karen Marsh, Tom Davis / Thomas Davis -- unless a 'no' row under that ORCID blocks the pair
+    (Chien Ming Wang / Wenhui Duan: the ORCID is Duan's). Ids do not change.
+
+    Returns (pair rows for arc_name_changes.csv: one per pair of distinct name forms under an
+    ORCID, target = the form on the later grant; keys added per unique_id)."""
+    rows: list[dict] = []
+    added: dict[str, set[str]] = {}
+    with_orcid = inv[inv.orcid.notna()]
+    for orcid, uids in with_orcid.groupby("orcid").unique_id:
+        uids = sorted(set(uids))
+        own = {u: _keys(entries[u]) for u in uids}
+        forms: dict[tuple[str, str], dict] = {}
+        for u in uids:
+            year = year_by_grant.get(u.split("_", 1)[0])
+            for e in entries[u]:
+                f = forms.setdefault((e.raw_first, e.raw_family), {"ids": set(), "parsed": e.parsed, "year": None})
+                f["ids"].add(u)
+                if year is not None and not pd.isna(year):
+                    f["year"] = year if f["year"] is None else max(f["year"], year)
+        for fa, fb in combinations(sorted(forms), 2):
+            note = overrides.lookup("no_orcid", orcid, {fa}, {fb})
+            ya, yb = forms[fa]["year"] or 0, forms[fb]["year"] or 0
+            src, tgt = (fb, fa) if ya > yb else (fa, fb)
+            rows.append({
+                "apply": "no" if note is not None else "yes", "reason": note or "",
+                "rule": "orcid", "evidence": "ORCID",
+                "grant_code": ";".join(sorted({u.split("_", 1)[0] for f in (fa, fb) for u in forms[f]["ids"]})),
+                "orcid": orcid,
+                "source_first": src[0], "source_family": src[1],
+                "target_first": tgt[0], "target_family": tgt[1],
+                "kind": difference_label(forms[src]["parsed"], forms[tgt]["parsed"]),
+                "keys_relation": keys_relation(forms[src]["parsed"], forms[tgt]["parsed"]),
+                "source_unique_id": ";".join(sorted(forms[src]["ids"])),
+                "target_unique_id": ";".join(sorted(forms[tgt]["ids"])),
+                "source_role": None, "target_role": None,
+            })
+        for u in uids:
+            for v in uids:
+                if u == v:
+                    continue
+                if overrides.lookup("no_orcid", orcid, _forms(entries[u]), _forms(entries[v])) is not None:
+                    continue
+                extra = own[v] - own[u]
+                if extra:
+                    added.setdefault(u, set()).update(extra)
+    return rows, added
 
 
 # Removed extract_for_codes as we are now using primary_field_of_research from grant_summaries
@@ -291,11 +559,17 @@ def main():
         print(f"ERROR: 'single_grant' column not found. Columns: {list(df_raw.columns)}")
         sys.exit(1)
 
-    # ── Parse all rows ───────────────────────────────────────────────────────
+    overrides = load_name_overrides()
+    print(f"Name overrides: {NAME_OVERRIDES_CSV} -- {len(overrides.corrections)} correct, "
+          f"{len(overrides.no_grant) + len(overrides.no_orcid)} no, {len(overrides.add_grant)} add")
+
+    # ── Parse all rows (every grant and role is read; only in-scope records are written) ──
     grants_flat     = []
     investigators   = []
     arc_names       = []
     renames         = []
+    pairs           = []
+    entries         = {}
     parse_failures  = []
 
     for idx, row in df_raw.iterrows():
@@ -307,15 +581,46 @@ def main():
         grant_code = attrs.get("code", f"UNKNOWN_{idx}")
 
         grants_flat.append(extract_grant_flat(attrs, grant_code))
-        inv_rows, name_rows, rename_rows = extract_investigators(attrs, grant_code)
-        investigators.extend(inv_rows)
-        arc_names.extend(name_rows)
-        renames.extend(rename_rows)
+        gn = extract_investigators(attrs, grant_code, overrides)
+        investigators.extend(gn.investigators)
+        arc_names.extend(gn.names)
+        renames.extend(gn.renames)
+        pairs.extend(gn.pairs)
+        entries.update(gn.entries)
 
-    df_grants  = pd.DataFrame(grants_flat)
-    df_inv     = pd.DataFrame(investigators)
-    df_names   = pd.DataFrame(arc_names)
+    df_grants_all = pd.DataFrame(grants_flat)
+    df_inv_all    = pd.DataFrame(investigators)
+
+    # ── Scope: KEEP_SCHEMES grant, HEP administering organisation, KEEP_ROLES final role ──
+    hep_admin_orgs, _, _ = admin_orgs_canonical()
+    grant_ok = {g for g, a in zip(df_grants_all.grant_code, df_grants_all.admin_org)
+                if grant_in_scope(g, a, hep_admin_orgs)}
+    df_grants = df_grants_all[df_grants_all.grant_code.isin(grant_ok)].reset_index(drop=True)
+    df_inv = df_inv_all[df_inv_all.grant_code.isin(grant_ok)
+                        & df_inv_all.role_code.isin(KEEP_ROLES)].reset_index(drop=True)
+    kept_ids = set(df_inv.unique_id)
+    df_names = pd.DataFrame(arc_names)
+    df_names = df_names[df_names.unique_id.isin(kept_ids)].reset_index(drop=True)
     df_renames = pd.DataFrame(renames)
+    df_renames = df_renames[df_renames.current_unique_id.isin(kept_ids)].reset_index(drop=True)
+    df_pairs = pd.DataFrame(pairs)
+    df_pairs = df_pairs[df_pairs.grant_code.isin(grant_ok)
+                        & (df_pairs.source_role.isin(KEEP_ROLES) | df_pairs.target_role.isin(KEEP_ROLES))]
+
+    # ── ORCID: records under one ARC ORCID share their full_name_keys ──
+    year_by_grant = dict(zip(df_grants.grant_code, pd.to_numeric(df_grants.funding_commence_year, errors="coerce")))
+    orcid_rows, keys_via_orcid = orcid_name_links(df_inv, entries, year_by_grant, overrides)
+    df_names["keys_via_orcid"] = [sorted(keys_via_orcid.get(u, ())) for u in df_names.unique_id]
+    df_names["full_name_keys"] = [list(k) + v for k, v in zip(df_names.full_name_keys, df_names.keys_via_orcid)]
+
+    unused = overrides.unused()
+    if unused:
+        raise SystemExit("arc_name_overrides.csv rows that matched nothing (fix or remove them):\n  "
+                         + "\n  ".join(unused))
+
+    df_changes = pd.concat([df_pairs, pd.DataFrame(orcid_rows)], ignore_index=True)
+    df_changes = df_changes.sort_values(["apply", "evidence", "grant_code", "source_family"],
+                                        key=lambda s: s.fillna("")).reset_index(drop=True)
 
     # ── Enrich grants with primary_field_of_research from summaries ──────────
     print(f"\nEnriching grants with {GRANT_SUMMARIES_CSV}")
@@ -333,16 +638,19 @@ def main():
     inv_path     = PROCESSED_DATA / "investigators_raw.parquet"
     names_path   = PROCESSED_DATA / "arc_names.parquet"
     renames_path = PROCESSED_DATA / "arc_name_renames.parquet"
+    changes_path = PROCESSED_DATA / "arc_name_changes.csv"
 
     df_grants.to_parquet(grants_path, index=False)
     df_inv.to_parquet(inv_path, index=False)
     df_names.to_parquet(names_path, index=False)
     df_renames.to_parquet(renames_path, index=False)
+    df_changes.to_csv(changes_path, index=False)
 
     print(f"\n  Saved: {grants_path}")
     print(f"  Saved: {inv_path}")
     print(f"  Saved: {names_path}")
     print(f"  Saved: {renames_path}")
+    print(f"  Saved: {changes_path}")
 
     # ── Profile ──────────────────────────────────────────────────────────────
     profile_lines = []
@@ -408,15 +716,28 @@ def main():
 
     # FOR section removed from profile since we rely on the primary_for_name now.
 
+    p(f"\n── Scope (only in-scope records are written) ───────")
+    p(f"  Grants read / in scope:      {len(df_grants_all):>8,} / {len(df_grants):,}")
+    p(f"  Records read / in scope:     {len(df_inv_all):>8,} / {len(df_inv):,}")
+
     p(f"\n── Announcement vs current (parsed names, arc_names.parquet) ──")
     both = df_names.in_announcement & df_names.in_current
-    p(f"  Same name in both:           {both.sum():>8,}")
+    p(f"  In both lists:               {both.sum():>8,}  (includes {len(df_renames):,} joined forms)")
     p(f"  Only at announcement:        {(df_names.in_announcement & ~df_names.in_current).sum():>8,}  (deletions)")
     p(f"  Only in current:             {(~df_names.in_announcement & df_names.in_current).sum():>8,}  (additions)")
-    p(f"    (both includes {len(df_renames):,} renames -- different forms whose parsed keys overlap)")
-    p(f"  Full rename list: {renames_path}")
-    for r in df_renames.head(20).itertuples():
-        p(f"    {r.grant_code:<14} {r.announcement_name!r} -> {r.current_name!r}  shared={list(r.shared_keys)}")
+    for how, n in df_renames["rule"].value_counts().items():
+        p(f"    joined by {how:<16} {n:>8,}")
+    not_joined = df_pairs[df_pairs["apply"] == "no"]
+    for why, n in not_joined.reason.map(lambda r: "not one-to-one" if r == "not one-to-one" else "override 'no'").value_counts().items():
+        p(f"    candidate not joined ({why}): {n:,}")
+    p(f"\n── ORCID (records under one ORCID share keys) ──────")
+    orc = pd.DataFrame(orcid_rows)
+    p(f"  ORCIDs with 2+ name forms:   {orc.orcid.nunique() if len(orc) else 0:>8,}")
+    p(f"  Name-form pairs:             {len(orc):>8,}  ({(orc['apply'] == 'no').sum() if len(orc) else 0} blocked by override 'no')")
+    p(f"  Records gaining keys:        {len(keys_via_orcid):>8,}")
+    p(f"\n  Name overrides: {len(overrides.corrections)} correct, "
+      f"{len(overrides.no_grant) + len(overrides.no_orcid)} no, {len(overrides.add_grant)} add -- all matched")
+    p(f"  Full list of joins and candidates: {changes_path}")
 
     p(f"\n── Data Quality Flags ──────────────────────────────")
     # Names with only initials
