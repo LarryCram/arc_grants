@@ -35,6 +35,8 @@ resting tools, not updated; some import archived modules and will not run as the
   (`manual_resolutions.csv`, `manual_splits.csv`, `manual_splits_hand_counts.csv`,
   `manual_orcids.csv`, `manual_merges.csv`, `manual_name_corrections.csv`, `manual_orcid_corrections.csv`,
   `arc_name_overrides.csv` (ARC name corrections / don't-join / add rows, read by 00a_, 2026-09-30),
+  `HEP_concordances.xlsx` (copied 2026-09-30 from SpectralRankingGlobal/data: 'Keys' = Scopus
+  affiliation id (EID) per university, 'Variants' = university name variants),
   `manual_splits_by_grant.csv`, `manual_confirmed_not_suspicious.csv`,
   `enrichment_blocklist.csv`,
   `for_concordance.csv`, `for_divisions.csv`, `for_adjacent_divisions.csv`) plus the ANZSRC/Scopus/OpenAlex/ERA source
@@ -3100,6 +3102,64 @@ tests. `00c_` and `acif_oax_linker.py` now take `load_grant_for2020_codes` from 
 **Open:** `src/acif` must write its own list of people before the OpenAlex linker can stop reading
 the old `awards_cif_arc_only.parquet`; later merge tests need a hard veto on two different ARC
 ORCIDs (not built); the two shell scripts are stale.
+
+## ORCID cache examined; ORCID employer names vs ARC universities; Scopus (pybliometrics) lookup built in `analysis/` (2026-09-30)
+
+**ORCID record cache** (`DISKCACHE_DIR/orcid_records_authenticated`, 34,986 full `/record`
+responses; 2 entries have a `None` key). It is **not** a register of Australian researchers: it was
+filled one ORCID at a time by the now-archived client (`ZARCHIVE/src_archive_20260930/utils/
+orcid_client.py`) for (1) every ARC-recorded ORCID (11,207 of the 11,256 in-scope ARC ORCIDs are
+there) and (2) `00b_enrich_orcid.py`'s name searches (`ZARCHIVE/src_archive_20260912/`): for each
+ARC name without an ORCID it searched ORCID and fetched **every** hit worldwide when there were
+≤10 (`TOO_COMMON`), none when there were more. So common names have no candidates in it, and
+there are 7 "Charles Bond" / 8 "Michael Smart" records because those names fell under the cutoff.
+`analysis/15_orcid_preparation.py` reports the full contents of chosen cached records.
+`/home/lc/s/orcid/orcid_bulk.parquet` (Oct-2023 dump, 17M records) has NameParser fields but was
+built with the old parser from a joined "given family" string (e.g. "King Wai Chiu Lai" lost
+"King" as a title) -- stale.
+
+**ORCID affiliations → ARC universities** (findings only, nothing built): use `employments` with
+`country=AU` (32,449 affiliations, 15,014 ORCIDs, 2,841 names); memberships/services/distinctions
+are societies and prizes (e.g. "Association for the Study of Australian Literature" is a national
+body, not ANU). Exact name match to `admin_orgs.csv` covers 73% of ORCID-employer pairs, 77% with
+the concordance's 'Variants', 84.5% adding seed-token containment (name must contain "university";
+errors seen: "New York University, Sydney campus", "University West Sydney", and a bare
+"University of Technology" alias for UTS). Propagating ORCID's own org ids (Ringgold/GRID/ROR)
+was rejected: people pick orgs from a dropdown, 17 ids point to 2+ universities, and one person's
+choice spreads to everyone with that name. No OpenAlex crosswalk (circularity).
+
+**Scopus via pybliometrics** (installed in `.venv`, in `requirements.txt`). Credentials in this
+project's `.env`: `sco_apikey`, `sco_insttoken` (same as SmallProjects), `SCOPUS_CACHE_DIR=
+/home/lc/k/era/.scopus` (SmallProjects' cache, shared). `analysis/utils/scopus.py::init_scopus()`
+writes the config pybliometrics needs to `DATA_ROOT/scopus_config.ini` (outside the repo). The
+global `~/.config/pybliometrics.cfg` credentials can't use Author Retrieval (401). Weekly quota
+(2026-09-30): Author Search ~99.5K, Author Retrieval ~5K. Findings:
+- Author Search matches each profile's own name variants ("Tom Davis" finds Thomas P. Davis;
+  Kotagiri Ramamohanarao found in either order) -- search an ACIF's full_name_keys as they are,
+  never generate nicknames or swaps. Initial-only keys (s_ng, t_davis) return mostly other people.
+- `AFFIL("name")` matches the whole affiliation history and department-level entries; `AF-ID(id)`
+  matches only the current affiliation's exact id (missed Karen Marsh, Braunack-Mayer).
+- Search results carry the profile's ORCID (if Scopus has one) and current affiliation; Author
+  Retrieval gives the (undated) affiliation history and name variants.
+- A shared Scopus author id is merge evidence (one person can have several profiles, which only
+  loses merges); different ids are NOT evidence of different people. Risks: Scopus lumping two
+  people (safer when the profile carries an ORCID), and a fragment matched to a namesake's profile
+  when the true person has none at that university (e.g. "Richard M. Tilley", UNSW, 1 doc).
+- ORCIDs found by name through Scopus that ARC lacks: e.g. Susan (S. Rachel) Skinner
+  0000-0003-1970-9792, Richard Tilley 0000-0003-2097-063X, Boris Gurevich, Lindy Willmott,
+  Charles Bond, Patrick Baker -- each confirmed by the ORCID record's own name.
+
+**`analysis/16_scopus_lookup.py`** (+ `analysis/utils/scopus.py`, 7 tests): per ACIF (after the
+ARC ORCID merge) one Author Search -- OR over its full-given-name keys (initials only if none) AND
+OR over `AFFIL(name)` for every ARC university on any of its grants (admin, announcement admin,
+eligible and collaborating orgs; the person-org link is unknown on multi-org grants). Query parts
+are sorted so the query string (pybliometrics' cache key) is reproducible. Output in
+`processed/scopus/`. Sample of 200: confirmed 39, one_orcid 68, no_scopus_orcid 76, no_profile 15
+(nearly all single-grant ACIFs with a 2002-08 grant: no profile with that name has the grant's
+university in its history), several_orcids 1, other_orcid 1. **Full run of all 41,232 ACIFs
+started 2026-09-30 evening** (detached; log `processed/scopus/lookup_all.log`). Scopus stays out
+of the ACIF build for now; whether Scopus ids / Scopus-found ORCIDs become merge evidence is to be
+decided from this output.
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
