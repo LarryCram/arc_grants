@@ -337,41 +337,34 @@ def _full_name_keys(acif: AwardsCIF) -> set[str]:
     return {k for it in acif.items for k in it.full_name_keys}
 
 
-def merge_by_orcid(
-    acifs: list[AwardsCIF], uf: UnionFind,
+def merge_by_key(
+    acifs: list[AwardsCIF], uf: UnionFind, key_of,
 ) -> tuple[list[AwardsCIF], list[dict]]:
-    """First real merge test: group ACIFs sharing an identical ORCID. Auto-merges a group only
-    when all its ACIFs are linked by shared full_name_keys (A shares a key with B, B with C, ...;
-    keys are the parser's own output, from arc_names.parquet -- no name handling here); a group
-    that splits into unlinked parts is left unmerged entirely and reported instead -- "don't
-    guess, defer to human review," the same
-    discipline already established for every other ORCID-conflict mechanism in this project
-    (matching the real, confirmed conflict cases this exact check is built to catch: Wang/Duan,
-    Bunda/Lasczik, Curran/Gallagher).
+    """Group ACIFs by an identity key (key_of(acif) -> str or None; None = not in any group) and
+    merge each group only when all its ACIFs are linked by shared full_name_keys (A shares a key
+    with B, B with C, ...; keys are the parser's own output, from arc_names.parquet -- no name
+    handling here). A group that splits into unlinked parts is left unmerged entirely and
+    reported instead -- "don't guess, defer to human review" (the real conflicts this catches:
+    Wang/Duan, Bunda/Lasczik, Curran/Gallagher).
 
-    orcids/orcid_status are recomputed fresh for every ACIF first (see compute_orcids()) --
-    required even though ORCID itself never changes, since which items an ACIF currently holds
-    can change between stages.
+    Survivor cluster_id = min(unique_id) of the merged items; absorbed ids resolve through `uf`.
+    orcids/orcid_status of each survivor are recomputed from its items.
 
-    Returns (updated_acifs, orcid_name_mismatches). The second list IS the reusable report this
-    function's own grouping step naturally produces -- one entry per ORCID whose current members
-    don't all share a full_name_key, with the sub-groups and names needed to review it, rather
-    than a separate ad hoc diagnostic re-deriving the same grouping logic with cruder tools."""
+    Returns (updated_acifs, name_mismatches): one entry per key whose members don't all share a
+    full_name_key, with the sub-groups and names needed to review it."""
+    by_key: dict[str, list[AwardsCIF]] = defaultdict(list)
     for acif in acifs:
-        compute_orcids(acif)
-
-    by_orcid: dict[str, list[AwardsCIF]] = defaultdict(list)
-    for acif in acifs:
-        if acif.orcid_status == "HAS_ORCID":
-            by_orcid[acif.orcids[0]].append(acif)
+        k = key_of(acif)
+        if k:
+            by_key[k].append(acif)
 
     mismatches: list[dict] = []
     to_merge: list[tuple[str, str]] = []
 
-    for orcid, group in by_orcid.items():
+    for key, group in by_key.items():
         if len(group) < 2:
             continue
-        local = UnionFind()  # throwaway, scoped to partitioning just this one orcid's group
+        local = UnionFind()  # throwaway, scoped to partitioning just this one key's group
         keys = [_full_name_keys(a) for a in group]
         for i in range(len(group)):
             for j in range(i + 1, len(group)):
@@ -384,7 +377,7 @@ def merge_by_orcid(
 
         if len(sub_groups) > 1:
             mismatches.append({
-                "orcid": orcid,
+                "orcid": key,
                 "groups": sorted(
                     sorted(a.cluster_id for a in sub) for sub in sub_groups.values()
                 ),
@@ -419,6 +412,20 @@ def merge_by_orcid(
         survivors.append(survivor)
 
     return survivors, mismatches
+
+
+def merge_by_orcid(
+    acifs: list[AwardsCIF], uf: UnionFind,
+) -> tuple[list[AwardsCIF], list[dict]]:
+    """First real merge test: group ACIFs sharing an identical ARC ORCID and merge them through
+    merge_by_key() (names must link; unlinked groups are reported, not merged).
+
+    orcids/orcid_status are recomputed fresh for every ACIF first (see compute_orcids()) --
+    required even though ORCID itself never changes, since which items an ACIF currently holds
+    can change between stages."""
+    for acif in acifs:
+        compute_orcids(acif)
+    return merge_by_key(acifs, uf, lambda a: a.orcids[0] if a.orcid_status == "HAS_ORCID" else None)
 
 
 def render_orcid_mismatch_report(mismatches: list[dict]) -> str:

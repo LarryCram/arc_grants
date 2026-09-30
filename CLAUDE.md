@@ -3156,10 +3156,71 @@ eligible and collaborating orgs; the person-org link is unknown on multi-org gra
 are sorted so the query string (pybliometrics' cache key) is reproducible. Output in
 `processed/scopus/`. Sample of 200: confirmed 39, one_orcid 68, no_scopus_orcid 76, no_profile 15
 (nearly all single-grant ACIFs with a 2002-08 grant: no profile with that name has the grant's
-university in its history), several_orcids 1, other_orcid 1. **Full run of all 41,232 ACIFs
-started 2026-09-30 evening** (detached; log `processed/scopus/lookup_all.log`). Scopus stays out
+university in its history), several_orcids 1, other_orcid 1. Full run of all 41,232 ACIFs: see
+the 2026-10-01 entry. Scopus stays out
 of the ACIF build for now; whether Scopus ids / Scopus-found ORCIDs become merge evidence is to be
 decided from this output.
+
+## Scopus full run; merge pass one (what-if); name-separator cases settled; Low Choy and O'Brien corrections (2026-10-01)
+
+**Full Scopus lookup** (`analysis/16_scopus_lookup.py --all`, overnight, finished 02:21, no errors;
+rerunning from the cache takes ~12 s): 41,232 ACIFs -- confirmed 8,383 | one_orcid 13,456 |
+no_scopus_orcid 15,892 | no_profile 2,844 | several_orcids 513 | other_orcid 144. Profiles per ACIF:
+0: 2,844, 1: 31,028, 2-5: 6,830, 6-20: 507, 21+: 23. "no_profile" means no profile with that name
+has the grant's university anywhere in its history; it is concentrated in single-grant ACIFs whose
+only grant is 2002-08 (people who left research, or fields Scopus covers thinly -- law, music,
+history); the most recent grant holders almost always have a profile, usually with ARC's ORCID.
+
+**Merge pass one, a what-if** (`analysis/17_scopus_orcid_merge.py`, `analysis/utils/scopus_merge.py`,
+4 tests; the ACIF build is unchanged). `src/acif/build.py::merge_by_orcid()`'s grouping step was
+pulled out as a generic `merge_by_key(acifs, uf, key_of)` (same behaviour; merge_by_orcid now calls
+it). A no-ORCID ACIF gets a Scopus ORCID only if its search found exactly one profile, that profile
+carries an ORCID, the ORCID record is in our ORCID cache, and the record's own names agree with the
+ACIF's keys (NameParser only). Then ACIFs are merged by ORCID (ARC's, else the accepted Scopus one).
+Results: accepted 10,002 | orcid_not_in_cache 11,915 | not_single_profile 5,427 | no_profile 2,480 |
+names_disagree 152; ACIFs 41,232 -> 34,460; 1,852 merged groups (1,841 fragment-to-fragment, almost
+all one identical name; 11 fragment-to-ARC-ORCID). **Not safe to adopt as is**: of the 11
+fragment-to-ARC-ORCID joins, David Price (2002 Melbourne performing arts joined to the 2024 applied
+mathematician -- the documented August split) is wrong and Peter Love (2003 UNSW history joined to
+Peter E.D. Love, engineering/IS) probably wrong; Peter Taylor and David Forbes uncertain. Cause: the
+true person has no profile at that university and a namesake does, so name and university agree.
+Needed before use: a field (grant FOR vs profile subject areas) and years (grant years vs
+publication range) check, and fetching the 11,915 ORCID records missing from the cache.
+
+**Design agreed in discussion (not built):** a shared Scopus author id is merge evidence like a
+shared ORCID (one person split across profiles only loses merges); different Scopus ids are NOT
+evidence of different people. Order of trust: ARC ORCID > verified Scopus-found ORCID > shared Scopus
+id > names. The ORCID veto (two different ORCIDs never merge) must sit in the union step, checked on
+whole ACIFs at every join -- a check inside one key's group is bypassed through a third record
+(A-C by one key, C-B by another). **ACIFs are never merged on names alone.**
+
+**Name-separator cases, settled.** Family-name separator variants: 14 (Afaghi-Khatibi, Prieto-Simon,
+Lee-Koo, Banivanua-Mar, Aminorroaya-Yamini, Wilson_Rajaratnam, St John, de Gier, van Swinderen,
+De Leo, De Deyne, La Caze, O' Shea, Hossein Rashidi) are linked because both forms appear on one
+grant and 00a_ joined them; only 3 sit on unconnected records: Low Choy (one person -> corrected),
+Patricia O'Brien / OBrien (two people -> spelling corrected, see below), John Fitz Gerald (ANU
+materials, = Scopus John D. Fitz-Gerald) vs John Fitzgerald (historian, La Trobe then Swinburne, 3
+grants on one Scopus profile; plus a Melbourne sociologist) -- different people, no action. Given-name
+separator variants across records: 29; the parser already links 13 (identical keys, or a shared
+full key -- "Huai Yong"/"Huai-Yong" share huai_zhu); the other 16 are all hyphenated vs run-together
+("Gao-Qing"/"Gaoqing") and share only the initial key -- no fix needed, because the merge link test
+accepts any shared key including the initial, so they join once evidence (ORCID, Scopus) exists
+(6 of them already one ACIF by ARC ORCID); the 8 with no ORCID need evidence, not a name rule.
+
+**Corrections added to `arc_name_overrides.csv`** (now 11 correct, 14 no; `00a_` rerun, all
+matched; Scopus lookup and pass one refreshed): LP170100480 "Low-Choy" -> "Low Choy" (her ORCID
+record's family name; "Low-Choy" is her other name; she now merges with LP0990134 in pass one);
+LP140100522 and LP190101011 "OBrien" -> "O'Brien" (ARC dropped the apostrophe; ORCID and Scopus
+have "O'Brien"). A `correct` row replaces ARC's form, so those ACIFs carry only the corrected form --
+accepted. The ANU historian Patricia O'Brien (FT130100697) now has the same keys as the Sydney
+public-health Patricia O'Brien; they stay separate because no merge is made on names alone.
+`manual_splits.csv`'s one Low Choy id reference was updated (old-pipeline file, not read).
+
+**Keep-apart records, for later:** a cross-grant "different people" mechanism was drafted and reverted
+(not needed while nothing merges on names). Legacy keep-apart information that would feed it:
+`manual_confirmed_distinct.csv` (31 record pairs, all ids current) and `manual_splits_by_grant.csv`
+(9 old clusters, records labelled by person, 35/37 ids current); `manual_splits.csv` has 35
+`confirmed_different_people` rows but not which record is which person.
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
