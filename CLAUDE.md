@@ -3175,17 +3175,33 @@ history); the most recent grant holders almost always have a profile, usually wi
 4 tests; the ACIF build is unchanged). `src/acif/build.py::merge_by_orcid()`'s grouping step was
 pulled out as a generic `merge_by_key(acifs, uf, key_of)` (same behaviour; merge_by_orcid now calls
 it). A no-ORCID ACIF gets a Scopus ORCID only if its search found exactly one profile, that profile
-carries an ORCID, the ORCID record is in our ORCID cache, and the record's own names agree with the
-ACIF's keys (NameParser only). Then ACIFs are merged by ORCID (ARC's, else the accepted Scopus one).
-Results: accepted 10,002 | orcid_not_in_cache 11,915 | not_single_profile 5,427 | no_profile 2,480 |
-names_disagree 152; ACIFs 41,232 -> 34,460; 1,852 merged groups (1,841 fragment-to-fragment, almost
-all one identical name; 11 fragment-to-ARC-ORCID). **Not safe to adopt as is**: of the 11
+carries an ORCID, and that ORCID's names -- from our ORCID cache, else from
+`/home/lc/s/orcid/orcid_bulk.parquet` (name + aliases) -- agree with the ACIF's keys (NameParser
+only). Then ACIFs are merged by ORCID (ARC's, else the accepted Scopus one). Results (corrected the
+same day: a profile with no ORCID arrives as NaN and was first counted as "ORCID not in cache", so an
+earlier "11,915 not in cache" was wrong -- 11,141 of them have no ORCID on the profile): accepted
+10,428 (names from cache 10,002, bulk 426) | no_orcid_on_profile 11,141 | not_single_profile 5,427 |
+no_profile 2,480 | names_disagree 438 | orcid_not_found 62; ACIFs 41,232 -> 34,191; 1,927 merged groups
+(1,916 fragment-to-fragment, almost all one identical name; 11 fragment-to-ARC-ORCID). The bulk-name
+disagreements are mostly nicknames the rule deliberately doesn't accept alone (Chris/Christopher
+Porter, Alex/Alexander McBratney, Jim/James Williams, Fred/Reginald Westbrook), plus real catches of
+a wrong ORCID on a Scopus profile (Wanyu Lyu's ORCID on Xiaolin Wang's profile, Ammar Al-Jodah's on
+Bijan Shirinzadeh's). **Not safe to adopt as is**: of the 11
 fragment-to-ARC-ORCID joins, David Price (2002 Melbourne performing arts joined to the 2024 applied
 mathematician -- the documented August split) is wrong and Peter Love (2003 UNSW history joined to
 Peter E.D. Love, engineering/IS) probably wrong; Peter Taylor and David Forbes uncertain. Cause: the
 true person has no profile at that university and a namesake does, so name and university agree.
-Needed before use: a field (grant FOR vs profile subject areas) and years (grant years vs
-publication range) check, and fetching the 11,915 ORCID records missing from the cache.
+Only 62 ACIFs' Scopus ORCIDs are in neither the cache nor the bulk file. A field/years check was
+judged a rabbit hole (broad real careers look the same as namesake errors -- 819 of the 1,927 groups
+have a member sharing no field division with the others, e.g. Zhiguo Yuan, Hugh Possingham).
+Instead, namesake errors are refused by hand: new row type **`reject_scopus`** in
+`arc_name_overrides.csv` (grant + ARC's raw names + the refused Scopus ORCID in the `orcid` column;
+00a_ checks the record exists, pass one refuses that ORCID for it). First rows: David Price
+LP0211991, Peter Love LP0348071, Peter Taylor DP130100077 (2013 paint-conservation grant with Carl
+Schiesser, matched to the probabilist Peter G. Taylor, who has no papers with Schiesser). After
+them: accepted 10,425, ACIFs 41,232 -> 34,194, joins onto ARC-ORCID ACIFs 11 -> 8 (all plausible).
+A "no Scopus for humanities before 2006" rule was considered (it would catch Price and Love but not
+Taylor); not adopted. The 1,916 fragment-to-fragment groups remain unchecked by hand.
 
 **Design agreed in discussion (not built):** a shared Scopus author id is merge evidence like a
 shared ORCID (one person split across profiles only loses merges); different Scopus ids are NOT

@@ -6,7 +6,8 @@ Nothing is written back to the pipeline; the ACIF build is unchanged.
 Needs analysis/16_scopus_lookup.py --all to have been run on the same build.
 
 Outputs (PROCESSED_DATA/scopus/):
-    pass1_decisions.parquet   one row per ACIF: whether a Scopus ORCID was accepted, and why not
+    pass1_decisions.parquet   one row per ACIF: whether a Scopus ORCID was accepted (and whether
+                              its names came from the ORCID cache or orcid_bulk.parquet), and why not
     pass1_merged.parquet      one row per ACIF after pass one: cluster_id, members, how joined
     pass1_report.md           counts and examples
 
@@ -22,7 +23,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.settings import DISKCACHE_DIR, PROCESSED_DATA
-from analysis.utils.scopus_merge import decide
+from analysis.utils.scopus_merge import _orcid_or_none, decide, load_bulk_names, load_scopus_rejections
 from src.acif.build import UnionFind, build_stage_zero, merge_by_key, merge_by_orcid
 
 OUT = PROCESSED_DATA / "scopus"
@@ -33,7 +34,10 @@ def main():
     summary = pd.read_parquet(OUT / "acif_scopus_summary.parquet")
     profiles = pd.read_parquet(OUT / "acif_scopus_profiles.parquet")
     cache = diskcache.Cache(str(DISKCACHE_DIR / "orcid_records_authenticated"))
-    d = decide(acifs, summary, profiles, cache)
+    wanted = {o for o in map(_orcid_or_none, profiles.orcid) if o and o not in cache}
+    bulk = load_bulk_names(wanted)
+    rejected = load_scopus_rejections(pd.read_parquet(PROCESSED_DATA / "investigators_raw.parquet"))
+    d = decide(acifs, summary, profiles, cache, bulk, rejected)
     d.to_parquet(OUT / "pass1_decisions.parquet", index=False)
 
     accepted = dict(zip(d.loc[d.decision == "accepted", "cluster_id"], d.loc[d.decision == "accepted", "scopus_orcid"]))
@@ -75,6 +79,8 @@ def report(d, acifs, merged, uf, before, mismatches, arc_mismatches):
              "## Scopus ORCID decisions for the ACIFs without an ARC ORCID", "",
              "| decision | ACIFs |", "|---|---|"]
     lines += [f"| {k} | {v:,} |" for k, v in no.decision.value_counts().items()]
+    acc = no[no.decision == "accepted"]
+    lines += ["", f"Accepted, names read from: " + ", ".join(f"{k} {v:,}" for k, v in acc.name_source.value_counts().items())]
     lines += ["", "## Merging by ORCID (ARC or accepted Scopus)", "",
               f"- ACIFs after pass one: {len(merged):,} (was {len(acifs):,}; {len(acifs) - len(merged):,} fewer)",
               f"- groups that merged: {len(j):,} -- {kinds['arc+scopus']:,} joined no-ORCID fragments to an "

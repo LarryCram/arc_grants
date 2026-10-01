@@ -96,11 +96,16 @@ class NameOverrides:
       no      -- the two names are not to be joined: on grant_code (same-grant join) or under orcid
                  (ORCID key sharing)
       add     -- the two names on grant_code are one person, joined although no rule finds them
+      reject_scopus -- the record (grant_code, first_name, family_name) must not take the ORCID in
+                 `orcid` from a Scopus match: Scopus's single profile for that name and university
+                 is a namesake. Not used here; 00a_ only checks the record exists. Read by
+                 analysis/utils/scopus_merge.py (2026-10-01).
     `used` collects every row that matched something; a row that matches nothing is an error."""
     corrections: dict = field(default_factory=dict)  # (grant, first, family) -> (first, family)
     no_grant: dict = field(default_factory=dict)     # (grant, frozenset{form, form}) -> note
     no_orcid: dict = field(default_factory=dict)     # (orcid, frozenset{form, form}) -> note
     add_grant: dict = field(default_factory=dict)    # (grant, frozenset{form, form}) -> note
+    reject_scopus: dict = field(default_factory=dict)  # (grant, first, family) -> (orcid, note)
     used: set = field(default_factory=set)
 
     def lookup(self, table: str, scope: str, forms_a, forms_b) -> str | None:
@@ -117,6 +122,8 @@ class NameOverrides:
     def unused(self) -> list[str]:
         out = [f"correct {g} {f!r} {l!r}" for (g, f, l) in self.corrections
                if ("corrections", (g, f, l)) not in self.used]
+        out += [f"reject_scopus {g} {f!r} {l!r}" for (g, f, l) in self.reject_scopus
+                if ("reject_scopus", (g, f, l)) not in self.used]
         for table in ("no_grant", "no_orcid", "add_grant"):
             out += [f"{table} {k[0]} {sorted(k[1])}" for k in getattr(self, table)
                     if (table, k) not in self.used]
@@ -137,6 +144,10 @@ def load_name_overrides(path: Path = NAME_OVERRIDES_CSV) -> NameOverrides:
             if not grant or orcid:
                 raise ValueError(f"{where}: 'correct' needs grant_code and no orcid")
             ov.corrections[(grant, *form_a)] = form_b
+        elif r["action"] == "reject_scopus":
+            if not grant or not orcid:
+                raise ValueError(f"{where}: 'reject_scopus' needs grant_code and orcid (the Scopus ORCID refused)")
+            ov.reject_scopus[(grant, *form_a)] = (orcid, r["notes"])
         elif r["action"] in ("no", "add"):
             if form_a == form_b:
                 raise ValueError(f"{where}: the two names are identical")
@@ -191,6 +202,8 @@ def _parse_investigator_list(inv_list: list, grant_code: str, source: str,
         first, family = overrides.corrections.get(k, (raw_first, raw_family))
         if k in overrides.corrections:
             overrides.used.add(("corrections", k))
+        if k in overrides.reject_scopus:
+            overrides.used.add(("reject_scopus", k))
         parsed = _NAME_PARSER.parse((first, family))
         # A record with no given name has no full_name_key; its id is the family name alone.
         key = parsed.full_name_key or parsed.full_name_key_raw or parsed.family_name_main
@@ -561,7 +574,8 @@ def main():
 
     overrides = load_name_overrides()
     print(f"Name overrides: {NAME_OVERRIDES_CSV} -- {len(overrides.corrections)} correct, "
-          f"{len(overrides.no_grant) + len(overrides.no_orcid)} no, {len(overrides.add_grant)} add")
+          f"{len(overrides.no_grant) + len(overrides.no_orcid)} no, {len(overrides.add_grant)} add, "
+          f"{len(overrides.reject_scopus)} reject_scopus")
 
     # ── Parse all rows (every grant and role is read; only in-scope records are written) ──
     grants_flat     = []
@@ -736,7 +750,8 @@ def main():
     p(f"  Name-form pairs:             {len(orc):>8,}  ({(orc['apply'] == 'no').sum() if len(orc) else 0} blocked by override 'no')")
     p(f"  Records gaining keys:        {len(keys_via_orcid):>8,}")
     p(f"\n  Name overrides: {len(overrides.corrections)} correct, "
-      f"{len(overrides.no_grant) + len(overrides.no_orcid)} no, {len(overrides.add_grant)} add -- all matched")
+      f"{len(overrides.no_grant) + len(overrides.no_orcid)} no, {len(overrides.add_grant)} add, "
+      f"{len(overrides.reject_scopus)} reject_scopus -- all matched")
     p(f"  Full list of joins and candidates: {changes_path}")
 
     p(f"\n── Data Quality Flags ──────────────────────────────")

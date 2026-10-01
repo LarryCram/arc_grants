@@ -214,3 +214,22 @@ class TestOrcidNameLinks:
         inv, entries = self._records([("G1", "Ben", "White", "O1"), ("G2", "Benedict", "White", "O2")])
         rows, added = _mod.orcid_name_links(inv, entries, {}, _mod.NameOverrides())
         assert rows == [] and added == {}
+
+
+class TestRejectScopus:
+    def test_loaded_and_marked_used_when_the_record_exists(self, tmp_path):
+        f = tmp_path / "o.csv"
+        f.write_text("action,grant_code,orcid,first_name,family_name,first_name_2,family_name_2,notes\n"
+                     "reject_scopus,G1,0000-0000-0000-0009,Peter,Taylor,,,namesake profile\n")
+        ov = _mod.load_name_overrides(f)
+        assert ov.reject_scopus == {("G1", "Peter", "Taylor"): ("0000-0000-0000-0009", "namesake profile")}
+        _run([], [_inv("Peter", "Taylor")], ov)
+        assert ov.unused() == []
+
+    def test_needs_an_orcid(self, tmp_path):
+        import pytest
+        f = tmp_path / "o.csv"
+        f.write_text("action,grant_code,orcid,first_name,family_name,first_name_2,family_name_2,notes\n"
+                     "reject_scopus,G1,,Peter,Taylor,,,x\n")
+        with pytest.raises(ValueError):
+            _mod.load_name_overrides(f)

@@ -49,6 +49,28 @@ def test_decide_rules():
                              "orcid": ["O1", "O2", "O3", "O4", "O5", "O9"]})
     cache = {"O1": _record("Jan", "Smith"), "O4": _record("Jan", "Smith"), "O5": _record("Bo", "Lee")}
     d = decide(acifs, summary, profiles, cache).set_index("cluster_id").decision.to_dict()
-    assert d == {"G1_jan_smith": "accepted", "G2_jan_smith": "orcid_not_in_cache",
+    assert d == {"G1_jan_smith": "accepted", "G2_jan_smith": "orcid_not_found",
                  "G3_jan_smith": "not_single_profile", "G4_jan_smith": "names_disagree",
                  "G5_jan_smith": "has_arc_orcid"}
+
+
+def test_decide_blank_orcid_is_no_orcid_and_bulk_names_are_used():
+    import math
+    acifs = [_acif("G1_jan_smith"), _acif("G2_jan_smith"), _acif("G3_jan_smith")]
+    summary = pd.DataFrame({"cluster_id": [a.cluster_id for a in acifs], "status": ["x"] * 3,
+                            "n_profiles": [1, 1, 1]})
+    profiles = pd.DataFrame({"cluster_id": ["G1_jan_smith", "G2_jan_smith", "G3_jan_smith"],
+                             "scopus_id": ["1", "2", "3"], "orcid": [math.nan, "O2", "O3"]})
+    d = decide(acifs, summary, profiles, {}, {"O2": ["Jan Smith", "J. Smith"], "O3": ["Bo Lee"]})
+    d = d.set_index("cluster_id")
+    assert d.decision.to_dict() == {"G1_jan_smith": "no_orcid_on_profile", "G2_jan_smith": "accepted",
+                                    "G3_jan_smith": "names_disagree"}
+    assert d.loc["G2_jan_smith", "name_source"] == "bulk"
+
+
+def test_decide_hand_rejection_wins():
+    acifs = [_acif("G1_jan_smith")]
+    summary = pd.DataFrame({"cluster_id": ["G1_jan_smith"], "status": ["x"], "n_profiles": [1]})
+    profiles = pd.DataFrame({"cluster_id": ["G1_jan_smith"], "scopus_id": ["1"], "orcid": ["O1"]})
+    d = decide(acifs, summary, profiles, {"O1": _record("Jan", "Smith")}, {}, {"G1_jan_smith": {"O1"}})
+    assert d.decision.tolist() == ["rejected_by_hand"]
