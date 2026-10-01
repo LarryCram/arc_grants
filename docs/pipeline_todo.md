@@ -1,5 +1,42 @@
 # Full TODO list — ARC Grants → OpenAlex pipeline
 
+## Current state and open items (2026-10-01) — read this first
+
+Everything below this section predates the 2026-09-30 archive of the old pipeline. Items that
+name `awards_cif.py`, `01_prepare_arc.py`, `01a_diagnose.py`, `04_resolve_links.py` /
+`FilterCandidates`, `oeuvre_build.py`, `work_piling.py`, `dossier_build.py`, `fetch_orcid.py` or
+`orcid_processor.py` refer to code now in `ZARCHIVE/src_archive_20260930/` (or earlier archives)
+and are kept as history, not as live work. CLAUDE.md's dated entries for 2026-09-30 and
+2026-10-01 have the detail.
+
+**Where things stand**
+- `src/` = `00a_extract_arc.py` (only ARC loader; name cleaning with `arc_name_overrides.csv`;
+  in-scope output), `00b_extract_oax.py`, `00c_extract_propensities.py`, `src/acif/` (cyclic
+  build: load -> seed -> `merge_by_orcid()` via generic `merge_by_key()`), `acif_oax_linker.py`.
+- ACIFs from ARC ORCIDs: 62,779 in-scope records -> 41,232 ACIFs (0 ORCID groups unmerged).
+- Scopus (`analysis/16_scopus_lookup.py`, all 41,232 searched) and merge pass one
+  (`analysis/17_scopus_orcid_merge.py`, a what-if): Scopus-found ORCIDs accepted for 10,425 ACIFs
+  -> 34,194; namesake errors refused by hand with `reject_scopus` rows (3 so far).
+- Settled: ACIFs are never merged on names alone; separator variants need no name rule.
+
+**Open, in the order I'd take them**
+A. **ORCID veto in the union step** -- two different ORCIDs never in one ACIF, checked on whole
+   ACIFs at every join (a per-group check is bypassed through a third record). Prerequisite for
+   any merge beyond ARC ORCIDs.
+B. **Decide whether Scopus-found ORCIDs enter the build.** If yes: move the lookup and pass one
+   from `analysis/` into an extract stage (e.g. `src/00d_extract_scopus.py`) whose output the build
+   reads; `reject_scopus` rows already live in `arc_name_overrides.csv`.
+C. **`src/acif` writes its own list of people** (a parquet per stage), so the OpenAlex linker and
+   reports can stop reading the old `awards_cif_arc_only.parquet`.
+D. **Scopus pass two: merge on a shared Scopus author id** (reaches the 11,141 single-profile
+   ACIFs whose profile has no ORCID), under the same veto and hand rejections.
+E. Optional: hand-check a sample of pass one's 1,916 fragment-to-fragment groups for namesake
+   errors like Peter Taylor (none checked so far).
+F. Later: a cross-grant "different people" record for the build (draft reverted 2026-10-01;
+   legacy sources `manual_confirmed_distinct.csv`, `manual_splits_by_grant.csv`), needed only once
+   something other than an identifier can merge.
+G. Stale shell scripts `run_pipeline.sh` / `run_piling.sh` (left as they are, by decision).
+
 ## Context
 
 The user asked for the complete outstanding TODO list from this project, compiled with
