@@ -26,6 +26,7 @@ from src.acif.build import (
     load_manual_orcid_corrections,
     apply_manual_orcid_corrections,
     compute_orcids,
+    merge_by_key,
     merge_by_orcid,
     render_orcid_mismatch_report,
     UnionFind,
@@ -350,6 +351,67 @@ class TestMergeByOrcid:
         text = render_orcid_mismatch_report(mismatches)
         assert "Chien Ming Wang" in text
         assert "Wenhui Duan" in text
+
+
+class TestOrcidVeto:
+    """merge_by_key()'s ORCID veto: no merge ever puts two different ORCIDs in one ACIF."""
+    O1, O2 = "0000-0000-0000-0001", "0000-0000-0000-0002"
+
+    def test_group_with_two_orcids_not_merged_and_reported(self):
+        # a non-ORCID key (e.g. a Scopus id) groups three ACIFs; two carry different ORCIDs
+        acifs = [
+            _acif("DP01_JohnSmith", [_item("DP01_JohnSmith", orcid=self.O1)]),
+            _acif("DP02_JohnSmith", [_item("DP02_JohnSmith", orcid=self.O2)]),
+            _acif("DP03_JohnSmith", [_item("DP03_JohnSmith", orcid=None)]),
+        ]
+        survivors, mismatches = merge_by_key(acifs, UnionFind(), lambda a: "S1")
+        assert len(survivors) == 3  # the whole group is left alone, not a partial merge
+        assert len(mismatches) == 1 and mismatches[0]["reason"] == "orcid_veto"
+        assert mismatches[0]["orcids"]["DP03_JohnSmith"] == []
+        assert "orcid_veto" in render_orcid_mismatch_report(mismatches)
+
+    def test_group_with_one_orcid_merges(self):
+        acifs = [
+            _acif("DP01_JohnSmith", [_item("DP01_JohnSmith", orcid=self.O1)]),
+            _acif("DP03_JohnSmith", [_item("DP03_JohnSmith", orcid=None)]),
+        ]
+        survivors, mismatches = merge_by_key(acifs, UnionFind(), lambda a: "S1")
+        assert len(survivors) == 1 and mismatches == []
+        assert survivors[0].orcids == [self.O1]
+
+    def test_not_bypassed_through_a_third_record_across_calls(self):
+        # A (O1) joins C (no ORCID) by key k1; then C's key k2 would bring in B (O2).
+        uf = UnionFind()
+        a = _acif("DP01_JohnSmith", [_item("DP01_JohnSmith", orcid=self.O1)])
+        b = _acif("DP02_JohnSmith", [_item("DP02_JohnSmith", orcid=self.O2)])
+        c = _acif("DP03_JohnSmith", [_item("DP03_JohnSmith", orcid=None)])
+        k1 = {"DP01_JohnSmith": "k1", "DP03_JohnSmith": "k1"}
+        step1, _ = merge_by_key([a, b, c], uf, lambda x: k1.get(x.cluster_id))
+        assert len(step1) == 2
+        k2 = {"DP01_JohnSmith": "k2", "DP02_JohnSmith": "k2"}  # the merged A+C now has id DP01
+        step2, mismatches = merge_by_key(step1, uf, lambda x: k2.get(x.cluster_id))
+        assert len(step2) == 2
+        assert mismatches[0]["reason"] == "orcid_veto"
+
+    def test_multi_orcid_acif_never_merges(self):
+        multi = _acif("DP01_JohnSmith", [_item("DP01_JohnSmith", orcid=self.O1),
+                                         _item("DP05_JohnSmith", orcid=self.O2)])
+        other = _acif("DP03_JohnSmith", [_item("DP03_JohnSmith", orcid=None)])
+        survivors, mismatches = merge_by_key([multi, other], UnionFind(), lambda a: "S1")
+        assert len(survivors) == 2 and mismatches[0]["reason"] == "orcid_veto"
+
+    def test_orcids_of_counts_orcids_beyond_arc(self):
+        # a caller can give an ACIF an ORCID ARC lacks (e.g. one found through Scopus)
+        extra = {"DP03_JohnSmith": {self.O2}}
+        acifs = [
+            _acif("DP01_JohnSmith", [_item("DP01_JohnSmith", orcid=self.O1)]),
+            _acif("DP03_JohnSmith", [_item("DP03_JohnSmith", orcid=None)]),
+        ]
+        survivors, mismatches = merge_by_key(
+            acifs, UnionFind(), lambda a: "S1",
+            orcids_of=lambda a: {it.orcid for it in a.items if it.orcid} | extra.get(a.cluster_id, set()),
+        )
+        assert len(survivors) == 2 and mismatches[0]["reason"] == "orcid_veto"
 
 
 class TestManualOrcidCorrectionsPreventsWrongMerge:

@@ -85,3 +85,18 @@ class TestInstitutionPairFreq:
         assert set(df.columns) == {"institution_a", "institution_b", "count", "frequency"}
         assert (df["institution_a"] < df["institution_b"]).all()
         assert abs(df["frequency"].sum() - 1.0) < 1e-9
+
+
+class TestFor2020GroupRarity:
+    def test_shape_and_range(self):
+        df = _mod.build_for2020_group_rarity()
+        # ~200 FOR2020 groups in use by in-scope grants; multi-label, so frequencies sum above 1
+        assert 150 <= len(df) <= 215
+        assert set(df.columns) == {"name", "count", "frequency"}
+        assert df["name"].is_unique and (df["count"] > 0).all()
+        assert df["frequency"].sum() > 1
+
+    def test_pair_names_are_group_names(self):
+        groups = set(_mod.build_for2020_group_rarity()["name"])
+        pairs = _mod.build_for_name_pair_freq()
+        assert set(pairs["name_a"]) | set(pairs["name_b"]) <= groups

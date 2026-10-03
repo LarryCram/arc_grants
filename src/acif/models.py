@@ -95,6 +95,14 @@ class AwardCIFItem:
     # ARC's own raw isFellowship flag for THIS person on THIS grant.
     is_fellowship: bool = False
 
+    # 2026-10-01: an ORCID for this record found through Scopus (src/acif/scopus.py), only on a
+    # record with no ARC ORCID. Counts towards the ORCID veto alongside `orcid`; never replaces it.
+    scopus_orcid: str | None = None
+
+    # 2026-10-03: an ORCID for this record confirmed by hand (data_persisted/manual_orcids.csv,
+    # src/acif/hand.py). Counts towards the ORCID veto; never replaces `orcid`.
+    hand_orcid: str | None = None
+
     # --- new fields required by the cyclic-build plan (2026-09-19), not yet populated by
     # anything -- see the plan's "Full AwardCIFItem property list" section for each one's
     # rationale. ---

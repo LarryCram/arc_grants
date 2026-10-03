@@ -30,6 +30,7 @@ DUCKDB_TMP_DIR.mkdir(parents=True, exist_ok=True)
 RAW_DATA       = DATA_ROOT / "raw"
 PROCESSED_DATA = DATA_ROOT / "processed"
 DISKCACHE_DIR  = DATA_ROOT / "diskcache"
+SCOPUS_EXTRACT_DIR = PROCESSED_DATA / "scopus_extract"   # src/00d_extract_scopus.py's outputs
 
 # Output subdirectories
 PROFILES_OUT = OUTPUT_ROOT / "profiles"

@@ -15,6 +15,9 @@ INPUT:
 OUTPUT (all under PROCESSED_DATA):
     for_name_rarity.parquet        -- {signature_key, count, frequency}
     for_name_pair_freq.parquet     -- {name_a, name_b, count, frequency}
+    for2020_group_rarity.parquet   -- {name, count, frequency}: grants listing each FOR2020 group
+                                      (2026-10-03; the per-group margin needed to turn
+                                      for_name_pair_freq into a lift)
     institution_rarity.parquet     -- {institution_name, count, frequency}
     institution_pair_freq.parquet  -- {institution_a, institution_b, count, frequency}
 
@@ -219,6 +222,26 @@ def build_for_name_pair_freq() -> pd.DataFrame:
     ).sort_values(["name_a", "name_b"]).reset_index(drop=True)
 
 
+def build_for2020_group_rarity() -> pd.DataFrame:
+    """One row per FOR2020 group name -- how many in-scope grants list it anywhere in their FOR
+    entries, count/frequency over n_grants_in_scope (multi-label: a grant counts once for each of
+    its groups, so frequencies sum above 1). Same grant population and name field as
+    build_for_name_pair_freq(), so the two give a lift: count_ab * n / (count_a * count_b)."""
+    in_scope_grant_codes = _load_in_scope_grant_codes()
+    grant_codes = {
+        gc: entries for gc, entries in load_grant_for2020_codes().items()
+        if gc in in_scope_grant_codes
+    }
+    n_grants = len(in_scope_grant_codes)
+    counts: Counter[str] = Counter()
+    for entries in grant_codes.values():
+        for name in {e["name"] for e in entries if e["name"]}:
+            counts[name] += 1
+    return pd.DataFrame(
+        {"name": k, "count": c, "frequency": c / n_grants} for k, c in counts.items()
+    ).sort_values("name").reset_index(drop=True)
+
+
 def build_institution_rarity() -> pd.DataFrame:
     """One row per institution name -- how many of load_items()'s real in-scope grants list it
     anywhere in eligible_orgs (admin org or partner org alike), count/frequency over
@@ -279,6 +302,10 @@ def main() -> None:
     for_name_pair_freq = build_for_name_pair_freq()
     for_name_pair_freq.to_parquet(PROCESSED_DATA / "for_name_pair_freq.parquet", index=False)
     print(f"for_name_pair_freq: {len(for_name_pair_freq)} pairs")
+
+    for2020_group_rarity = build_for2020_group_rarity()
+    for2020_group_rarity.to_parquet(PROCESSED_DATA / "for2020_group_rarity.parquet", index=False)
+    print(f"for2020_group_rarity: {len(for2020_group_rarity)} groups")
 
     institution_rarity = build_institution_rarity()
     institution_rarity.to_parquet(PROCESSED_DATA / "institution_rarity.parquet", index=False)

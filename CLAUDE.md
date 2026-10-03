@@ -15,9 +15,13 @@ src/00a_extract_arc.py          → grants_flat, investigators_raw, arc_names, a
                                   name is parsed; reads every grant, writes in-scope records only
 src/00b_extract_oax.py          → openalex_authors_prep.parquet, oax_tf_*.parquet (OpenAlex side)
 src/00c_extract_propensities.py → FOR/institution rarity and pair-frequency tables (grant-level)
-src/acif/                       → the cyclic ACIF build (models, build, features); so far
-                                  load_items() → seed() → merge_by_orcid(); it does not yet write a
-                                  list of people
+src/00d_extract_scopus.py       → processed/scopus_extract/: one Scopus Author Search per ACIF after
+                                  the ARC ORCID merge (cached), plus ORCID names and listed Scopus ids
+src/acif/                       → the cyclic ACIF build (models, build, features, scopus); so far
+                                  build_acifs(): load_items() → seed() → merge_by_orcid() → Scopus
+                                  pass one (Scopus-found ORCIDs) → pass two (shared Scopus profile)
+                                  → hand stage (manual_orcids, manual_merges, keep-apart pairs);
+                                  it does not yet write a list of people
 src/utils/acif_oax_linker.py    → ARC↔OpenAlex candidate linking (with sql/01-04); still reads the
                                   old awards_cif_arc_only.parquet until src/acif writes its own list
 ```
@@ -3208,7 +3212,10 @@ shared ORCID (one person split across profiles only loses merges); different Sco
 evidence of different people. Order of trust: ARC ORCID > verified Scopus-found ORCID > shared Scopus
 id > names. The ORCID veto (two different ORCIDs never merge) must sit in the union step, checked on
 whole ACIFs at every join -- a check inside one key's group is bypassed through a third record
-(A-C by one key, C-B by another). **ACIFs are never merged on names alone.**
+(A-C by one key, C-B by another). **ACIFs are never merged on names alone.** The veto is now built
+(same day): `src/acif/build.py::merge_by_key()` leaves any group whose ACIFs carry 2+ different
+ORCIDs unmerged and reports it (`reason: orcid_veto`); `orcids_of=` lets a caller add ORCIDs ARC
+lacks. 5 tests in `tests/test_acif_build.py::TestOrcidVeto`; pass one's numbers unchanged.
 
 **Name-separator cases, settled.** Family-name separator variants: 14 (Afaghi-Khatibi, Prieto-Simon,
 Lee-Koo, Banivanua-Mar, Aminorroaya-Yamini, Wilson_Rajaratnam, St John, de Gier, van Swinderen,
@@ -3237,6 +3244,91 @@ public-health Patricia O'Brien; they stay separate because no merge is made on n
 `manual_confirmed_distinct.csv` (31 record pairs, all ids current) and `manual_splits_by_grant.csv`
 (9 old clusters, records labelled by person, 35/37 ids current); `manual_splits.csv` has 35
 `confirmed_different_people` rows but not which record is which person.
+
+## Both Scopus passes moved into the build (2026-10-03)
+
+Decisions (asked, answered): one Scopus search **per ACIF** after the ARC ORCID merge, as before;
+pass two **uses ORCID records' own Scopus ids** as a check; `analysis/16_`, `17_` and
+`analysis/utils/scopus*.py` **left resting** (src/ has its own copy).
+
+- `src/utils/scopus.py`: copy of `analysis/utils/scopus.py` (config, university map, query).
+- `src/00d_extract_scopus.py` → `SCOPUS_EXTRACT_DIR` (`processed/scopus_extract/`): ACIF summary
+  (with each ACIF's `unique_ids`), profiles, `scopus_orcid_facts` (per ORCID: names as
+  full_name_keys via NameParser, from the ORCID cache else the bulk file; Scopus ids its own record
+  lists, cache + bulk), `scopus_profile_claims` (profile → ORCID records naming it),
+  `scopus_rejections` (reject_scopus rows → unique_id). Rerun from cache: 40 s, no quota. Statuses
+  identical to the analysis run.
+- `src/acif/build.py`: `merge_by_key()` now takes several keys per ACIF (`key_components()`:
+  ACIFs chained by shared keys form one group, order-independent) and a `check=` hook; the ORCID
+  veto counts ARC and Scopus ORCIDs (`AwardCIFItem.scopus_orcid`, new field). `build_acifs()` runs
+  every stage with one UnionFind and returns a report.
+- `src/acif/scopus.py`: pass one (rules as in the analysis what-if; accepted ORCID put on the
+  records as `scopus_orcid`, then merge by ORCID) and pass two (records keyed by their search's
+  single profile; groups refused when a profile is claimed by an ORCID record whose names disagree,
+  when the claiming ORCID differs from one the group carries, or when an ORCID the group carries
+  lists only other Scopus ids; a merged group on a profile claimed by one agreeing ORCID takes it).
+- **Two bugs in the new extract, found through Shaomin Liu (same day) and fixed:** (1) the ORCID
+  cache holds 12 records that ORCID returned under a *different* ORCID -- a deprecated ORCID is
+  answered with the record it now redirects to. Shaomin Liu's 0000-0001-5019-5182 (his ORCID per
+  Curtin's staff page and the Oct-2023 bulk file: "Shaomin Liu", BUCT + Curtin, Scopus 35242760200)
+  now redirects to 0000-0002-9865-9596 "Yuanyuan Chu" (checked live), so the extract gave his ORCID
+  her name and both passes refused his records. A cached record whose own path differs from its key
+  is now ignored (bulk file used; `cache_redirected_to` column). (2) `cache.iterkeys()` read almost
+  nothing from the ORCID cache, so no claims came from it; now `list(cache)`.
+- Run after the fixes: 62,779 records → 41,232 (ARC ORCID) → **34,189** (pass one; accepted 10,432;
+  Shaomin Liu's 6 records merged under his ORCID) → **28,366** (pass two). Pass two refused 64
+  groups: 58 profile claimed by another name, 5 names don't link, 1 ORCID veto; 151 merged ACIFs
+  took a claim's ORCID; 0 ACIFs hold two ORCIDs.
+- **Open:** the 58 "claimed by another name" refusals (counted before the fixes: 50 same family
+  name -- nicknames, initials-only ORCID names -- and 8 different) need rechecking. Xiaolin Wang
+  (UOW, Scopus 7501875770) is a genuine bad link: Scopus and the bulk file both tie the profile to
+  0000-0003-3219-4949, which ORCID live says is Wanyu Lyu; his 18 no-ORCID records stay unmerged.
+- **Two-way-link rule (same day, on the user's instruction):** an ORCID also fits an ACIF when the
+  Scopus link runs both ways (the profile carries the ORCID and the ORCID's own record lists that
+  profile) and the family name agrees -- admits nicknames and other given-name forms that the names
+  test refused (Will/William Featherstone, Ken/Kenneth Beagley, Margaret/Leigh Ackland).
+  `scopus.orcid_fits()`, used in pass one (decision column `accepted_by`: names / two_way_link)
+  and for pass-two claims. Run: pass one accepted 10,717 (285 by two_way_link; names_disagree
+  432 → 147) → **33,987**; pass two → **28,167**; refusals 19 (13 claimed by another name, 5 names
+  don't link, 1 ORCID veto); 14,876 ACIFs carry an ORCID; 0 hold two. The 13 left: 4 genuine bad
+  links (two-way, other family name: Lyu on Xiaolin Wang, Al-Jodah on Shirinzadeh, Ranjbar on
+  Wlodarski, Myadaraboina on Patnaikuni); 2 two-way where the family names don't compare (Terence
+  Williamson -- the ORCID record has given and family swapped; Wilson Rajaratnam vs Rajaratnam);
+  7 one-way, the profile showing no ORCID or another (Susan Jackson, Antoszewski, Sweeney,
+  Sercombe, Khatab/Khattab, Jorgensen, Nick Spencer).
+- Tests: `tests/test_acif_scopus.py` (16), `tests/test_scopus_extract.py` (9); 377 pass.
+
+## Hand stage in the build; trial of a name-based merge (2026-10-03)
+
+**Hand stage** (`src/acif/hand.py`, last stage of `build_acifs()`): the old pipeline's hand files,
+already rekeyed to record ids, were not read by the new build (42 of 57 `manual_merges.csv` rows
+were still separate ACIFs). Now applied after the Scopus passes: `manual_orcids.csv` → new
+`AwardCIFItem.hand_orcid` (counts in the ORCID veto via `_item_orcids()`), joining the record's
+ACIF to any ACIF holding that ORCID; `manual_merges.csv` → joins, not tested on names; groups
+refused on 2+ ORCIDs or a `manual_confirmed_distinct.csv` keep-apart pair. `merge_by_key()`'s
+union step factored out as `build.apply_unions()`. Run: 25 hand ORCIDs applied, 12 already held,
+1 conflict (LP0776270 Anne Jones: hand 0000-0002-4556-9159 vs Scopus-accepted 0000-0002-5122-8334,
+not applied -- open); 20 groups merged, 0 refused; 28,167 → 28,122 ACIFs. 5 tests
+(`tests/test_acif_hand.py`).
+
+**Name-merge trial** (`analysis/18_trail_name_merge.py`, file name as the user gave it; nothing
+written back): decisions asked step by step. Final rules: ACIFs sharing a record's MAIN name key
+(00a full_name_key, first_name_canonical + family) chain into a group -- middle/compound and
+initial-only keys don't link (runs 1-2 showed t_pietsch joining Tamson/Timothy Pietsch, bin_yu
+joining Hai-Bin/Bin Yu); whole-group ORCID veto (ARC/Scopus/hand) and hand keep-apart pairs.
+Checks pair by pair (no chaining -- chaining let Paul Young's 28 parts pass): rare FOR (no shared
+FOR2020 group and no cross pair with lift >= 1, lift from `for_name_pair_freq` + new
+`00c` table `for2020_group_rarity.parquet`), interleaved universities (two universities each with
+2+ single-organisation grants whose years overlap > 2 years), DECRA rules (award >10 yrs before a
+DE, two DEs, DE after FT/FL), span > 40 yrs. University lift is information only (user: co-listing
+can't tell a move from a co-award); university evidence uses single-organisation grants only
+(`n_eligible_orgs == 1`; user: person-org link is broken on multi-org grants). Co-awardees are
+evidence for a merge, not a flag. Result (from 28,122): 2,138 groups merged (7,543 ACIFs), 134
+vetoed (361), 3 kept apart (16) → **22,717 ACIFs**; flagged 311 groups (1,482 ACIFs: rare FOR 262,
+interleaved 59, DECRA rules 24), clean 1,827 (6,061); 694 of the 822 groups sharing a
+co-investigator are clean. Remaining unmerged types counted: initial-only ACIFs without ORCID 56;
+same family + initial but different first given names 1,932 groups (456 with 2+ no-ORCID ACIFs);
+no-ORCID ACIFs whose Scopus search found several profiles 1,546, none 1,090.
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.

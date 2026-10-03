@@ -337,38 +337,88 @@ def _full_name_keys(acif: AwardsCIF) -> set[str]:
     return {k for it in acif.items for k in it.full_name_keys}
 
 
+def _item_orcids(acif: AwardsCIF) -> set[str]:
+    """Every ORCID tied to an ACIF's current items: ARC's own, any found through Scopus
+    (item.scopus_orcid) and any given by hand (item.hand_orcid). merge_by_key()'s default
+    orcids_of."""
+    return {o for it in acif.items for o in (it.orcid, it.scopus_orcid, it.hand_orcid) if o}
+
+
+def _keys(k) -> set[str]:
+    if not k:
+        return set()
+    return {k} if isinstance(k, str) else {x for x in k if x}
+
+
+def key_components(acifs: list[AwardsCIF], key_of) -> list[tuple[list[str], list[AwardsCIF]]]:
+    """Connected components of ACIFs that share an identity key. key_of(acif) returns None, one
+    key, or several (an ACIF that carries several Scopus profiles, say); two ACIFs are in one
+    component when a chain of shared keys connects them. Only components of 2+ ACIFs are
+    returned, as (sorted keys, ACIFs sorted by cluster_id), ordered by their first cluster_id --
+    the result does not depend on the order of `acifs`."""
+    comp = UnionFind()
+    first_holder: dict[str, str] = {}
+    keys_of: dict[str, set[str]] = {}
+    by_id = {a.cluster_id: a for a in acifs}
+    for a in acifs:
+        ks = _keys(key_of(a))
+        if not ks:
+            continue
+        keys_of[a.cluster_id] = ks
+        comp.find(a.cluster_id)
+        for k in ks:
+            if k in first_holder:
+                comp.union(first_holder[k], a.cluster_id)
+            else:
+                first_holder[k] = a.cluster_id
+    groups: dict[str, list[str]] = defaultdict(list)
+    for cid in keys_of:
+        groups[comp.find(cid)].append(cid)
+    out = []
+    for cids in groups.values():
+        if len(cids) < 2:
+            continue
+        cids = sorted(cids)
+        out.append((sorted(set().union(*(keys_of[c] for c in cids))), [by_id[c] for c in cids]))
+    return sorted(out, key=lambda kg: kg[1][0].cluster_id)
+
+
 def merge_by_key(
-    acifs: list[AwardsCIF], uf: UnionFind, key_of,
+    acifs: list[AwardsCIF], uf: UnionFind, key_of, orcids_of=_item_orcids, check=None,
 ) -> tuple[list[AwardsCIF], list[dict]]:
-    """Group ACIFs by an identity key (key_of(acif) -> str or None; None = not in any group) and
-    merge each group only when all its ACIFs are linked by shared full_name_keys (A shares a key
-    with B, B with C, ...; keys are the parser's own output, from arc_names.parquet -- no name
-    handling here). A group that splits into unlinked parts is left unmerged entirely and
-    reported instead -- "don't guess, defer to human review" (the real conflicts this catches:
-    Wang/Duan, Bunda/Lasczik, Curran/Gallagher).
+    """Group ACIFs by identity key (key_components(): key_of(acif) -> None, a key, or several
+    keys; ACIFs chained by shared keys form one group) and merge each group only when all its
+    ACIFs are linked by shared full_name_keys (A shares a key with B, B with C, ...; keys are the
+    parser's own output, from arc_names.parquet -- no name handling here). A group that splits
+    into unlinked parts is left unmerged entirely and reported instead -- "don't guess, defer to
+    human review" (the real conflicts this catches: Wang/Duan, Bunda/Lasczik, Curran/Gallagher).
+
+    ORCID veto: a group whose ACIFs between them carry 2+ different ORCIDs (orcids_of(acif) ->
+    set; default: the ARC and Scopus ORCIDs on its items) is never merged -- the whole group is
+    left as it is and reported, whatever the key, so the outcome doesn't depend on order. The
+    check is on whole groups of whole ACIFs, so it holds across calls too: A merged with C by one
+    key carries A's ORCID into the next call, and C can't then bring in B with a different ORCID
+    by another key. When the key is itself an ORCID the veto can't fire (one ORCID per group).
+
+    check(keys, group) -> None or a reason string: a caller's own extra test, run after the name
+    and ORCID tests; a group it gives a reason for is left unmerged and reported with that reason.
 
     Survivor cluster_id = min(unique_id) of the merged items; absorbed ids resolve through `uf`.
     orcids/orcid_status of each survivor are recomputed from its items.
 
-    Returns (updated_acifs, name_mismatches): one entry per key whose members don't all share a
-    full_name_key, with the sub-groups and names needed to review it."""
-    by_key: dict[str, list[AwardsCIF]] = defaultdict(list)
-    for acif in acifs:
-        k = key_of(acif)
-        if k:
-            by_key[k].append(acif)
-
+    Returns (updated_acifs, mismatches): one entry per group left unmerged, with `reason`
+    ("names_do_not_link", "orcid_veto" or the check's reason), `orcid` (the group's first key),
+    `keys`, the sub-groups, names and ORCIDs needed to review it."""
     mismatches: list[dict] = []
     to_merge: list[tuple[str, str]] = []
 
-    for key, group in by_key.items():
-        if len(group) < 2:
-            continue
-        local = UnionFind()  # throwaway, scoped to partitioning just this one key's group
-        keys = [_full_name_keys(a) for a in group]
+    for keys, group in key_components(acifs, key_of):
+        names = {a.cluster_id: a.items[0].full_name for a in group}
+        local = UnionFind()  # throwaway, scoped to partitioning just this group
+        fnk = [_full_name_keys(a) for a in group]
         for i in range(len(group)):
             for j in range(i + 1, len(group)):
-                if keys[i] & keys[j]:
+                if fnk[i] & fnk[j]:
                     local.union(group[i].cluster_id, group[j].cluster_id)
 
         sub_groups: dict[str, list[AwardsCIF]] = defaultdict(list)
@@ -377,21 +427,35 @@ def merge_by_key(
 
         if len(sub_groups) > 1:
             mismatches.append({
-                "orcid": key,
-                "groups": sorted(
-                    sorted(a.cluster_id for a in sub) for sub in sub_groups.values()
-                ),
-                "names": {a.cluster_id: a.items[0].full_name for a in group},
+                "reason": "names_do_not_link", "orcid": keys[0], "keys": keys,
+                "groups": sorted(sorted(a.cluster_id for a in sub) for sub in sub_groups.values()),
+                "names": names,
             })
             continue
 
-        acif_ids = [a.cluster_id for a in group]
-        for other in acif_ids[1:]:
-            to_merge.append((acif_ids[0], other))
+        orcids = {a.cluster_id: sorted(orcids_of(a)) for a in group}
+        reason = "orcid_veto" if len({o for os in orcids.values() for o in os}) > 1 else None
+        if reason is None and check is not None:
+            reason = check(keys, group)
+        if reason:
+            mismatches.append({
+                "reason": reason, "orcid": keys[0], "keys": keys,
+                "groups": sorted([a.cluster_id] for a in group),
+                "names": names, "orcids": orcids,
+            })
+            continue
 
+        for a in group[1:]:
+            to_merge.append((group[0].cluster_id, a.cluster_id))
+
+    return apply_unions(acifs, uf, to_merge), mismatches
+
+
+def apply_unions(acifs: list[AwardsCIF], uf: UnionFind, to_merge) -> list[AwardsCIF]:
+    """Union each (cluster_id, cluster_id) pair in `uf` and rebuild the merged ACIFs: survivor
+    cluster_id = min(unique_id) of the merged items; orcids/orcid_status recomputed."""
     if not to_merge:
-        return acifs, mismatches
-
+        return acifs
     for a, b in to_merge:
         uf.union(a, b)
 
@@ -411,7 +475,7 @@ def merge_by_key(
         compute_orcids(survivor)
         survivors.append(survivor)
 
-    return survivors, mismatches
+    return survivors
 
 
 def merge_by_orcid(
@@ -428,16 +492,45 @@ def merge_by_orcid(
     return merge_by_key(acifs, uf, lambda a: a.orcids[0] if a.orcid_status == "HAS_ORCID" else None)
 
 
+def build_acifs(scopus: bool = True, hand: bool = True) -> tuple[list[AwardsCIF], UnionFind, dict]:
+    """The build so far: stage zero -> ARC ORCID merge -> (scopus=True) Scopus pass one (ORCIDs
+    found through Scopus) -> Scopus pass two (shared Scopus profile); see src/acif/scopus.py ->
+    (hand=True) the hand-confirmed ORCIDs and merges from data_persisted (src/acif/hand.py).
+    One UnionFind runs through every stage. Returns (acifs, uf, report): report holds each
+    stage's ACIF count and unmerged groups, and pass one's per-ACIF decisions."""
+    uf = UnionFind({})
+    seeds = build_stage_zero()
+    acifs, m0 = merge_by_orcid(seeds, uf)
+    report = {"n_seed": len(seeds), "n_arc_orcid": len(acifs), "arc_orcid_mismatches": m0}
+    if scopus:
+        from src.acif.scopus import load_scopus_extract, scopus_pass_one, scopus_pass_two
+        ext = load_scopus_extract()
+        acifs, decisions, m1 = scopus_pass_one(acifs, uf, ext)
+        report.update(n_scopus_pass_one=len(acifs), pass_one_decisions=decisions, pass_one_mismatches=m1)
+        acifs, m2, n_claimed = scopus_pass_two(acifs, uf, ext)
+        report.update(n_scopus_pass_two=len(acifs), pass_two_mismatches=m2, pass_two_orcid_from_claims=n_claimed)
+    if hand:
+        from src.acif.hand import hand_stage
+        acifs, hand_report = hand_stage(acifs, uf)
+        report.update(n_hand=len(acifs), hand=hand_report)
+    return acifs, uf, report
+
+
 def render_orcid_mismatch_report(mismatches: list[dict]) -> str:
     """Plain-text rendering of merge_by_orcid()'s own mismatch report -- for human review, not
     a separate diagnostic script re-deriving the same grouping logic."""
     if not mismatches:
         return "No ORCID/name mismatches found."
-    lines = [f"{len(mismatches)} ORCID(s) shared across incompatible family names:\n"]
+    lines = [f"{len(mismatches)} group(s) left unmerged:\n"]
     for m in mismatches:
-        lines.append(f"ORCID {m['orcid']}:")
+        lines.append(f"key {m['orcid']} ({m.get('reason', 'names_do_not_link')}):")
         for group in m["groups"]:
-            names = ", ".join(f"{cid} ({m['names'][cid]})" for cid in group)
+            names = ", ".join(
+                f"{cid} ({m['names'][cid]}"
+                + (f"; ORCID {', '.join(m['orcids'][cid]) or '-'}" if "orcids" in m else "")
+                + ")"
+                for cid in group
+            )
             lines.append(f"  - {names}")
         lines.append("")
     return "\n".join(lines)
