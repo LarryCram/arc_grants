@@ -492,10 +492,12 @@ def merge_by_orcid(
     return merge_by_key(acifs, uf, lambda a: a.orcids[0] if a.orcid_status == "HAS_ORCID" else None)
 
 
-def build_acifs(scopus: bool = True, hand: bool = True) -> tuple[list[AwardsCIF], UnionFind, dict]:
+def build_acifs(scopus: bool = True, hand: bool = True, names: bool = True,
+                ) -> tuple[list[AwardsCIF], UnionFind, dict]:
     """The build so far: stage zero -> ARC ORCID merge -> (scopus=True) Scopus pass one (ORCIDs
     found through Scopus) -> Scopus pass two (shared Scopus profile); see src/acif/scopus.py ->
-    (hand=True) the hand-confirmed ORCIDs and merges from data_persisted (src/acif/hand.py).
+    (hand=True) the hand-confirmed ORCIDs and merges from data_persisted (src/acif/hand.py) ->
+    (names=True) the clean name groups (src/acif/name_merge.py).
     One UnionFind runs through every stage. Returns (acifs, uf, report): report holds each
     stage's ACIF count and unmerged groups, and pass one's per-ACIF decisions."""
     uf = UnionFind({})
@@ -513,6 +515,10 @@ def build_acifs(scopus: bool = True, hand: bool = True) -> tuple[list[AwardsCIF]
         from src.acif.hand import hand_stage
         acifs, hand_report = hand_stage(acifs, uf)
         report.update(n_hand=len(acifs), hand=hand_report)
+    if names:
+        from src.acif.name_merge import name_merge
+        acifs, name_report = name_merge(acifs, uf)
+        report.update(n_names=len(acifs), names=name_report)
     return acifs, uf, report
 
 

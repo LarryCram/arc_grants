@@ -20,7 +20,8 @@ src/00d_extract_scopus.py       → processed/scopus_extract/: one Scopus Author
 src/acif/                       → the cyclic ACIF build (models, build, features, scopus); so far
                                   build_acifs(): load_items() → seed() → merge_by_orcid() → Scopus
                                   pass one (Scopus-found ORCIDs) → pass two (shared Scopus profile)
-                                  → hand stage (manual_orcids, manual_merges, keep-apart pairs);
+                                  → hand stage (manual_orcids, manual_merges, keep-apart pairs)
+                                  → name stage (clean name groups only, src/acif/name_merge.py);
                                   it does not yet write a list of people
 src/utils/acif_oax_linker.py    → ARC↔OpenAlex candidate linking (with sql/01-04); still reads the
                                   old awards_cif_arc_only.parquet until src/acif writes its own list
@@ -3329,6 +3330,20 @@ interleaved 59, DECRA rules 24), clean 1,827 (6,061); 694 of the 822 groups shar
 co-investigator are clean. Remaining unmerged types counted: initial-only ACIFs without ORCID 56;
 same family + initial but different first given names 1,932 groups (456 with 2+ no-ORCID ACIFs);
 no-ORCID ACIFs whose Scopus search found several profiles 1,546, none 1,090.
+
+## Name stage in the build: clean name groups only (2026-10-06)
+
+`src/acif/name_merge.py::name_merge()`, the last stage of `build_acifs()` (`names=True`). Same
+rules as the 2026-10-03 trial, moved out of `analysis/18_trail_name_merge.py` (which now imports
+them and calls `build_acifs(names=False)`; its report is byte-identical): main-key groups, whole-
+group ORCID veto, keep-apart pairs, pairwise checks. Change (user decision): a group any check
+flags is not merged. Run: 28,122 -> **23,888** ACIFs; 1,827 groups merged (6,061 ACIFs); left:
+311 flagged, 134 ORCID veto, 3 kept apart; 0 ACIFs hold two ORCIDs. Per-group rows (status,
+parts, flags, lift and co-awardee fields) in `report["names"]["groups"]`. Uncertain groups are
+left unmerged by decision, to be revisited with OpenAlex evidence rather than reviewed by hand.
+Tests: `tests/test_acif_name_merge.py` (6); 390 pass. Next: count partial merges in flagged
+groups, no-ORCID parts of vetoed groups, and co-investigator-backed given-name variants
+(`docs/pipeline_todo.md`).
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.

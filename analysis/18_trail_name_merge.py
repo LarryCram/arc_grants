@@ -56,10 +56,8 @@ Outputs (PROCESSED_DATA/name_merge_trial/):
 Usage: .venv/bin/python analysis/18_trail_name_merge.py
 """
 
-import importlib
 import sys
-from collections import Counter, defaultdict
-from itertools import combinations
+from collections import Counter
 from pathlib import Path
 
 import pandas as pd
@@ -69,160 +67,23 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from config.settings import PROCESSED_DATA
 from src.acif.build import UnionFind, _item_orcids, build_acifs, key_components, merge_by_key
 from src.acif.hand import load_hand_distinct
+from src.acif.name_merge import (FLAGS, LIFT_MIN, coinvestigators, group_checks,
+                                 load_name_merge_inputs, part_facts)
+
+# The rules and checks live in src/acif/name_merge.py (2026-10-06: moved into the build, which
+# merges clean groups only). This trial starts from the build before the name stage and reports
+# what merging every non-vetoed group would give, with every group's checks.
 
 OUT = PROCESSED_DATA / "name_merge_trial"
-LIFT_MIN = 1.0
-INTERLEAVE_TOL = 2
-DE_LEAD_YEARS = 10
-MAX_SPAN = 40
-FLAGS = ["several_main_names", "rare_for", "interleaved_universities",
-         "award_10y_before_decra", "two_decras", "decra_after_ft_fl", "span_over_40y"]
 INFO = ["rare_institutions"]   # reported, not a flag (2026-10-03, user)
 
 
-# ── inputs ───────────────────────────────────────────────────────────────────
-
-def main_keys() -> dict[str, str]:
-    """unique_id -> the record's main name key from 00a (full_name_key, else the raw key),
-    only where it has a full given name."""
-    a = pd.read_parquet(PROCESSED_DATA / "arc_names.parquet",
-                        columns=["unique_id", "full_name_key", "full_name_key_raw"])
-    out = {}
-    for r in a.itertuples(index=False):
-        k = r.full_name_key or r.full_name_key_raw
-        if isinstance(k, str) and "_" in k and len(k.split("_", 1)[0]) > 1:
-            out[r.unique_id] = k
-    return out
-
-
-def lift_table(pairs: pd.DataFrame, a: str, b: str, margins: pd.DataFrame, name: str) -> dict:
-    n = round((margins["count"] / margins["frequency"]).iloc[0])
-    c = dict(zip(margins[name], margins["count"]))
-    return {(r[a], r[b]): r["count"] * n / (c[r[a]] * c[r[b]])
-            for _, r in pairs.iterrows() if r[a] in c and r[b] in c}
-
-
-def coinvestigators(acifs) -> dict[str, set[str]]:
-    """unique_id -> the ACIF ids (after pass two) of the other in-scope investigators on its grant."""
-    acif_of = {it.unique_id: a.cluster_id for a in acifs for it in a.items}
-    by_grant = defaultdict(set)
-    for u in acif_of:
-        by_grant[u.split("_", 1)[0]].add(u)
-    return {u: {acif_of[v] for v in by_grant[u.split("_", 1)[0]] if acif_of[v] != acif_of[u]}
-            for u in acif_of}
-
-
-def single_org_grants() -> set[str]:
-    """Grants with exactly one eligible organisation -- the only ones whose administering
-    university can be taken as the investigator's own."""
-    g = pd.read_parquet(PROCESSED_DATA / "grants_flat.parquet", columns=["grant_code", "n_eligible_orgs"])
-    return set(g.loc[g.n_eligible_orgs == 1, "grant_code"])
-
-
-def part_facts(acif, mk, crosswalk, hep_names, coinv_of, single) -> dict:
-    unis, grants = set(), []
-    for it in acif.items:
-        us = set()
-        if it.grant_code in single:
-            us = {crosswalk.get(o, o) for o in (it.admin_orgs or [it.admin_org]) if o} & hep_names
-        unis |= us
-        grants.append((it.grant_code, it.funding_commence_year, frozenset(us)))
-    return {
-        "id": acif.cluster_id,
-        "names": sorted({it.full_name for it in acif.items}),
-        "main_keys": {mk[it.unique_id] for it in acif.items if it.unique_id in mk},
-        "for": {e["name"] for it in acif.items for e in (it.for2020_codes or []) if e.get("name")},
-        "unis": unis,
-        "coinv": set().union(*(coinv_of[it.unique_id] for it in acif.items)),
-        "orcids": _item_orcids(acif),
-        "grants": grants,
-    }
-
-
-# ── pair tests ───────────────────────────────────────────────────────────────
-
-def best_lift(xs, ys, lifts) -> float:
-    best = 0.0
-    for x in xs:
-        for y in ys:
-            if x != y:
-                best = max(best, lifts.get((min(x, y), max(x, y)), 0.0))
-    return best
-
-
-def unlinked_pairs(parts, field, lifts, seen) -> tuple[int, int]:
-    """(pairs with no evidence, pairs tested) among parts that have `field`; appends each
-    non-sharing pair's best lift to `seen`."""
-    have = [p for p in parts if p[field]]
-    bad = tested = 0
-    for p, q in combinations(have, 2):
-        tested += 1
-        if p[field] & q[field]:
-            continue
-        b = best_lift(p[field], q[field], lifts)
-        seen.append(b)
-        if b < LIFT_MIN:
-            bad += 1
-    return bad, tested
-
-
-def n_components(parts, linked) -> int:
-    uf = UnionFind()
-    for p in parts:
-        uf.find(p["id"])
-    for p, q in combinations(parts, 2):
-        if linked(p, q):
-            uf.union(p["id"], q["id"])
-    return len({uf.find(p["id"]) for p in parts})
-
-
-# ── year checks ──────────────────────────────────────────────────────────────
-
-def _scheme(grant_code: str) -> str:
-    return "".join(ch for ch in grant_code[:2] if ch.isalpha())
-
-
-def year_problems(grants) -> set[str]:
-    out = set()
-    yrs = [(g, y) for g, y, _ in grants if y]
-    de = {(g, y) for g, y in yrs if _scheme(g) == "DE"}
-    if len({g for g, _ in de}) > 1:
-        out.add("two_decras")
-    for _, dy in de:
-        if any(y < dy - DE_LEAD_YEARS for g, y in yrs if _scheme(g) != "DE"):
-            out.add("award_10y_before_decra")
-        if any(_scheme(g) in ("FT", "FL") and y < dy for g, y in yrs):
-            out.add("decra_after_ft_fl")
-    if yrs and max(y for _, y in yrs) - min(y for _, y in yrs) > MAX_SPAN:
-        out.add("span_over_40y")
-    by_uni = defaultdict(list)
-    for g, y, us in grants:
-        if y and len(us) == 1:
-            by_uni[next(iter(us))].append(y)
-    runs = {u: (min(v), max(v)) for u, v in by_uni.items() if len(v) >= 2}
-    for (a, (a0, a1)), (b, (b0, b1)) in combinations(sorted(runs.items()), 2):
-        if not (a1 <= b0 + INTERLEAVE_TOL or b1 <= a0 + INTERLEAVE_TOL):
-            out.add("interleaved_universities")
-    return out
-
-
-# ── main ─────────────────────────────────────────────────────────────────────
-
 def main():
-    acifs, uf, report = build_acifs()
+    acifs, uf, report = build_acifs(names=False)
     n_start = len(acifs)
-    x00c = importlib.import_module("src.00c_extract_propensities")
-    crosswalk, hep_names = x00c._load_institution_name_crosswalk()
-    P = PROCESSED_DATA
-    for_lift = lift_table(pd.read_parquet(P / "for_name_pair_freq.parquet"), "name_a", "name_b",
-                          pd.read_parquet(P / "for2020_group_rarity.parquet"), "name")
-    uni_lift = lift_table(pd.read_parquet(P / "institution_pair_freq.parquet"), "institution_a",
-                          "institution_b", pd.read_parquet(P / "institution_rarity.parquet"),
-                          "institution_name")
-    mk = main_keys()
+    inp = load_name_merge_inputs()
     coinv_of = coinvestigators(acifs)
-    single = single_org_grants()
-    facts = {a.cluster_id: part_facts(a, mk, crosswalk, hep_names, coinv_of, single) for a in acifs}
+    facts = {a.cluster_id: part_facts(a, inp, coinv_of) for a in acifs}
 
     def merge_keys(a):
         return facts[a.cluster_id]["main_keys"]
@@ -247,21 +108,8 @@ def main():
                "n_orcids": len(orcids), "names": sorted({n for p in parts for n in p["names"]}),
                "main_keys": sorted(keys), "parts": [p["id"] for p in parts]}
         if row["status"] == "merged":
-            row["several_main_names"] = len(keys) > 1 and not any(p["main_keys"] >= set(keys) for p in parts)
-            bad, tested = unlinked_pairs(parts, "for", for_lift, seen_for)
-            row["for_pairs_unlinked"], row["for_pairs"] = bad, tested
-            row["rare_for"] = bad > 0
-            bad, tested = unlinked_pairs(parts, "unis", uni_lift, seen_uni)
-            row["uni_pairs_unlinked"], row["uni_pairs"] = bad, tested
-            row["rare_institutions"] = bad > 0
-            row["coawardee_some_link"] = any(p["coinv"] & q["coinv"] for p, q in combinations(parts, 2))
-            row["coawardee_all_linked"] = n_components(parts, lambda p, q: bool(p["coinv"] & q["coinv"])) == 1
-            whole = year_problems([g for p in parts for g in p["grants"]])
-            before = set().union(*(year_problems(p["grants"]) for p in parts))
-            for k in ("interleaved_universities", "award_10y_before_decra", "two_decras",
-                      "decra_after_ft_fl", "span_over_40y"):
-                row[k] = k in whole and k not in before
-            row["n_flags"] = sum(bool(row[f]) for f in FLAGS)
+            row.update(group_checks(keys, parts, inp, seen_for, seen_uni))
+            row["n_flags"] = len(row.pop("flags"))
         rows.append(row)
 
     g = pd.DataFrame(rows)

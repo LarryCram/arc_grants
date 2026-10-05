@@ -1,6 +1,6 @@
 # Full TODO list — ARC Grants → OpenAlex pipeline
 
-## Current state and open items (2026-10-03) — read this first
+## Current state and open items (2026-10-06) — read this first
 
 Everything below this section predates the 2026-09-30 archive of the old pipeline. Items that
 name `awards_cif.py`, `01_prepare_arc.py`, `01a_diagnose.py`, `04_resolve_links.py` /
@@ -18,43 +18,42 @@ detail.
 | Scopus pass one -- ORCID found through Scopus (`00d` extract + `src/acif/scopus.py`) | 33,987 |
 | Scopus pass two -- shared Scopus profile | 28,167 |
 | Hand stage -- `manual_orcids`, `manual_merges`, keep-apart pairs (`src/acif/hand.py`) | 28,122 |
-| *Trial only:* name merge on main name keys (`analysis/18_trail_name_merge.py`) | *22,717* |
+| Name stage -- clean name groups only (`src/acif/name_merge.py`) | 23,888 |
+
+Name stage (2026-10-06): 1,827 groups merged (6,061 ACIFs); not merged: 311 flagged (rare FOR
+262, interleaved universities 59, DECRA rules 24), 134 ORCID veto, 3 kept apart. Per-group rows
+in the build report (`report["names"]["groups"]`). `analysis/18_trail_name_merge.py` now uses the
+same code and still reports the merge-everything figure (22,717).
 
 Rules settled: never merge on names alone without checks; ORCID veto (ARC, Scopus, hand) on whole
 groups; pass one accepts a Scopus ORCID when names agree or the ORCID-Scopus link is two-way with
-the same family name; a cached ORCID record redirected to another ORCID is ignored.
+the same family name; a cached ORCID record redirected to another ORCID is ignored. Uncertain
+cases are left unmerged (a missed merge, not a wrong one) and may be resolved later through the
+OpenAlex oeuvre step, where two ACIFs claiming one OpenAlex author is merge evidence.
 
-**Next steps, in order**
-1. **Review the name-merge trial's flagged groups** (311 groups, 1,482 ACIFs: rare FOR 262,
-   interleaved universities 59, DECRA rules 24) case by case: build evidence cards (records,
-   grants, years, universities, FOR, co-investigators, Scopus profile) in `analysis/`, give a
-   verdict per group, and record decisions as hand rows. Paul Young (28 ACIFs) is the known
-   multi-person case among them.
-2. **Move the name merge into the build** (`src/acif/`) with the trial's rules once (1) has shown
-   which flags block a merge and which only report: main-key linking, whole-group ORCID veto,
-   keep-apart pairs, flagged groups held back or merged as decided.
-3. **Review the 134 vetoed name groups** (361 ACIFs; largest Ling Li 12, Giang Nguyen 11): two or
-   more ORCIDs in one name group -- split them into people by hand (`manual_merges` /
-   `manual_confirmed_distinct`) or leave.
+**Next steps, in order** (2--4 to be counted before they are built)
+1. **Count, then build, partial merges in flagged groups**: merge the largest set of parts that
+   pass every pairwise check, leave the odd part out. The 13 flagged groups whose parts are all
+   linked by shared co-investigators are the strongest cases.
+2. **No-ORCID parts of the 134 vetoed groups**: attach a no-ORCID part to one ORCID side only
+   when it has evidence for that side alone (shared co-investigator, or same university on a
+   single-organisation grant).
+3. **Same family name, different given form, plus a shared co-investigator**: nicknames, the 56
+   initial-only no-ORCID ACIFs, the 517 ACIFs sharing only a middle/compound key; candidates
+   come from the 1,932 same-family-and-initial groups.
 4. **Open single decisions**: LP0776270 Anne Jones (hand ORCID 0000-0002-4556-9159 vs Scopus-
-   accepted 0000-0002-5122-8334 -- a `reject_scopus` row if the hand one is right); pass two's 13
-   "claimed by another name" refusals (4 genuine bad links -- Xiaolin Wang/Lyu, Shirinzadeh/Al-Jodah,
-   Wlodarski/Ranjbar, Patnaikuni/Myadaraboina; 2 name-form mismatches -- Terence Williamson, Wilson
-   Rajaratnam; 7 one-way links) -- needs a new override row type ("ignore this claim") or leave.
+   accepted 0000-0002-5122-8334); pass two's 13 "claimed by another name" refusals (4 genuine bad
+   links -- Xiaolin Wang/Lyu, Shirinzadeh/Al-Jodah, Wlodarski/Ranjbar, Patnaikuni/Myadaraboina;
+   2 name-form mismatches -- Terence Williamson, Wilson Rajaratnam; 7 one-way links).
 5. **`src/acif` writes its own list of people** (parquet per stage) so `acif_oax_linker.py` and
-   reports stop reading the old `awards_cif_arc_only.parquet`.
-6. **Remaining unmerged types** (after the trial): same family + first initial but different
-   first given names, 1,932 groups (456 with 2+ no-ORCID ACIFs -- nicknames, middle names,
-   mostly different people); records sharing a middle/compound key not merged, 517 ACIFs;
-   no-ORCID ACIFs whose Scopus search found several profiles 1,546 or none 1,090; initial-only
-   no-ORCID ACIFs 56 (18 with a candidate). Decide which deserve a rule or hand review.
-7. Optional: hand-check a sample of Scopus pass two's merged groups (2,300+) for namesake
-   profiles, and pass one's fragment-to-fragment joins.
+   reports stop reading the old `awards_cif_arc_only.parquet`; then the OpenAlex oeuvre step.
+6. Uncertain groups (what 1--3 leave) -- no hand review planned; revisit with OpenAlex evidence.
+7. Optional: hand-check a sample of Scopus pass two's merged groups for namesake profiles.
 8. Stale shell scripts `run_pipeline.sh` / `run_piling.sh` (left as they are, by decision).
 
 Done since 2026-10-01: ORCID veto in the union step; Scopus passes one and two in the build
 (`00d_extract_scopus.py`, `src/acif/scopus.py`), with the two-way-link rule and the ORCID-redirect
-fix; `for2020_group_rarity.parquet` in `00c`; the hand stage; the name-merge trial.
+fix; `for2020_group_rarity.parquet` in `00c`; the hand stage; the name stage (clean groups).
 
 ## Context
 
