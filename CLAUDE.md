@@ -3491,6 +3491,16 @@ Tests: `tests/test_acif_orcid_bulk.py` (4); 406 pass.
   (John Forster, David Forrest, Steven Duvall; unclear: Simon Lewis, Leonid Petrov, Barry Williams).
   Stage 1 now: 17,910 pairs, 16,006 ACIFs linked (15,973 in the pool + 33 outside); 518 ACIFs with an
   ORCID and no accepted link (512 not in OpenAlex, 6 only refused links).
+- The 211 ORCID links whose names share no parser key were reviewed (list:
+  `processed/oax_link/orcid_no_name_key.md`): ~175 the same person written differently (compound
+  surname split, separator, order swap, one letter, non-Latin, marriage names, nicknames), ~25
+  OpenAlex records of another person -- mostly a co-author's small record beside the real one
+  (Hebblewhite on Paul Hagan's ORCID, Kathryn Graham on Peter Miller's, ...). Stage 1 now gives
+  each link `name_relation` (src/oax/orcid_link.py::name_relation(), comparing parser keys only)
+  and `status`: accept_name_key 17,699, accept_name_form 148, review_given_name 28,
+  review_unrelated 14, reject_unrelated 21 (unrelated names on a record holding < 20% of the
+  ACIF's linked works); accept_hand via a new `accept_link` action in oax_link_overrides.csv.
+  Accepted: 17,847 links, 15,969 ACIFs; 37 ACIFs have only review/reject links. Tests: 409 pass.
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.

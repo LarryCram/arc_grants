@@ -64,3 +64,31 @@ def test_apply_overrides_refuses_a_link_and_checks_rows():
     assert list(kept.author_idx) == [10, 20] and list(refused.author_idx) == [11]
     with pytest.raises(SystemExit):
         apply_overrides(a, pd.DataFrame([{"orcid": "O1", "author_idx": 99, "notes": "x"}]))
+
+
+def test_name_relation_kinds():
+    from src.oax.orcid_link import name_relation
+    assert name_relation(["majid_ebrahimi warkiani"], ["majid_warkiani", "ebrahimi_warkiani"], "x") == "compound_family"
+    assert name_relation(["oscar_oviedo trespalacios"], ["oscar_oviedo-trespalacios"], "x") == "separator"
+    assert name_relation(["tuan_hoang"], ["hoang_tuan", "duong_tuan"], "x") == "order_swapped"
+    assert name_relation(["per_setterlund"], ["per_zetterlund"], "x") == "family_one_letter"
+    assert name_relation(["lan_du"], ["baosheng_yu"], "x") == "unrelated"          # 2 letters: not 'one letter'
+    assert name_relation(["dora_marinova"], [], "Дора Маринова") == "non_latin"
+    assert name_relation(["william_corcoran"], ["bill_corcoran"], "x") == "same_family"
+    assert name_relation(["nanette_bahr"], ["p_bahr"], "x") == "initials_only"
+
+
+def test_decide_statuses():
+    from src.oax.orcid_link import decide
+    links = pd.DataFrame([
+        {"orcid": "O1", "author_idx": 1, "full_name_keys": ["paul_hagan"], "author_keys": ["bruce_hebblewhite"],
+         "author_name": "Bruce Hebblewhite", "works_share": 0.05},
+        {"orcid": "O1", "author_idx": 2, "full_name_keys": ["paul_hagan"], "author_keys": ["bruce_hebblewhite"],
+         "author_name": "Bruce Hebblewhite", "works_share": 0.5},
+        {"orcid": "O2", "author_idx": 3, "full_name_keys": ["william_corcoran"], "author_keys": ["bill_corcoran"],
+         "author_name": "Bill Corcoran", "works_share": 1.0},
+        {"orcid": "O3", "author_idx": 4, "full_name_keys": ["jan_smith"], "author_keys": ["jan_smith"],
+         "author_name": "Jan Smith", "works_share": 1.0},
+    ])
+    d = decide(links, accepts={("O2", 3)})
+    assert list(d.status) == ["reject_unrelated", "review_unrelated", "accept_hand", "accept_name_key"]
