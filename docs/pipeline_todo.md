@@ -49,10 +49,14 @@ OpenAlex oeuvre step, where two ACIFs claiming one OpenAlex author is merge evid
    links -- Xiaolin Wang/Lyu, Shirinzadeh/Al-Jodah, Wlodarski/Ranjbar, Patnaikuni/Myadaraboina;
    2 name-form mismatches -- Terence Williamson, Wilson Rajaratnam; 7 one-way links).
 5. ~~`src/acif` writes its own list of people~~ -- done 2026-10-06 (`src/01_build_arc_acifs.py`,
-   `acifs_arc.parquet`); the linker reads it (candidate pairs 292,321; 22,968 ACIFs with a
-   candidate). **Next: the OpenAlex stage** -- resolve candidates, extract oeuvres, persist the
-   OpenAlex-enriched ACIFs as their own stage; use two ACIFs claiming one OpenAlex author as merge
-   evidence for the groups left unmerged.
+   `acifs_arc.parquet`).
+5a. **New ARC↔OpenAlex linker** (`src/oax/`, `src/02_link_arc_oax.py`; plan
+   `/home/lc/.claude/plans/sunny-sauteeing-peach.md`), one stage at a time with statistics and
+   examples: ~~1 ORCID links~~ (done 2026-10-06); **2 name-key candidates** (rerun 00b first --
+   its OpenAlex keys predate the 2026-09-29/30 parser changes; decide the parse mismatches found
+   in stage 1: compound surnames, "Last, First", ALL CAPS, Cyrillic, initials-only); 3 evidence;
+   4 calibration on ORCID-confirmed links; 5 decision + persisted `acifs_oax` stage, archive the
+   old linker. Open: accept ORCID links only when names agree?
 6. Uncertain groups (what 1--3 leave) -- no hand review planned; revisit with OpenAlex evidence.
 7. Optional: hand-check a sample of Scopus pass two's merged groups for namesake profiles.
 8. Stale shell scripts `run_pipeline.sh` / `run_piling.sh` (left as they are, by decision).

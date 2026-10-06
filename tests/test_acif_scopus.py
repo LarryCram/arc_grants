@@ -183,3 +183,33 @@ def test_pass_two_two_way_claim_is_not_a_refusal():
                claims={"7": {"OW"}})
     out, mm, n = scopus_pass_two([a, b], UnionFind(), ext)
     assert len(out) == 1 and mm == [] and n == 1
+
+
+def _young(uid, given):
+    return _acif(uid, keys=(f"{given}_young", f"{given[0]}_young"), name=f"{given.title()} Young")
+
+
+def test_pass_one_drops_a_scopus_orcid_whose_merge_names_refuse():
+    # Robert Young's search matched the middle name of Ian Robert Young (two-way link, same family);
+    # Ian Young's own record found the same profile. The ORCID's names are Ian's.
+    ian, ian2 = _young("G1_ian_young", "ian"), _young("G3_ian_young", "ian")
+    rob = _young("G2_robert_young", "robert")
+    ext = _ext({c.cluster_id: (1, ("7", "OI")) for c in (ian, ian2, rob)},
+               name_keys={"OI": {"ian_young", "i_young"}}, listed={"OI": {"7"}})
+    out, d, mm = scopus_pass_one([ian, ian2, rob], UnionFind(), ext)
+    held = {a.cluster_id: {it.scopus_orcid for it in a.items} for a in out}
+    assert held == {"G1_ian_young": {"OI"}, "G2_robert_young": {None}}   # Ian's two records merged
+    assert mm == []
+    assert d.set_index("cluster_id").loc["G2_robert_young", "decision"] == "dropped_names_do_not_link"
+
+
+def test_pass_one_keeps_the_arc_holder_and_drops_the_scopus_one():
+    # Anthony McKnight holds the ORCID from ARC; David's search found Anthony David Blake McKnight.
+    ant = _acif("G1_anthony_mcknight", orcid="OA", keys=("anthony_mcknight", "a_mcknight"), name="Anthony McKnight")
+    dav = _acif("G2_david_mcknight", keys=("david_mcknight", "d_mcknight"), name="David McKnight")
+    ext = _ext({ant.cluster_id: (0, None), dav.cluster_id: (1, ("9", "OA"))}, name_keys={"OA": {"anthony_mcknight", "a_mcknight"}},
+               listed={"OA": {"9"}})
+    out, d, _ = scopus_pass_one([ant, dav], UnionFind(), ext)
+    by = {a.cluster_id: a for a in out}
+    assert by["G2_david_mcknight"].items[0].scopus_orcid is None
+    assert by["G1_anthony_mcknight"].items[0].orcid == "OA"

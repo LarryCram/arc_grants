@@ -26,8 +26,10 @@ src/acif/                       → the cyclic ACIF build (models, build, featur
 src/01_build_arc_acifs.py       → the ARC-stage list of people: acifs_arc.parquet (one row per
                                   ACIF), acif_arc_records.parquet (record → ACIF),
                                   acif_arc_name_groups.parquet, acif_arc_build_report.md
-src/utils/acif_oax_linker.py    → ARC↔OpenAlex candidate linking (with sql/01-04); reads
-                                  acifs_arc.parquet (since 2026-10-06)
+src/02_link_arc_oax.py + src/oax/ → the NEW ARC↔OpenAlex linker, built one stage at a time
+                                  (2026-10-06): so far stage 1, ORCID links → processed/oax_link/
+src/utils/acif_oax_linker.py    → the OLD ARC↔OpenAlex candidate finder (with sql/01-04; reads
+                                  acifs_arc.parquet); to be archived when the new linker replaces it
 ```
 Everything else that used to be in `src/` (01_prepare_arc, 01a_diagnose, 04a_orcid_assist,
 06_build_oeuvre, awards_cif, cluster_checks, oeuvre_build, work_piling, the ORCID tools, ...) was
@@ -3393,6 +3395,44 @@ Also counted and skipped the same day (user): co-investigator-backed given-name 
 (`analysis/21_count_coinvestigator_name_variants.py`) -- 237 candidate pairs, the different-
 initial and same-initial ones mostly relatives and namesakes (Carmen/Allan Luke, Janeen/Jennifer
 Baxter); only ~14 initial-only/middle-key pairs (about 12 ACIFs) looked genuine.
+
+## New ARC↔OpenAlex linker, stage 1 (ORCID links); Scopus middle-name namesakes fixed (2026-10-06)
+
+The old linker (`src/utils/acif_oax_linker.py`, sql/01-04, built 2026-09-15..18 before the
+rebuild) finds candidates and measures evidence but never decides, and keeps hidden state in
+`oax_provenance.duckdb`. User: design a new linker as part of the rebuild, reusing proven parts;
+see each step's effect separately. Decisions so far: an OpenAlex author whose ORCID differs from the
+ACIF's is rejected; tiered acceptance rules calibrated on ORCID-confirmed links; ACIFs sharing an
+accepted author reported only. Plan: `/home/lc/.claude/plans/sunny-sauteeing-peach.md` (stages:
+1 ORCID links, 2 name-key candidates after a 00b rerun, 3 evidence, 4 calibration, 5 decision +
+persisted `acifs_oax` stage, then archive the old linker). "Blocking" without Splink = candidate
+finding: ORCID equality, then equal parser name keys (initial-only keys only with a rare surname).
+
+**Stage 1** (`src/oax/orcid_link.py`, `src/02_link_arc_oax.py` → `processed/oax_link/`
+`orcid_links.parquet`, `orcid_unmatched.parquet`, `report.md`): every pool author
+(`openalex_authors_prep`) carrying the ACIF's ORCID. 14,802 kept ACIFs with an ORCID: 1 author
+13,167, 2-9 authors 1,310 (OpenAlex fragments: one big record plus 1-2-work ones; largest holds 99%
+of works at the median), none 325 (27 in OpenAlex outside the HEP-context pool, 298 not in OpenAlex,
+mostly 2025 grants). 16,220 pairs; 199 share no name key -- parse differences (ARC compound surname
+kept whole vs OpenAlex positional; "Dumas, Marlon"; ALL CAPS; Cyrillic; initials-only "R. A. F.
+Cas"; ARC typo "Per Setterlund" = Per B. Zetterlund) and some OpenAlex records carrying the wrong
+ORCID (Yang Xiang's on "Xiang, Yong"; Paul Hagan's on Bruce Hebblewhite; Helena Wang's on Yuan
+Wang). Open question for the decision stage: accept an ORCID link only when names also agree?
+Tests: `tests/test_oax_orcid_link.py` (4).
+
+**Scopus pass one fix (user):** two ORCIDs were each held by two ACIFs -- Robert Young (DP0557772,
+Melbourne philosophy) and David McKnight (LP0990734, Sydney) had taken the ORCIDs of Ian Robert
+Young and Anthony David Blake McKnight: Scopus AUTHFIRST also matches middle names, and the
+two-way-link rule (2026-10-03) accepted the namesake's ORCID on family name alone; the ORCID merge
+then refused the groups (names don't link) but left the wrong ORCID on the records. Fixed by
+(1) two `reject_scopus` rows in `arc_name_overrides.csv`, and (2) a rule in
+`src/acif/scopus.py::drop_unlinked_scopus_orcids()`: when pass one's ORCID merge is refused because
+names don't link, the Scopus ORCID stays only on the part holding it from ARC/hand -- or, if none,
+on the part whose names agree with the ORCID record's own names -- and is dropped from the others
+(decision `dropped_names_do_not_link`), then the ORCID merge runs again. The rule alone catches
+both cases (checked before the hand rows were added). Build: pass one 33,987 -> 33,985 (Ian Young's
+three Swinburne records now merge in pass one), name stage unchanged at 23,361; ACIFs with an
+ORCID 14,802; no ORCID held by two ACIFs. 402 tests pass.
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.

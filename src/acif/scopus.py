@@ -24,7 +24,14 @@ search's result only when all of these hold:
                                                                         (else: names_disagree)
 `accepted_by` records which.
 The accepted ORCID is put on the ACIF's records (AwardCIFItem.scopus_orcid) and ACIFs are then
-merged by ORCID, ARC's or Scopus's.
+merged by ORCID, ARC's or Scopus's. When that merge is refused because the ACIFs' names don't link
+(2026-10-06, user), the Scopus ORCID is taken off again: it stays only on the name-linked part(s)
+of the group that hold it from ARC (or by hand), or -- when none does -- on the part(s) whose names
+agree with the ORCID record's own names; every other part loses it -- the names show that at
+least one acceptance was wrong (cases: Robert Young and David McKnight, whose
+Scopus searches matched the middle names of Ian Robert Young and Anthony David Blake McKnight).
+Such ACIFs get decision "dropped_names_do_not_link", and the ORCID merge runs again without
+those ORCIDs (the refused group had held its other parts apart too).
 
 Pass two -- a shared Scopus profile. Each record takes the Scopus author id of its search's one
 profile when the search found exactly one (none when it found 0 or 2+, or when a reject_scopus row
@@ -192,7 +199,50 @@ def scopus_pass_one(acifs: list[AwardsCIF], uf: UnionFind, ext: ScopusExtract):
                         decisions.loc[decisions.decision == "accepted", "scopus_orcid"]))
     acifs = [_with_scopus_orcid(a, accepted[a.cluster_id]) if a.cluster_id in accepted else a for a in acifs]
     merged, mismatches = merge_by_key(acifs, uf, _single_orcid)
+    merged, dropped = drop_unlinked_scopus_orcids(merged, mismatches, ext.name_keys)
+    if dropped:
+        decisions.loc[decisions.cluster_id.isin(dropped), "decision"] = "dropped_names_do_not_link"
+        # the refused groups held their remaining parts apart too: merge again without the dropped ORCIDs
+        merged, mismatches = merge_by_key(merged, uf, _single_orcid)
     return merged, decisions, mismatches
+
+
+def drop_unlinked_scopus_orcids(acifs: list[AwardsCIF], mismatches: list[dict], name_keys=None):
+    """Take the Scopus ORCID off ACIFs in ORCID groups refused because names don't link (module
+    docstring). `name_keys`: orcid -> the ORCID record's own name keys (ScopusExtract.name_keys).
+    Returns (acifs, cluster_ids that lost it)."""
+    name_keys = name_keys or {}
+    by_id = {a.cluster_id: a for a in acifs}
+    drop: dict[str, str] = {}
+    for m in mismatches:
+        if m["reason"] != "names_do_not_link":
+            continue
+        orcid = m["orcid"]
+        subs = [[by_id[c] for c in sub if c in by_id] for sub in m["groups"]]  # each linked by names
+
+        def firm(parts):
+            return any(o == orcid for a in parts for it in a.items for o in (it.orcid, it.hand_orcid))
+
+        def agrees(parts):
+            okeys = name_keys.get(orcid)
+            return okeys is not None and names_agree(set().union(*(_full_name_keys(a) for a in parts)), okeys)
+
+        keep = [p for p in subs if firm(p)] or [p for p in subs if agrees(p)]
+        for parts in subs:
+            if any(parts is k for k in keep):
+                continue
+            for a in parts:
+                if any(it.scopus_orcid == orcid for it in a.items):
+                    drop[a.cluster_id] = orcid
+    out = []
+    for a in acifs:
+        if a.cluster_id in drop:
+            items = [replace(it, scopus_orcid=None) if it.scopus_orcid == drop[a.cluster_id] else it
+                     for it in a.items]
+            a = AwardsCIF(cluster_id=a.cluster_id, items=items, cycle_stages=list(a.cycle_stages),
+                          orcids=list(a.orcids), orcid_status=a.orcid_status)
+        out.append(a)
+    return out, sorted(drop)
 
 
 # ── Pass two ────────────────────────────────────────────────────────────────
