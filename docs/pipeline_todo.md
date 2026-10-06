@@ -18,10 +18,13 @@ detail.
 | Scopus pass one -- ORCID found through Scopus (`00d` extract + `src/acif/scopus.py`) | 33,987 |
 | Scopus pass two -- shared Scopus profile | 28,167 |
 | Hand stage -- `manual_orcids`, `manual_merges`, keep-apart pairs (`src/acif/hand.py`) | 28,122 |
-| Name stage -- clean name groups only (`src/acif/name_merge.py`) | 23,888 |
+| Name stage -- clean name groups, then partial merges in flagged groups (`src/acif/name_merge.py`) | 23,361 |
 
-Name stage (2026-10-06): 1,827 groups merged (6,061 ACIFs); not merged: 311 flagged (rare FOR
-262, interleaved universities 59, DECRA rules 24), 134 ORCID veto, 3 kept apart. Per-group rows
+Name stage (2026-10-06): 1,827 clean groups merged (6,061 ACIFs; 28,122 -> 23,888); of the 311
+flagged groups, 125 partly merged (the unique largest set of pairwise-compatible parts, 527 ACIFs
+saved, 126 parts left out; -> 23,361); not merged: 186 flagged (ambiguous 50, no compatible pair
+108, largest set still flagged 28), 134 ORCID veto, 3 kept apart. Count:
+`analysis/19_count_partial_name_merges.py`. Per-group rows
 in the build report (`report["names"]["groups"]`). `analysis/18_trail_name_merge.py` now uses the
 same code and still reports the merge-everything figure (22,717).
 
@@ -32,9 +35,7 @@ cases are left unmerged (a missed merge, not a wrong one) and may be resolved la
 OpenAlex oeuvre step, where two ACIFs claiming one OpenAlex author is merge evidence.
 
 **Next steps, in order** (2--4 to be counted before they are built)
-1. **Count, then build, partial merges in flagged groups**: merge the largest set of parts that
-   pass every pairwise check, leave the odd part out. The 13 flagged groups whose parts are all
-   linked by shared co-investigators are the strongest cases.
+1. ~~Partial merges in flagged groups~~ -- built 2026-10-06 (see above).
 2. **No-ORCID parts of the 134 vetoed groups**: attach a no-ORCID part to one ORCID side only
    when it has evidence for that side alone (shared co-investigator, or same university on a
    single-organisation grant).
@@ -53,7 +54,8 @@ OpenAlex oeuvre step, where two ACIFs claiming one OpenAlex author is merge evid
 
 Done since 2026-10-01: ORCID veto in the union step; Scopus passes one and two in the build
 (`00d_extract_scopus.py`, `src/acif/scopus.py`), with the two-way-link rule and the ORCID-redirect
-fix; `for2020_group_rarity.parquet` in `00c`; the hand stage; the name stage (clean groups).
+fix; `for2020_group_rarity.parquet` in `00c`; the hand stage; the name stage (clean groups,
+then partial merges in flagged groups).
 
 ## Context
 

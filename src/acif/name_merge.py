@@ -27,6 +27,12 @@ reported for later steps (partial merges, review), not guessed at.
     University evidence uses grants with one eligible organisation only (grants_flat
     n_eligible_orgs == 1): on a multi-organisation grant ARC doesn't say which organisation is the
     investigator's.
+  - Partial merges in flagged groups (2026-10-06, user): two parts are compatible when the pair
+    on its own raises no flag. The largest set of pairwise-compatible parts (a maximum clique) is
+    merged when it is the only largest set and raises no flag as a set (interleaving and the
+    DECRA rules are set properties); the other parts are left out, and the same is tried on them.
+    Two or more equally large sets (ambiguous), no compatible pair, or a largest set that is still
+    flagged: nothing is merged. Status "partial" in the report.
   - Information only, never refuses: rare_institutions (some pair of parts shares no university
     and no cross pair has lift >= LIFT_MIN), and co-awardee links (pairs of parts sharing a
     co-investigator, identified by the co-investigator's ACIF before this stage).
@@ -42,7 +48,7 @@ from itertools import combinations
 import pandas as pd
 
 from config.settings import PROCESSED_DATA
-from src.acif.build import UnionFind, _item_orcids, key_components, merge_by_key
+from src.acif.build import UnionFind, _item_orcids, apply_unions, key_components, merge_by_key
 from src.acif.models import AwardsCIF
 
 LIFT_MIN = 1.0
@@ -224,13 +230,75 @@ def group_checks(keys, parts, inp: NameMergeInputs, seen_for=None, seen_uni=None
     return row
 
 
+# ── partial merges in flagged groups ─────────────────────────────────────────
+
+def maximal_cliques(nodes, adj) -> list[set]:
+    """Bron-Kerbosch with pivoting; adj[i] is the set of nodes compatible with i."""
+    out = []
+
+    def bk(r, p, x):
+        if not p and not x:
+            out.append(r)
+            return
+        u = max(p | x, key=lambda v: len(adj[v] & p))
+        for v in sorted(p - adj[u]):
+            bk(r | {v}, p & adj[v], x & adj[v])
+            p = p - {v}
+            x = x | {v}
+
+    bk(set(), set(nodes), set())
+    return out
+
+
+def _keys_of(parts, idx):
+    return sorted(set().union(*(parts[i]["main_keys"] for i in idx)))
+
+
+def best_set(parts, idx, inp: NameMergeInputs) -> tuple[str, set, int]:
+    """(status, chosen indices, number of largest sets) among parts[idx]: status is "unique",
+    "ambiguous", "no_compatible_pair" or "largest_set_flagged"."""
+    adj = {i: set() for i in idx}
+    for i, j in combinations(idx, 2):
+        if not group_checks(_keys_of(parts, (i, j)), [parts[i], parts[j]], inp)["flags"]:
+            adj[i].add(j)
+            adj[j].add(i)
+    cliques = [c for c in maximal_cliques(idx, adj) if len(c) >= 2]
+    if not cliques:
+        return "no_compatible_pair", set(), 0
+    k = max(len(c) for c in cliques)
+    top = [c for c in cliques if len(c) == k]
+    clean = [c for c in top if not group_checks(_keys_of(parts, c), [parts[i] for i in c], inp)["flags"]]
+    if not clean:
+        return "largest_set_flagged", set(), len(top)
+    if len(clean) > 1:
+        return "ambiguous", set(), len(clean)
+    return "unique", clean[0], 1
+
+
+def partial_sets(parts, inp: NameMergeInputs) -> tuple[str, list[set]]:
+    """The first round's status and every set to merge (rounds on the parts left over, while the
+    largest set is unique)."""
+    left = list(range(len(parts)))
+    sets, first = [], None
+    while len(left) >= 2:
+        status, chosen, _ = best_set(parts, left, inp)
+        first = first or status
+        if status != "unique":
+            break
+        sets.append(chosen)
+        left = [i for i in left if i not in chosen]
+    return first, sets
+
+
 # ── the stage ────────────────────────────────────────────────────────────────
 
 def name_merge(acifs: list[AwardsCIF], uf: UnionFind, inputs: NameMergeInputs | None = None,
                distinct=None) -> tuple[list[AwardsCIF], dict]:
-    """Merge the clean name groups. Returns (acifs, report): report["groups"] has one row per name
-    group of 2+ ACIFs -- status (merged / orcid_veto / names_do_not_link / kept_apart / flagged),
-    parts, names, keys, and for groups that reached the checks, every check field."""
+    """Merge the clean name groups, then the unique largest clean sets inside flagged groups.
+    Returns (acifs, report): report["groups"] has one row per name group of 2+ ACIFs -- status
+    (merged / partial / orcid_veto / names_do_not_link / kept_apart / flagged), parts, names,
+    keys, for groups that reached the checks every check field, and for flagged groups
+    partial_status (first round), partial_sets and parts_left_out."""
     if inputs is None:
         inputs = load_name_merge_inputs()
     if distinct is None:
@@ -256,6 +324,20 @@ def name_merge(acifs: list[AwardsCIF], uf: UnionFind, inputs: NameMergeInputs | 
             for cid in sub:
                 reason_of[cid] = m["reason"]
 
+    partial: dict[str, tuple[str, list[list[str]]]] = {}
+    to_merge = []
+    for m in refused:
+        if m["reason"] != "flagged":
+            continue
+        ids = sorted(c for sub in m["groups"] for c in sub)
+        parts = [facts[c] for c in ids]
+        status, sets = partial_sets(parts, inputs)
+        named = [sorted(ids[i] for i in st) for st in sets]
+        partial[ids[0]] = (status, named)
+        for st in named:
+            to_merge += [(st[0], c) for c in st[1:]]
+    merged = apply_unions(merged, uf, to_merge)
+
     rows = []
     for keys, group in key_components(acifs, lambda a: facts[a.cluster_id]["main_keys"]):
         first = group[0].cluster_id
@@ -265,6 +347,12 @@ def name_merge(acifs: list[AwardsCIF], uf: UnionFind, inputs: NameMergeInputs | 
                "names": sorted({n for a in group for n in facts[a.cluster_id]["names"]}),
                "main_keys": sorted(keys), "parts": [a.cluster_id for a in group]}
         row.update(checked.get(first, {}))
+        if first in partial:
+            status, named = partial[first]
+            row["partial_status"], row["partial_sets"] = status, named
+            row["parts_left_out"] = sorted(set(row["parts"]) - {c for st in named for c in st})
+            if named:
+                row["status"] = "partial"
         rows.append(row)
     groups = pd.DataFrame(rows)
     report = {"groups": groups, "n_before": len(acifs), "n_after": len(merged),

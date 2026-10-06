@@ -21,7 +21,8 @@ src/acif/                       → the cyclic ACIF build (models, build, featur
                                   build_acifs(): load_items() → seed() → merge_by_orcid() → Scopus
                                   pass one (Scopus-found ORCIDs) → pass two (shared Scopus profile)
                                   → hand stage (manual_orcids, manual_merges, keep-apart pairs)
-                                  → name stage (clean name groups only, src/acif/name_merge.py);
+                                  → name stage (clean name groups, then partial merges in
+                                  flagged groups; src/acif/name_merge.py);
                                   it does not yet write a list of people
 src/utils/acif_oax_linker.py    → ARC↔OpenAlex candidate linking (with sql/01-04); still reads the
                                   old awards_cif_arc_only.parquet until src/acif writes its own list
@@ -3341,9 +3342,20 @@ flags is not merged. Run: 28,122 -> **23,888** ACIFs; 1,827 groups merged (6,061
 311 flagged, 134 ORCID veto, 3 kept apart; 0 ACIFs hold two ORCIDs. Per-group rows (status,
 parts, flags, lift and co-awardee fields) in `report["names"]["groups"]`. Uncertain groups are
 left unmerged by decision, to be revisited with OpenAlex evidence rather than reviewed by hand.
-Tests: `tests/test_acif_name_merge.py` (6); 390 pass. Next: count partial merges in flagged
-groups, no-ORCID parts of vetoed groups, and co-investigator-backed given-name variants
-(`docs/pipeline_todo.md`).
+Tests: `tests/test_acif_name_merge.py` (6); 390 pass.
+
+**Partial merges in flagged groups (same day, user):** two parts of a flagged group are compatible
+when the pair alone raises no flag; the largest set of pairwise-compatible parts (maximum clique,
+`maximal_cliques()`/`best_set()`/`partial_sets()`) is merged when it is the only largest set and
+raises no flag as a set; the rest are left out and the same is tried on them. Of 311 flagged
+groups: 125 partly merged (527 ACIFs saved, 126 parts left out; 22 got a second set), 50
+ambiguous (equally large sets), 108 with no compatible pair, 28 whose largest set is still
+flagged (interleaving) -- nothing merged in those. Build: 23,888 -> **23,361**. Report status
+"partial" with `partial_sets` / `parts_left_out`. Example cost of the checks: Yang Song's DE and FT
+merge but the 2022 LP stays out, though an earlier session confirmed all three are one person (a
+missed merge, not a wrong one). `analysis/19_count_partial_name_merges.py` reports from the build.
+Tests: 8 in `tests/test_acif_name_merge.py`; 392 pass. Next: no-ORCID parts of vetoed groups,
+co-investigator-backed given-name variants (`docs/pipeline_todo.md`).
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.

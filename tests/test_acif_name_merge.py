@@ -73,3 +73,23 @@ def test_interleaved_universities():
     moved = [("DP1", 2002, frozenset({"Uni A"})), ("DP2", 2005, frozenset({"Uni A"})),
              ("DP3", 2008, frozenset({"Uni B"})), ("DP4", 2012, frozenset({"Uni B"}))]
     assert "interleaved_universities" not in year_problems(moved)
+
+
+def test_partial_merge_leaves_odd_part_out():
+    acifs = [_acif("DP1_jan_smith", 2005), _acif("DP2_jan_smith", 2008),
+             _acif("DP3_jan_smith", 2010, for2020=FOR_B)]
+    out, rep = _run(acifs)
+    assert len(out) == 2 and rep["status_counts"] == {"partial": 1}
+    row = rep["groups"].iloc[0]
+    assert row["partial_sets"] == [["DP1_jan_smith", "DP2_jan_smith"]]
+    assert row["parts_left_out"] == ["DP3_jan_smith"]
+
+
+def test_partial_merge_ambiguous_merges_nothing():
+    # DP1 links to both; DP2 and DP3 don't link to each other -> two equally large sets
+    both = FOR_A + FOR_B
+    acifs = [_acif("DP1_jan_smith", for2020=both), _acif("DP2_jan_smith", for2020=FOR_A),
+             _acif("DP3_jan_smith", for2020=FOR_B)]
+    out, rep = _run(acifs)
+    assert len(out) == 3 and rep["status_counts"] == {"flagged": 1}
+    assert rep["groups"].iloc[0]["partial_status"] == "ambiguous"
