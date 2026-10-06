@@ -3354,7 +3354,13 @@ flagged (interleaving) -- nothing merged in those. Build: 23,888 -> **23,361**. 
 "partial" with `partial_sets` / `parts_left_out`. Example cost of the checks: Yang Song's DE and FT
 merge but the 2022 LP stays out, though an earlier session confirmed all three are one person (a
 missed merge, not a wrong one). `analysis/19_count_partial_name_merges.py` reports from the build.
-Tests: 8 in `tests/test_acif_name_merge.py`; 392 pass. Next: no-ORCID parts of vetoed groups,
+Tests: 8 in `tests/test_acif_name_merge.py`; 392 pass.
+
+**No-ORCID parts of vetoed groups: counted, skipped (same day, user).** 97 of the 134 vetoed groups
+have only ORCID-holding parts; of 75 no-ORCID parts, 20 had evidence (shared co-investigator or
+single-organisation university) for exactly one ORCID side and passed the pair checks (18 if a
+side with no university data can't make university evidence one-sided) -- at most 20 ACIFs, so
+not built; left for the OpenAlex step (`analysis/20_count_vetoed_attachments.py`). Next:
 co-investigator-backed given-name variants (`docs/pipeline_todo.md`).
 
 ## Next Priority (start of next session)

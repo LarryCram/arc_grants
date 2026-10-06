@@ -36,9 +36,10 @@ OpenAlex oeuvre step, where two ACIFs claiming one OpenAlex author is merge evid
 
 **Next steps, in order** (2--4 to be counted before they are built)
 1. ~~Partial merges in flagged groups~~ -- built 2026-10-06 (see above).
-2. **No-ORCID parts of the 134 vetoed groups**: attach a no-ORCID part to one ORCID side only
-   when it has evidence for that side alone (shared co-investigator, or same university on a
-   single-organisation grant).
+2. ~~No-ORCID parts of the 134 vetoed groups~~ -- counted 2026-10-06, skipped by decision: 97 of
+   the 134 groups have no no-ORCID part; of 75 such parts, 20 had evidence (shared co-investigator
+   or single-organisation university) for exactly one ORCID side (18 under a stricter rule) --
+   23,361 -> 23,341 at most. Left for the OpenAlex step. `analysis/20_count_vetoed_attachments.py`.
 3. **Same family name, different given form, plus a shared co-investigator**: nicknames, the 56
    initial-only no-ORCID ACIFs, the 517 ACIFs sharing only a middle/compound key; candidates
    come from the 1,932 same-family-and-initial groups.
