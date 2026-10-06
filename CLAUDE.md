@@ -3521,6 +3521,10 @@ Tests: `tests/test_acif_orcid_bulk.py` (4); 406 pass.
   10 one-or-two-work fragments of the right person, accepted cost), review_initial_only (main
   record; 22). Douglas Morgan (LP0560406) had taken Deidre Morgan's ORCID through Scopus pass one
   (two-way link + surname) -> `reject_scopus` row. Stage 1: 17,839 accepted links, 15,982 ACIFs.
+  The 22 review_initial_only cases settled by hand: 21 accept_link (Hua Kun Liu, Jim Smith, Raj
+  Gururajan, Mark (Stuart) Howden, ...), 1 reject_link (Takashi Kubota: OpenAlex 'T. Kubota', a
+  mixed record of several Kubotas). Stage 1 final: 17,860 accepted links, 16,001 ACIFs with an
+  accepted ORCID link, no review cases left.
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
