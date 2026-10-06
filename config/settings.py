@@ -36,6 +36,7 @@ ACIF_ARC_RECORDS   = PROCESSED_DATA / "acif_arc_records.parquet"   # ... one row
 ACIF_ARC_NAME_GROUPS = PROCESSED_DATA / "acif_arc_name_groups.parquet"  # ... the name stage's per-group report
 ORCID_BULK_EXTRACT_DIR = PROCESSED_DATA / "orcid_bulk_extract"  # src/00e_extract_orcid_bulk.py's outputs
 OAX_LINK_DIR       = PROCESSED_DATA / "oax_link"                   # src/02_link_arc_oax.py: ARC<->OpenAlex linking
+OEUVRE_DIR         = PROCESSED_DATA / "oeuvre"                     # src/03_build_oeuvres.py: works per ACIF
 
 # Output subdirectories
 PROFILES_OUT = OUTPUT_ROOT / "profiles"
