@@ -33,16 +33,19 @@ def render(report, acifs_df) -> str:
          f"| Scopus pass one | {report['n_scopus_pass_one']:,} |",
          f"| Scopus pass two | {report['n_scopus_pass_two']:,} |",
          f"| hand stage | {report['n_hand']:,} |",
+         f"| ORCID bulk pass | {report['n_orcid_bulk']:,} |",
          f"| name stage | {report['n_names']:,} |", "",
          f"Set aside as Indigenous-focused research (excluded=True): {report['n_excluded_indigenous']:,}; "
          f"kept: {len(kept):,}.", "",
          "Groups left unmerged, by stage and reason:", ""]
     for stage, key in [("ARC ORCID merge", "arc_orcid_mismatches"), ("Scopus pass one", "pass_one_mismatches"),
-                       ("Scopus pass two", "pass_two_mismatches")]:
+                       ("Scopus pass two", "pass_two_mismatches"), ("ORCID bulk pass", "orcid_bulk_mismatches")]:
         c = Counter(m["reason"] for m in report.get(key, []))
         L.append(f"- {stage}: " + (", ".join(f"{r} {n:,}" for r, n in sorted(c.items())) or "none"))
     h = report["hand"]
     L.append(f"- hand stage: refused {len(h['refused_groups']):,}, ORCID conflicts {len(h['orcid_conflicts']):,}")
+    L.append("- ORCID bulk pass decisions (ACIFs without an ORCID): " + ", ".join(
+        f"{k} {v:,}" for k, v in report["orcid_bulk_decisions"].decision.value_counts().items()))
     L.append("- name stage: " + ", ".join(f"{k} {v:,}" for k, v in sorted(report["names"]["status_counts"].items())))
     L += ["", "Kept ACIFs:", "",
           f"- with an ORCID: {int((kept.orcids.map(len) > 0).sum()):,} "

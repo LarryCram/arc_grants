@@ -18,8 +18,9 @@ detail.
 | Scopus pass one -- ORCID found through Scopus (`00d` extract + `src/acif/scopus.py`) | 33,987 |
 | Scopus pass two -- shared Scopus profile | 28,167 |
 | Hand stage -- `manual_orcids`, `manual_merges`, keep-apart pairs (`src/acif/hand.py`) | 28,122 |
-| Name stage -- clean name groups, then partial merges in flagged groups (`src/acif/name_merge.py`) | 23,361 |
-| Written by `src/01_build_arc_acifs.py` to `acifs_arc.parquet` (102 set aside as Indigenous research) | 23,361 |
+| ORCID bulk pass -- ORCID bulk file by name + ARC-university employer (`00e`, `src/acif/orcid_bulk.py`) | 26,275 |
+| Name stage -- clean name groups, then partial merges in flagged groups (`src/acif/name_merge.py`) | 23,288 |
+| Written by `src/01_build_arc_acifs.py` to `acifs_arc.parquet` (102 set aside as Indigenous research) | 23,288 |
 
 Name stage (2026-10-06): 1,827 clean groups merged (6,061 ACIFs; 28,122 -> 23,888); of the 311
 flagged groups, 125 partly merged (the unique largest set of pairwise-compatible parts, 527 ACIFs

@@ -62,9 +62,10 @@ def acif_rows(acifs: list[AwardsCIF], single=None, crosswalk=None, hep_names=Non
         items = sorted(a.items, key=lambda it: it.unique_id)
         grants = sorted({it.grant_code for it in items})
         years = [it.funding_commence_year for it in items if it.funding_commence_year]
-        orcids = sorted({o for it in items for o in (it.orcid, it.scopus_orcid, it.hand_orcid) if o})
+        orcids = sorted({o for it in items for o in (it.orcid, it.scopus_orcid, it.hand_orcid, it.bulk_orcid) if o})
         sources = sorted({src for it in items for src, o in
-                          (("arc", it.orcid), ("scopus", it.scopus_orcid), ("hand", it.hand_orcid)) if o})
+                          (("arc", it.orcid), ("scopus", it.scopus_orcid), ("hand", it.hand_orcid),
+                           ("orcid_bulk", it.bulk_orcid)) if o})
         unis = sorted({crosswalk.get(o, o) for it in items if it.grant_code in single
                        for o in (it.admin_orgs or [it.admin_org]) if o} & hep_names)
         rows.append({
@@ -98,6 +99,6 @@ def record_rows(acifs: list[AwardsCIF]) -> pd.DataFrame:
         "full_name": it.full_name, "role_code": it.role_code, "is_fellowship": it.is_fellowship,
         "funding_commence_year": it.funding_commence_year, "admin_org": it.admin_org,
         "admin_orgs": list(it.admin_orgs), "orcid": it.orcid, "scopus_orcid": it.scopus_orcid,
-        "hand_orcid": it.hand_orcid,
+        "hand_orcid": it.hand_orcid, "bulk_orcid": it.bulk_orcid,
     } for a in acifs for it in a.items]
     return pd.DataFrame(rows).sort_values("unique_id", ignore_index=True)

@@ -17,10 +17,14 @@ src/00b_extract_oax.py          → openalex_authors_prep.parquet, oax_tf_*.parq
 src/00c_extract_propensities.py → FOR/institution rarity and pair-frequency tables (grant-level)
 src/00d_extract_scopus.py       → processed/scopus_extract/: one Scopus Author Search per ACIF after
                                   the ARC ORCID merge (cached), plus ORCID names and listed Scopus ids
+src/00e_extract_orcid_bulk.py   → processed/orcid_bulk_extract/: ORCID bulk-file records sharing a
+                                  full-given-name key with an ARC record, with employers resolved to
+                                  ARC HEP codes (ROR or exact normalised name), names re-parsed
 src/acif/                       → the cyclic ACIF build (models, build, features, scopus); so far
                                   build_acifs(): load_items() → seed() → merge_by_orcid() → Scopus
                                   pass one (Scopus-found ORCIDs) → pass two (shared Scopus profile)
                                   → hand stage (manual_orcids, manual_merges, keep-apart pairs)
+                                  → ORCID bulk pass (src/acif/orcid_bulk.py)
                                   → name stage (clean name groups, then partial merges in
                                   flagged groups; src/acif/name_merge.py) → Indigenous set-aside
 src/01_build_arc_acifs.py       → the ARC-stage list of people: acifs_arc.parquet (one row per
@@ -3433,6 +3437,38 @@ on the part whose names agree with the ORCID record's own names -- and is droppe
 both cases (checked before the hand rows were added). Build: pass one 33,987 -> 33,985 (Ian Young's
 three Swinburne records now merge in pass one), name stage unchanged at 23,361; ACIFs with an
 ORCID 14,802; no ORCID held by two ACIFs. 402 tests pass.
+
+## ORCID bulk pass in the build (2026-10-06)
+
+User asked whether ORCID-to-ARC opportunities were exhausted: 8,457 of 23,259 kept ACIFs had no
+ORCID (3,874 with a last grant up to 2008). Untapped sources counted; the ORCID bulk file
+(Oct-2023, 17M records) matched by name plus employer was the strongest, and was rolled out:
+- `src/00e_extract_orcid_bulk.py` -> `processed/orcid_bulk_extract/`: bulk records sharing a
+  full-given-name key with any in-scope ARC record (329,570 ORCIDs); their employments (bulk file,
+  plus the ORCID record cache) resolved to ARC HEP codes by ROR (the HEP's OpenAlex institution
+  and every institution whose lineage includes it) or by exact normalised name (admin_orgs.csv
+  aliases, HEP_concordances.xlsx Organisation/OA_name/Variants, OpenAlex display names; a trailing
+  "(QUT)" and a " - ... Campus" suffix removed; no "contains" matching); 15,320 ORCIDs with an
+  ARC-HEP employer kept, with re-parsed names (`name_keys`) and main keys (`main_keys`: first given
+  name + family of each name form). "Adelaide University" (the 2026 merged institution) and
+  "UNSW Australia" stay unresolved -- the latter could be added to HEP_concordances Variants by hand.
+- `src/acif/orcid_bulk.py`, after the hand stage: an ACIF with no ORCID of any kind takes one
+  (`AwardCIFItem.bulk_orcid`) when exactly one bulk ORCID shares a MAIN key with the ACIF (first
+  given name + family on both sides -- middle names never count: the first run let "Peter Robert
+  Marks" claim Robert Marks, already in `enrichment_blocklist.csv`, and "Karen Anne Hamnet Green"
+  claim Anne Green) and lists employment at a HEP on one of the ACIF's grants; reject_scopus rows
+  and enrichment_blocklist.csv rows refuse an ORCID for a record. Then merge by ORCID with the same
+  drop-and-remerge rule as Scopus pass one (`drop_unlinked_scopus_orcids(field=...)`, now generic).
+- Result: decisions accepted 3,567, no_candidate 7,595, no_employer_match 1,813, several 134,
+  names_disagree 60, no_full_given_name 55, rejected_by_hand 2. Kept ACIFs with an ORCID 14,802 ->
+  **16,518** (bulk 1,832); final ACIFs 23,361 -> **23,288**; no ACIF holds two ORCIDs and no ORCID
+  is held by two ACIFs. Cross-checks of the first run: where the old ORCID-API search also answered
+  (3,359), same ORCID 98%; where the record's Scopus search showed ORCIDs (1,820), the bulk ORCID
+  among them 92%. The name stage's ORCID vetoes rose 134 -> 214 groups: the new ORCIDs separate
+  namesakes the checks had flagged (Tao Liu, Fiona Martin, Sophie Lewis, Paul Walker) and 24 that
+  had merged as "clean" (David Blair biologist/physicist, Mark Adams, Jun Wang, Mark Harris).
+- Linker stage 1: ACIFs linked by ORCID 14,477 -> 15,968; pairs 17,868.
+Tests: `tests/test_acif_orcid_bulk.py` (4); 406 pass.
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.

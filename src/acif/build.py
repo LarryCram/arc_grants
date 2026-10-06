@@ -339,9 +339,10 @@ def _full_name_keys(acif: AwardsCIF) -> set[str]:
 
 def _item_orcids(acif: AwardsCIF) -> set[str]:
     """Every ORCID tied to an ACIF's current items: ARC's own, any found through Scopus
-    (item.scopus_orcid) and any given by hand (item.hand_orcid). merge_by_key()'s default
+    (item.scopus_orcid), any given by hand (item.hand_orcid) and any found in the ORCID bulk file
+    (item.bulk_orcid). merge_by_key()'s default
     orcids_of."""
-    return {o for it in acif.items for o in (it.orcid, it.scopus_orcid, it.hand_orcid) if o}
+    return {o for it in acif.items for o in (it.orcid, it.scopus_orcid, it.hand_orcid, it.bulk_orcid) if o}
 
 
 def _keys(k) -> set[str]:
@@ -514,12 +515,13 @@ def set_aside_indigenous_research(acifs: list[AwardsCIF]) -> int:
     return n
 
 
-def build_acifs(scopus: bool = True, hand: bool = True, names: bool = True,
+def build_acifs(scopus: bool = True, hand: bool = True, orcid_bulk: bool = True, names: bool = True,
                 ) -> tuple[list[AwardsCIF], UnionFind, dict]:
     """The build so far: stage zero -> ARC ORCID merge -> (scopus=True) Scopus pass one (ORCIDs
     found through Scopus) -> Scopus pass two (shared Scopus profile); see src/acif/scopus.py ->
     (hand=True) the hand-confirmed ORCIDs and merges from data_persisted (src/acif/hand.py) ->
-    (names=True) the clean name groups (src/acif/name_merge.py); then Indigenous-focused ACIFs are
+    (orcid_bulk=True) ORCIDs from the ORCID bulk file by name and ARC-university employer
+    (src/acif/orcid_bulk.py) -> (names=True) the clean name groups (src/acif/name_merge.py); then Indigenous-focused ACIFs are
     flagged excluded (set_aside_indigenous_research()).
     One UnionFind runs through every stage. Returns (acifs, uf, report): report holds each
     stage's ACIF count and unmerged groups, and pass one's per-ACIF decisions."""
@@ -538,6 +540,10 @@ def build_acifs(scopus: bool = True, hand: bool = True, names: bool = True,
         from src.acif.hand import hand_stage
         acifs, hand_report = hand_stage(acifs, uf)
         report.update(n_hand=len(acifs), hand=hand_report)
+    if orcid_bulk:
+        from src.acif.orcid_bulk import load_orcid_bulk_extract, orcid_bulk_pass
+        acifs, decisions, mb = orcid_bulk_pass(acifs, uf, load_orcid_bulk_extract())
+        report.update(n_orcid_bulk=len(acifs), orcid_bulk_decisions=decisions, orcid_bulk_mismatches=mb)
     if names:
         from src.acif.name_merge import name_merge
         acifs, name_report = name_merge(acifs, uf)

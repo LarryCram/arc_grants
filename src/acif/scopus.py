@@ -207,10 +207,14 @@ def scopus_pass_one(acifs: list[AwardsCIF], uf: UnionFind, ext: ScopusExtract):
     return merged, decisions, mismatches
 
 
-def drop_unlinked_scopus_orcids(acifs: list[AwardsCIF], mismatches: list[dict], name_keys=None):
+def drop_unlinked_scopus_orcids(acifs: list[AwardsCIF], mismatches: list[dict], name_keys=None,
+                                field: str = "scopus_orcid"):
     """Take the Scopus ORCID off ACIFs in ORCID groups refused because names don't link (module
     docstring). `name_keys`: orcid -> the ORCID record's own name keys (ScopusExtract.name_keys).
+    `field`: the item field holding the ORCID this pass added (scopus_orcid; bulk_orcid for the
+    ORCID-bulk pass); a part holds the ORCID firmly through any other ORCID field.
     Returns (acifs, cluster_ids that lost it)."""
+    firm_fields = [f for f in ("orcid", "scopus_orcid", "hand_orcid", "bulk_orcid") if f != field]
     name_keys = name_keys or {}
     by_id = {a.cluster_id: a for a in acifs}
     drop: dict[str, str] = {}
@@ -221,7 +225,7 @@ def drop_unlinked_scopus_orcids(acifs: list[AwardsCIF], mismatches: list[dict], 
         subs = [[by_id[c] for c in sub if c in by_id] for sub in m["groups"]]  # each linked by names
 
         def firm(parts):
-            return any(o == orcid for a in parts for it in a.items for o in (it.orcid, it.hand_orcid))
+            return any(getattr(it, f) == orcid for a in parts for it in a.items for f in firm_fields)
 
         def agrees(parts):
             okeys = name_keys.get(orcid)
@@ -232,12 +236,12 @@ def drop_unlinked_scopus_orcids(acifs: list[AwardsCIF], mismatches: list[dict], 
             if any(parts is k for k in keep):
                 continue
             for a in parts:
-                if any(it.scopus_orcid == orcid for it in a.items):
+                if any(getattr(it, field) == orcid for it in a.items):
                     drop[a.cluster_id] = orcid
     out = []
     for a in acifs:
         if a.cluster_id in drop:
-            items = [replace(it, scopus_orcid=None) if it.scopus_orcid == drop[a.cluster_id] else it
+            items = [replace(it, **{field: None}) if getattr(it, field) == drop[a.cluster_id] else it
                      for it in a.items]
             a = AwardsCIF(cluster_id=a.cluster_id, items=items, cycle_stages=list(a.cycle_stages),
                           orcids=list(a.orcids), orcid_status=a.orcid_status)

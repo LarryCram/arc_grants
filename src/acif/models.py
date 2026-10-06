@@ -103,6 +103,11 @@ class AwardCIFItem:
     # src/acif/hand.py). Counts towards the ORCID veto; never replaces `orcid`.
     hand_orcid: str | None = None
 
+    # 2026-10-06: an ORCID found in the ORCID bulk file by name and ARC-university employer
+    # (src/acif/orcid_bulk.py), only on a record with no ORCID of another kind. Counts towards the
+    # ORCID veto; never replaces the others.
+    bulk_orcid: str | None = None
+
     # --- new fields required by the cyclic-build plan (2026-09-19), not yet populated by
     # anything -- see the plan's "Full AwardCIFItem property list" section for each one's
     # rationale. ---
