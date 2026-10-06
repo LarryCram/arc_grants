@@ -22,10 +22,12 @@ src/acif/                       → the cyclic ACIF build (models, build, featur
                                   pass one (Scopus-found ORCIDs) → pass two (shared Scopus profile)
                                   → hand stage (manual_orcids, manual_merges, keep-apart pairs)
                                   → name stage (clean name groups, then partial merges in
-                                  flagged groups; src/acif/name_merge.py);
-                                  it does not yet write a list of people
-src/utils/acif_oax_linker.py    → ARC↔OpenAlex candidate linking (with sql/01-04); still reads the
-                                  old awards_cif_arc_only.parquet until src/acif writes its own list
+                                  flagged groups; src/acif/name_merge.py) → Indigenous set-aside
+src/01_build_arc_acifs.py       → the ARC-stage list of people: acifs_arc.parquet (one row per
+                                  ACIF), acif_arc_records.parquet (record → ACIF),
+                                  acif_arc_name_groups.parquet, acif_arc_build_report.md
+src/utils/acif_oax_linker.py    → ARC↔OpenAlex candidate linking (with sql/01-04); reads
+                                  acifs_arc.parquet (since 2026-10-06)
 ```
 Everything else that used to be in `src/` (01_prepare_arc, 01a_diagnose, 04a_orcid_assist,
 06_build_oeuvre, awards_cif, cluster_checks, oeuvre_build, work_piling, the ORCID tools, ...) was
@@ -3362,6 +3364,35 @@ single-organisation university) for exactly one ORCID side and passed the pair c
 side with no university data can't make university evidence one-sided) -- at most 20 ACIFs, so
 not built; left for the OpenAlex step (`analysis/20_count_vetoed_attachments.py`). Next:
 co-investigator-backed given-name variants (`docs/pipeline_todo.md`).
+
+## ARC-stage list of people written; OpenAlex linker repointed to it (2026-10-06)
+
+`src/01_build_arc_acifs.py` runs `build_acifs()` and writes `acifs_arc.parquet` (23,361 ACIFs;
+columns from `src/acif/output.py::acif_rows()`: unique_ids, grant_codes, years, schemes,
+full_names, full_name_keys, orcids + orcid_sources (ARC 11,177 / Scopus 3,613 / hand 25; at most
+one per ACIF), for2020_codes (union), hep_codes, inst_ids, single_org_universities,
+coawardee_acif_ids, excluded), `acif_arc_records.parquet` (62,779 records -> cluster_id, with each
+record's own ARC/Scopus/hand ORCID), `acif_arc_name_groups.parquet` and a build report. Named
+`_arc_` because the OpenAlex additions will be a later persisted stage (user). Decisions (user):
+(1) Indigenous research excluded as before -- `build.set_aside_indigenous_research()` flags ACIFs
+with a primary division-45 code on any grant (102 now), and a kept ACIF's non-primary
+division-45 codes are left out of its FOR union; (2) the linker gets every ORCID (ARC, Scopus,
+hand); (3) `sql/03` reads exact `coawardee_acif_ids` instead of matching co-awardees by name keys.
+`sql/04` now reads grant codes from the `grant_codes` column -- new record ids carry the parser's
+key, which can contain `_`, so the old strip-after-last-underscore regex would break.
+
+Linker rerun (21 s), old file (2026-09-18) -> new file: kept ACIFs with name keys 22,840 ->
+23,259; ACIFs with a candidate 22,563 -> 22,968; candidate pairs 297,413 -> 292,321 (name-key
+only 284,901 -> 276,101; ORCID + name key 12,423 -> 15,880; ORCID only 89 -> 340); orcid_check
+match 12,512 -> 16,220, mismatch 124,327 -> 111,470; FD priority 2: 28,414 -> 29,139;
+co-investigator-corroborated pairs 35,121 -> 27,664 (exact co-awardee ids instead of name-key
+matches, which let a common co-awardee name reach every namesake ACIF). The ORCID gains come from
+the Scopus-found ORCIDs. Tests: `tests/test_acif_output.py` (4); 396 pass.
+
+Also counted and skipped the same day (user): co-investigator-backed given-name variants
+(`analysis/21_count_coinvestigator_name_variants.py`) -- 237 candidate pairs, the different-
+initial and same-initial ones mostly relatives and namesakes (Carmen/Allan Luke, Janeen/Jennifer
+Baxter); only ~14 initial-only/middle-key pairs (about 12 ACIFs) looked genuine.
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.

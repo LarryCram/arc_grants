@@ -11,9 +11,8 @@
 --   exact, from Stage 1)?
 --
 -- Depends on: data.blk_candidate_pairs (Stage 1) -- both as the pool being scored AND as the
--- source of each coawardee's own candidate pool. AwardsCIF.coawardees (already computed,
--- src/utils/awards_cif.py::compute_coawardees() -- every OTHER investigator on any grant this
--- ACIF holds, keyed by their own full_name_key). No FD/subfield/institution data needed here.
+-- source of each coawardee's own candidate pool. acifs_arc.parquet coawardee_acif_ids (every
+-- OTHER ACIF on any grant this ACIF holds). No FD/subfield/institution data needed here.
 
 ATTACH IF NOT EXISTS '/home/lc/k/WORKING_ARC_PROJECT/processed/oax_provenance.duckdb' AS data;
 
@@ -31,31 +30,16 @@ JOIN candidate_author_idx c ON c.author_idx = a1.author_idx
 JOIN read_parquet('/home/lc/k/WORKING_ARC_PROJECT/processed/authorships_hep.parquet') a2
     ON a2.work_idx = a1.work_idx AND a2.author_idx != a1.author_idx;
 
--- ── Stage 2: each ACIF's own coawardees, resolved to THEIR OWN candidate author_idx pool --
---    a coawardee's full_name_keys (the whole unioned list, NOT the single full_name_key
---    scalar -- 2026-09-15 fix: compute_coawardees() now unions full_name_keys across every
---    occurrence of a coawardee, so a genuine identity match can live on a non-primary key; the
---    scalar-only version used here originally would silently miss it) is matched against
---    arc_name_keys (the same lookup Stage 1 uses), not against OAX data directly -- this is
---    ARC-person-to-ARC-person identity, exact by construction (a coawardee IS another ACIF in
---    this same population), never fuzzy. A coawardee's own name colliding with 2+ ACIFs (a
---    common name) is handled permissively -- every matched ACIF's own candidate pool
---    contributes, since this is corroborating evidence, not an identity determination. --------
-
-CREATE OR REPLACE TEMP TABLE arc_coawardee_keys AS
-SELECT DISTINCT cluster_id, unnest(co.full_name_keys) AS co_full_name_key
-FROM (
-    SELECT cluster_id, unnest(coawardees) AS co
-    FROM read_parquet('/home/lc/k/WORKING_ARC_PROJECT/processed/awards_cif_arc_only.parquet')
-    WHERE excluded = FALSE AND len(coawardees) > 0
-)
-WHERE co.full_name_keys IS NOT NULL AND len(co.full_name_keys) > 0;
+-- ── Stage 2: each ACIF's own coawardees, resolved to THEIR OWN candidate author_idx pool.
+--    2026-10-06: coawardees are read as exact ACIF ids (acifs_arc.parquet coawardee_acif_ids --
+--    the other ACIFs on this ACIF's grants, from the build itself), replacing the earlier match
+--    of each coawardee's full_name_keys against arc_name_keys (which let a common coawardee name
+--    reach every ACIF sharing it). ---------------------------------------------------------------
 
 CREATE OR REPLACE TEMP TABLE coawardee_to_acif AS
-SELECT DISTINCT ack.cluster_id, a.acif_id AS coawardee_acif_id
-FROM arc_coawardee_keys ack
-JOIN data.arc_name_keys a ON a.full_name_key = ack.co_full_name_key
-WHERE a.acif_id != ack.cluster_id;  -- a coawardee is never the ACIF's own self
+SELECT DISTINCT cluster_id, unnest(coawardee_acif_ids) AS coawardee_acif_id
+FROM read_parquet('/home/lc/k/WORKING_ARC_PROJECT/processed/acifs_arc.parquet')
+WHERE excluded = FALSE;
 
 CREATE OR REPLACE TEMP TABLE coawardee_candidate_pool AS
 SELECT DISTINCT cta.cluster_id, bcp.author_idx AS coawardee_candidate_author_idx

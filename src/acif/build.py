@@ -492,12 +492,35 @@ def merge_by_orcid(
     return merge_by_key(acifs, uf, lambda a: a.orcids[0] if a.orcid_status == "HAS_ORCID" else None)
 
 
+INDIGENOUS_DIVISION_PREFIX = "45"
+
+
+def set_aside_indigenous_research(acifs: list[AwardsCIF]) -> int:
+    """Set aside ACIFs whose research is Indigenous-focused, as the old pipeline did (ported from
+    ZARCHIVE/src_archive_20260930/utils/awards_cif.py, 2026-10-06, user: "exclude as now"): an
+    ACIF is set aside when ANY of its grants has a FOR2020 division-45 (Indigenous Studies) code
+    as its PRIMARY field. Marks excluded=True, excluded_reason="indigenous"; the ACIF stays in the
+    list (callers filter on .excluded). Indigenous-focused research is culturally important and
+    not well portrayed by this project's bibliometric methods -- a scope decision about method
+    fit. The old pipeline's second step (non-primary division-45 codes left out of a kept ACIF's
+    FOR codes) is applied where ACIF-level FOR codes are aggregated (src/acif/output.py).
+    Returns the number set aside."""
+    n = 0
+    for a in acifs:
+        hit = any(e["is_primary"] and e["code"].startswith(INDIGENOUS_DIVISION_PREFIX)
+                  for it in a.items for e in (it.for2020_codes or []))
+        a.excluded, a.excluded_reason = (True, "indigenous") if hit else (False, None)
+        n += hit
+    return n
+
+
 def build_acifs(scopus: bool = True, hand: bool = True, names: bool = True,
                 ) -> tuple[list[AwardsCIF], UnionFind, dict]:
     """The build so far: stage zero -> ARC ORCID merge -> (scopus=True) Scopus pass one (ORCIDs
     found through Scopus) -> Scopus pass two (shared Scopus profile); see src/acif/scopus.py ->
     (hand=True) the hand-confirmed ORCIDs and merges from data_persisted (src/acif/hand.py) ->
-    (names=True) the clean name groups (src/acif/name_merge.py).
+    (names=True) the clean name groups (src/acif/name_merge.py); then Indigenous-focused ACIFs are
+    flagged excluded (set_aside_indigenous_research()).
     One UnionFind runs through every stage. Returns (acifs, uf, report): report holds each
     stage's ACIF count and unmerged groups, and pass one's per-ACIF decisions."""
     uf = UnionFind({})
@@ -519,6 +542,7 @@ def build_acifs(scopus: bool = True, hand: bool = True, names: bool = True,
         from src.acif.name_merge import name_merge
         acifs, name_report = name_merge(acifs, uf)
         report.update(n_names=len(acifs), names=name_report)
+    report["n_excluded_indigenous"] = set_aside_indigenous_research(acifs)
     return acifs, uf, report
 
 

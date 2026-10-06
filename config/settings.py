@@ -31,6 +31,9 @@ RAW_DATA       = DATA_ROOT / "raw"
 PROCESSED_DATA = DATA_ROOT / "processed"
 DISKCACHE_DIR  = DATA_ROOT / "diskcache"
 SCOPUS_EXTRACT_DIR = PROCESSED_DATA / "scopus_extract"   # src/00d_extract_scopus.py's outputs
+ACIFS_ARC          = PROCESSED_DATA / "acifs_arc.parquet"          # src/01_build_arc_acifs.py: one row per ACIF
+ACIF_ARC_RECORDS   = PROCESSED_DATA / "acif_arc_records.parquet"   # ... one row per record (unique_id -> cluster_id)
+ACIF_ARC_NAME_GROUPS = PROCESSED_DATA / "acif_arc_name_groups.parquet"  # ... the name stage's per-group report
 
 # Output subdirectories
 PROFILES_OUT = OUTPUT_ROOT / "profiles"

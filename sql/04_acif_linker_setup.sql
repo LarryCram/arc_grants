@@ -1,5 +1,5 @@
 -- One-time population-wide setup for AcifOaxLinker's __init__ -- everything here is a pure
--- function of already-persisted data (awards_cif_arc_only.parquet, admin_orgs.csv,
+-- function of already-persisted data (acifs_arc.parquet, admin_orgs.csv,
 -- grant_for2020_cache/for_subfield_dict) with no per-ACIF or per-candidate scoping, so it's
 -- computed once at construction, not recomputed per call. OAX-side FD is deliberately NOT
 -- built here -- 00b_extract_oax.py's own Phase 4 already persists oax_subfield_fd.parquet/
@@ -32,18 +32,18 @@ WHERE r.organisationName_alias IS NOT NULL AND r.organisationName_alias != '';
 -- ── Stage 2: ARC-side subfield/institution frequency distributions, one row per
 --    (cluster_id, key, n) -- population-wide over every non-excluded ACIF's own grants. Cannot
 --    move into 00a_extract_arc.py the way OAX FD moved into 00b_ -- these need the ACIF
---    population (grant_ids aggregated per cluster), which doesn't exist until 01_prepare_arc.py
+--    population (grant codes per ACIF), which doesn't exist until 01_build_arc_acifs.py
 --    has run; genuinely a step 01_ output would need to produce, not something 00a_/00b_ could
 --    ever precompute. Recomputed here for now, at class construction time, same population
 --    (~22.9K ACIFs) this project has always found cheap. -----------------------------------------
 
+-- 2026-10-06: grant codes read from acifs_arc.parquet's own grant_codes column (src/acif/
+-- output.py) -- record ids now carry the parser's key after the grant code (DP0988563_jan_de gier),
+-- which can itself contain '_', so the old "strip after the last _" regex no longer works.
 CREATE OR REPLACE TEMP TABLE cluster_grants AS
-SELECT DISTINCT cluster_id, regexp_replace(gid, '_[^_]*$', '') AS grant_code
-FROM (
-    SELECT cluster_id, unnest(grant_ids) AS gid
-    FROM read_parquet('/home/lc/k/WORKING_ARC_PROJECT/processed/awards_cif_arc_only.parquet')
-    WHERE excluded = FALSE
-);
+SELECT DISTINCT cluster_id, unnest(grant_codes) AS grant_code
+FROM read_parquet('/home/lc/k/WORKING_ARC_PROJECT/processed/acifs_arc.parquet')
+WHERE excluded = FALSE;
 
 CREATE OR REPLACE TABLE data.arc_subfield_fd_v2 AS
 SELECT cg.cluster_id, f.subfield, COUNT(*) AS n
@@ -87,9 +87,11 @@ GROUP BY cg.cluster_id, cw.institution_id;
 --    list correctly contributes zero rows for that id (an ACIF with nothing parseable, or an OAX
 --    author with no display_name at all), not a NULL placeholder row. -------------------------
 
+-- 2026-10-06: from acifs_arc.parquet; orcids now holds every ORCID the build tied to the ACIF
+-- (ARC, Scopus-found, hand), at most one per ACIF (the build's ORCID veto).
 CREATE OR REPLACE TABLE data.arc_name_keys AS
 SELECT cluster_id AS acif_id, unnest(full_name_keys) AS full_name_key, orcids AS orcid
-FROM read_parquet('/home/lc/k/WORKING_ARC_PROJECT/processed/awards_cif_arc_only.parquet')
+FROM read_parquet('/home/lc/k/WORKING_ARC_PROJECT/processed/acifs_arc.parquet')
 WHERE excluded = FALSE;
 
 CREATE OR REPLACE TABLE data.oax_name_keys AS

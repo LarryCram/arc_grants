@@ -29,7 +29,7 @@ import duckdb
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from config.settings import PROCESSED_DATA
+from config.settings import ACIFS_ARC, PROCESSED_DATA
 from src.acif.build import load_grant_for2020_codes
 from src.utils.for_resolve import for2020_group_name, oax_subfield_name
 
@@ -79,9 +79,9 @@ class AcifOaxLinker:
         # not the "multi-second-to-minutes" concern that motivated NOT rebuilding these here
         # originally.
 
-        # ARC-only population itself, for later per-ACIF methods (coawardees, orcids, etc.) --
-        # loaded once as a DataFrame, not re-read per call.
-        self.arc = pd.read_parquet(PROCESSED_DATA / "awards_cif_arc_only.parquet")
+        # ARC-stage population itself (src/01_build_arc_acifs.py, 2026-10-06; was the old
+        # pipeline's awards_cif_arc_only.parquet), loaded once as a DataFrame.
+        self.arc = pd.read_parquet(ACIFS_ARC)
 
     # ------------------------------------------------------------------
     # FOR2020/subfield caches -- ported from FilterCandidates (2026-09-18), see __init__'s own
@@ -212,7 +212,7 @@ class AcifOaxLinker:
         rarity-gated on bare-initial-only keys, plus exact ORCID match), already validated
         against real cases earlier this session (Killcross, the Yan reversal case, Tas/Tokar's
         short surnames). Reads data.arc_name_keys/data.oax_name_keys, both already loaded by
-        __init__ -- no re-reading of awards_cif_arc_only.parquet/openalex_authors_prep.parquet
+        __init__ -- no re-reading of acifs_arc.parquet/openalex_authors_prep.parquet
         here."""
         self.con.execute(_BLOCKING_SQL.read_text())
 
@@ -281,7 +281,7 @@ class AcifOaxLinker:
         Populates data.blk_coauthor_corroboration -- see sql/03_coawardee_coauthor.sql. Used
         as-is, unlike fd_score()'s own file -- nothing here duplicates population-wide state
         __init__ already built; it reads data.blk_candidate_pairs/arc_name_keys (already there)
-        and awards_cif_arc_only.parquet/authorships_hep.parquet fresh, same as every other
+        and acifs_arc.parquet/authorships_hep.parquet fresh, same as every other
         stage. Requires block() to have run first."""
         self.con.execute(_COAWARDEE_SQL.read_text())
 

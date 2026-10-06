@@ -1,6 +1,6 @@
 # Full TODO list — ARC Grants → OpenAlex pipeline
 
-## Current state and open items (2026-10-06) — read this first
+## Current state and open items (2026-10-06, later) — read this first
 
 Everything below this section predates the 2026-09-30 archive of the old pipeline. Items that
 name `awards_cif.py`, `01_prepare_arc.py`, `01a_diagnose.py`, `04_resolve_links.py` /
@@ -19,6 +19,7 @@ detail.
 | Scopus pass two -- shared Scopus profile | 28,167 |
 | Hand stage -- `manual_orcids`, `manual_merges`, keep-apart pairs (`src/acif/hand.py`) | 28,122 |
 | Name stage -- clean name groups, then partial merges in flagged groups (`src/acif/name_merge.py`) | 23,361 |
+| Written by `src/01_build_arc_acifs.py` to `acifs_arc.parquet` (102 set aside as Indigenous research) | 23,361 |
 
 Name stage (2026-10-06): 1,827 clean groups merged (6,061 ACIFs; 28,122 -> 23,888); of the 311
 flagged groups, 125 partly merged (the unique largest set of pairwise-compatible parts, 527 ACIFs
@@ -40,15 +41,18 @@ OpenAlex oeuvre step, where two ACIFs claiming one OpenAlex author is merge evid
    the 134 groups have no no-ORCID part; of 75 such parts, 20 had evidence (shared co-investigator
    or single-organisation university) for exactly one ORCID side (18 under a stricter rule) --
    23,361 -> 23,341 at most. Left for the OpenAlex step. `analysis/20_count_vetoed_attachments.py`.
-3. **Same family name, different given form, plus a shared co-investigator**: nicknames, the 56
-   initial-only no-ORCID ACIFs, the 517 ACIFs sharing only a middle/compound key; candidates
-   come from the 1,932 same-family-and-initial groups.
+3. ~~Same family name, different given form, plus a shared co-investigator~~ -- counted
+   2026-10-06, skipped by decision: 237 pairs, mostly relatives/namesakes; ~12 ACIFs looked
+   genuine. `analysis/21_count_coinvestigator_name_variants.py`.
 4. **Open single decisions**: LP0776270 Anne Jones (hand ORCID 0000-0002-4556-9159 vs Scopus-
    accepted 0000-0002-5122-8334); pass two's 13 "claimed by another name" refusals (4 genuine bad
    links -- Xiaolin Wang/Lyu, Shirinzadeh/Al-Jodah, Wlodarski/Ranjbar, Patnaikuni/Myadaraboina;
    2 name-form mismatches -- Terence Williamson, Wilson Rajaratnam; 7 one-way links).
-5. **`src/acif` writes its own list of people** (parquet per stage) so `acif_oax_linker.py` and
-   reports stop reading the old `awards_cif_arc_only.parquet`; then the OpenAlex oeuvre step.
+5. ~~`src/acif` writes its own list of people~~ -- done 2026-10-06 (`src/01_build_arc_acifs.py`,
+   `acifs_arc.parquet`); the linker reads it (candidate pairs 292,321; 22,968 ACIFs with a
+   candidate). **Next: the OpenAlex stage** -- resolve candidates, extract oeuvres, persist the
+   OpenAlex-enriched ACIFs as their own stage; use two ACIFs claiming one OpenAlex author as merge
+   evidence for the groups left unmerged.
 6. Uncertain groups (what 1--3 leave) -- no hand review planned; revisit with OpenAlex evidence.
 7. Optional: hand-check a sample of Scopus pass two's merged groups for namesake profiles.
 8. Stale shell scripts `run_pipeline.sh` / `run_piling.sh` (left as they are, by decision).
