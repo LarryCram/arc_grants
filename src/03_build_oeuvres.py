@@ -69,7 +69,7 @@ def works_section(w: pd.DataFrame, a: pd.DataFrame, seconds: float) -> list[str]
     yrs = w.publication_year
     L = ["## Step 3: works", "",
          f"- pulled in {seconds:,.0f} s: {len(w):,} works ({n_auth - len(w):,} authorship works not in the works table)",
-         f"- with topics: {int(w.fields.notna().sum()):,}; dominant field (>= {DOMINANT_SHARE:.0%} of topic weight): "
+         f"- with topics: {int(w.fields.notna().sum()):,}; dominant field (> {DOMINANT_SHARE:.0%} of topic weight): "
          f"{int(w.dominant_field.notna().sum()):,}; dominant subfield: {int(w.dominant_subfield.notna().sum()):,}",
          f"- publication year: min {int(yrs.min())}, p1 {int(yrs.quantile(.01))}, median {int(yrs.median())}, max {int(yrs.max())}; "
          f"missing {int(yrs.isna().sum()):,}",

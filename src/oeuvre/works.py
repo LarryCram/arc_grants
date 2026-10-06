@@ -5,8 +5,8 @@ table, with the work's fields and subfields from its topics (compact/work_topics
 Fields (user, 2026-10-06): a single top topic is not useful -- a work usually has three topics
 with nearly equal scores (median top-topic share 0.34). Topic scores are summed per field and
 per subfield instead: `fields` / `subfields` list every field/subfield with its share of the
-work's topic weight, and `dominant_field` / `dominant_subfield` is set only when one holds at
-least DOMINANT_SHARE of it (two of three topics agree); otherwise it is null -- a work spread over
+work's topic weight, and `dominant_field` / `dominant_subfield` is set only when one holds MORE
+than DOMINANT_SHARE of it (two of three topics agree; an even split is a tie); otherwise it is null -- a work spread over
 three fields (e.g. Mathematics / Engineering / Computer Science at 0.34 each) has no dominant
 field. Checked on samples before adopting; 43% of works sit in one field, about a quarter spread
 over three.
@@ -44,10 +44,10 @@ def pull_works(con, authorships_path, out_path, works=WORKS, topics=TOPICS) -> i
             SELECT w.work_idx, w.doi, w.title, w.publication_year, w.type, w.authors_count,
                    w.cited_by_count, w.is_retracted, w.is_paratext, w.source_id,
                    f.fields,
-                   CASE WHEN f.top_share >= {DOMINANT_SHARE} THEN f.top END AS dominant_field,
+                   CASE WHEN f.top_share > {DOMINANT_SHARE} THEN f.top END AS dominant_field,
                    f.top_share AS dominant_field_share,
                    sf.subfields,
-                   CASE WHEN sf.top_share >= {DOMINANT_SHARE} THEN sf.top END AS dominant_subfield,
+                   CASE WHEN sf.top_share > {DOMINANT_SHARE} THEN sf.top END AS dominant_subfield,
                    sf.top_share AS dominant_subfield_share
             FROM read_parquet('{works}/*.parquet') w
             JOIN want USING (work_idx)

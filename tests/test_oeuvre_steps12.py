@@ -60,5 +60,5 @@ def test_pull_works_field_shares_and_dominance(tmp_path):
     n = pull_works(connect(), tmp_path / "a.parquet", tmp_path / "w.parquet", works=tmp_path / "works", topics=tmp_path / "topics")
     w = pd.read_parquet(tmp_path / "w.parquet").set_index("work_idx")
     assert n == 2
-    assert w.loc[1, "dominant_field"] == "Medicine" and w.loc[1, "dominant_subfield"] is None
-    assert w.loc[2, "dominant_field"] is None and len(w.loc[2, "fields"]) == 3
+    assert w.loc[1, "dominant_field"] == "Medicine" and pd.isna(w.loc[1, "dominant_subfield"])
+    assert pd.isna(w.loc[2, "dominant_field"]) and len(w.loc[2, "fields"]) == 3
