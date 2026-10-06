@@ -3469,6 +3469,16 @@ ORCID (3,874 with a last grant up to 2008). Untapped sources counted; the ORCID 
   had merged as "clean" (David Blair biologist/physicist, Mark Adams, Jun Wang, Mark Harris).
 - Linker stage 1: ACIFs linked by ORCID 14,477 -> 15,968; pairs 17,868.
 Tests: `tests/test_acif_orcid_bulk.py` (4); 406 pass.
+- Same day, user added 8 rows to HEP_concordances.xlsx Variants (Adelaide University, UNSW
+  Australia, UNSW, University of New South Wales Sydney, Royal Melbourne Institute of Technology,
+  Latrobe University, The Univeristy of Queensland, USC - University of the Sunshine Coast): employer
+  entries resolved 49,288 -> 49,718; accepted 3,567 -> 3,572; kept ACIFs with an ORCID 16,518 ->
+  **16,525**; final ACIFs 23,288 -> **23,285**; linked by ORCID 15,973. Checked and left alone: an
+  entry whose ROR is not an ARC university still falls back to its name (529 entries); the only
+  accepted ORCID resting on that is David J Bishop (Victoria University, Melbourne), who picked the
+  Ugandan Victoria University's ROR in ORCID's dropdown -- correct, so no ROR-only rule. The bulk
+  file carries ROR ids on employments where the API record (ORCID cache) shows none or a Ringgold
+  id; why is not known (user: the API response may not be the complete public record).
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
