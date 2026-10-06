@@ -6,6 +6,7 @@ OEUVRE_DIR and a section of report.md. Plan: /home/lc/.claude/plans/sunny-sautee
 Steps so far:
   1. records.parquet      accepted author records per ACIF (src/oeuvre/records.py)
   2. authorships.parquet  every authorship of those records, full OpenAlex (src/oeuvre/authorships.py)
+  3. works.parquet        metadata and field/subfield weights of those works (src/oeuvre/works.py)
 
 Usage: .venv/bin/python src/03_build_oeuvres.py
 """
@@ -22,6 +23,7 @@ import pandas as pd
 from config.settings import OEUVRE_DIR
 from src.oeuvre.authorships import connect, pull_authorships
 from src.oeuvre.records import load_records
+from src.oeuvre.works import DOMINANT_SHARE, pull_works
 
 
 def records_section(r: pd.DataFrame) -> list[str]:
@@ -62,6 +64,29 @@ def authorships_section(a: pd.DataFrame, r: pd.DataFrame, seconds: float) -> lis
     return L + [""]
 
 
+def works_section(w: pd.DataFrame, a: pd.DataFrame, seconds: float) -> list[str]:
+    n_auth = a.work_idx.nunique()
+    yrs = w.publication_year
+    L = ["## Step 3: works", "",
+         f"- pulled in {seconds:,.0f} s: {len(w):,} works ({n_auth - len(w):,} authorship works not in the works table)",
+         f"- with topics: {int(w.fields.notna().sum()):,}; dominant field (>= {DOMINANT_SHARE:.0%} of topic weight): "
+         f"{int(w.dominant_field.notna().sum()):,}; dominant subfield: {int(w.dominant_subfield.notna().sum()):,}",
+         f"- publication year: min {int(yrs.min())}, p1 {int(yrs.quantile(.01))}, median {int(yrs.median())}, max {int(yrs.max())}; "
+         f"missing {int(yrs.isna().sum()):,}",
+         f"- retracted {int(w.is_retracted.fillna(False).sum()):,}; paratext {int(w.is_paratext.fillna(False).sum()):,}; "
+         f"no DOI {int(w.doi.isna().sum()):,}; no title {int(w.title.isna().sum()):,}",
+         f"- authors per work: median {int(w.authors_count.median())}, p99 {int(w.authors_count.quantile(.99))}, "
+         f"max {int(w.authors_count.max()):,}; works with 100+ authors {int((w.authors_count >= 100).sum()):,}, "
+         f"1000+ {int((w.authors_count >= 1000).sum()):,}", "",
+         "| type | works |", "|---|---|"]
+    for t_, n in w.type.value_counts(dropna=False).items():
+        L.append(f"| {t_} | {n:,} |")
+    L += ["", "Dominant field (works with one):", ""]
+    for f_, n in w.dominant_field.value_counts().head(26).items():
+        L.append(f"- {f_}: {n:,}")
+    return L + [""]
+
+
 def main():
     OEUVRE_DIR.mkdir(parents=True, exist_ok=True)
     r = load_records()
@@ -70,7 +95,13 @@ def main():
     pull_authorships(r, OEUVRE_DIR / "authorships.parquet", connect())
     secs = time.time() - t
     a = pd.read_parquet(OEUVRE_DIR / "authorships.parquet")
-    text = "\n".join(["# Oeuvres", ""] + records_section(r) + authorships_section(a, r, secs))
+    t = time.time()
+    con = connect()
+    pull_works(con, OEUVRE_DIR / "authorships.parquet", OEUVRE_DIR / "works.parquet")
+    wsecs = time.time() - t
+    w = pd.read_parquet(OEUVRE_DIR / "works.parquet")
+    text = "\n".join(["# Oeuvres", ""] + records_section(r) + authorships_section(a, r, secs)
+                     + works_section(w, a, wsecs))
     (OEUVRE_DIR / "report.md").write_text(text, encoding="utf-8")
     print(text)
 

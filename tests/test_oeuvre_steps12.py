@@ -39,3 +39,26 @@ def test_pull_authorships_filters_and_dedups(tmp_path):
     n = pull_authorships(records(_links()), out, connect(), source=src)
     a = pd.read_parquet(out)
     assert n == 2 and sorted(a.work_idx) == [1, 2] and set(a.cluster_id) == {"C1"}
+
+
+def test_pull_works_field_shares_and_dominance(tmp_path):
+    from src.oeuvre.works import pull_works
+    (tmp_path / "works").mkdir(); (tmp_path / "topics").mkdir()
+    pd.DataFrame([{"cluster_id": "C1", "author_idx": 10, "work_idx": w, "institution_idx": None,
+                   "institution_name": None, "country_code": None} for w in (1, 2)]).to_parquet(tmp_path / "a.parquet")
+    pd.DataFrame([{"work_idx": w, "doi": None, "title": "t", "authors_count": 3, "institutions_distinct_count": 1,
+                   "publication_year": 2010, "referenced_works_count": 0, "cited_by_count": 1, "type": "article",
+                   "is_retracted": False, "is_paratext": False, "volume": None, "issue": None, "first_page": None,
+                   "last_page": None, "source_id": 5, "host": None} for w in (1, 2, 3)]).to_parquet(tmp_path / "works" / "p.parquet")
+    pd.DataFrame([
+        {"work_idx": 1, "topic_idx": 1, "score": 1.0, "subfield_idx": 1, "subfield_name": "Physiology", "field_idx": 1, "field_name": "Medicine", "domain_idx": 1, "domain_name": "H"},
+        {"work_idx": 1, "topic_idx": 2, "score": 1.0, "subfield_idx": 2, "subfield_name": "Cardiology", "field_idx": 1, "field_name": "Medicine", "domain_idx": 1, "domain_name": "H"},
+        {"work_idx": 2, "topic_idx": 3, "score": 1.0, "subfield_idx": 3, "subfield_name": "Math Phys", "field_idx": 2, "field_name": "Mathematics", "domain_idx": 2, "domain_name": "P"},
+        {"work_idx": 2, "topic_idx": 4, "score": 1.0, "subfield_idx": 4, "subfield_name": "Mech", "field_idx": 3, "field_name": "Engineering", "domain_idx": 2, "domain_name": "P"},
+        {"work_idx": 2, "topic_idx": 5, "score": 1.0, "subfield_idx": 5, "subfield_name": "Theory", "field_idx": 4, "field_name": "Computer Science", "domain_idx": 2, "domain_name": "P"},
+    ]).to_parquet(tmp_path / "topics" / "p.parquet")
+    n = pull_works(connect(), tmp_path / "a.parquet", tmp_path / "w.parquet", works=tmp_path / "works", topics=tmp_path / "topics")
+    w = pd.read_parquet(tmp_path / "w.parquet").set_index("work_idx")
+    assert n == 2
+    assert w.loc[1, "dominant_field"] == "Medicine" and w.loc[1, "dominant_subfield"] is None
+    assert w.loc[2, "dominant_field"] is None and len(w.loc[2, "fields"]) == 3
