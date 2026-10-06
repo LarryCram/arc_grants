@@ -3479,6 +3479,13 @@ Tests: `tests/test_acif_orcid_bulk.py` (4); 406 pass.
   Ugandan Victoria University's ROR in ORCID's dropdown -- correct, so no ROR-only rule. The bulk
   file carries ROR ids on employments where the API record (ORCID cache) shows none or a Ringgold
   id; why is not known (user: the API response may not be the complete public record).
+- The 40 ACIFs whose ORCID is in OpenAlex but outside the HEP-context pool were checked by hand:
+  ~31 fit; one wrong ORCID on our side -- Arief Budiman (DP0449956, Melbourne sociologist) had
+  taken, through Scopus pass one, the ORCID of Arief Budiman of Gadjah Mada (biodiesel) -> new
+  `reject_scopus` row; several are OpenAlex records carrying the right ORCID but another person's
+  works (John Forster -> Berlin "John Förster"; David Forrest -> Columbia psychiatrist David V.
+  Forrest; probably Steven Duvall) -- for the decision stage's name/field checks. Kept ACIFs with an
+  ORCID now 16,524.
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
