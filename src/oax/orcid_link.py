@@ -17,7 +17,18 @@ Decision per link (2026-10-06, user; from a review of the 211 links whose names 
 OpenAlex sometimes puts an ORCID on another person's record -- usually a small record of a
 co-author beside the person's real one. name_relation() compares the parser's keys of the two
 sides (no name handling of its own) and status follows:
-    accept_name_key      the two sides share a name key
+    accept_name_key      the two sides share the MAIN name (first given name + family: an ACIF
+                         record's arc_names full_name_key is among the author's keys, or the
+                         author's main key is among the ACIF's)
+    accept_initials_only they share only an initial or middle-name key and OpenAlex has no full
+                         given name (nothing to contradict)
+    accept_orcid_names   they share only an initial or middle-name key, and the ORCID record's
+                         own names include the OpenAlex name form (Chris Power, Kerr Graham:
+                         the person publishes under that name)
+    reject_orcid_names   they share only an initial or middle-name key, the ORCID record's names
+                         do not include the OpenAlex form, and the record is minor: another
+                         person's record (co-author, relative)
+    review_initial_only  the same on a main record (2026-10-06, user)
     accept_name_form     same person, name written differently: surname split differently
                          (compound), separator (space/hyphen/run together), given/family order
                          swapped, surname one letter different (4+ letters), non-Latin display
@@ -47,7 +58,7 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-from config.settings import ACIFS_ARC, OAX_AUTHORS, PROCESSED_DATA
+from config.settings import ACIF_ARC_RECORDS as ACIF_RECORDS, ACIFS_ARC, OAX_AUTHORS, PROCESSED_DATA
 from src.utils.names import HumanNameParser
 
 OVERRIDES = Path(__file__).resolve().parents[2] / "data_persisted" / "oax_link_overrides.csv"
@@ -201,18 +212,39 @@ NAME_FORMS = {"compound_family", "separator", "order_swapped", "family_one_lette
               "initials_only"}
 
 
-def decide(links: pd.DataFrame, accepts=frozenset()) -> pd.DataFrame:
+def decide(links: pd.DataFrame, accepts=frozenset(), arc_main=None, oax_main=None,
+           orcid_names=None) -> pd.DataFrame:
     """Add name_relation and status (module docstring). `accepts`: (orcid, author_idx) pairs
-    accepted by hand."""
+    accepted by hand; `arc_main`: cluster_id -> its records' main keys; `oax_main`: author_idx ->
+    its main key; `orcid_names`: orcid -> the ORCID record's own name keys (00d's orcid_facts():
+    ORCID cache, else bulk file)."""
     out = links.copy()
     out["name_relation"] = [name_relation(a, o, n) for a, o, n in
                             zip(out.full_name_keys, out.author_keys, out.author_name)]
+    arc_main = arc_main or {}
+    oax_main = oax_main or {}
+    orcid_names = orcid_names or {}
+
+    def key_kind(r):
+        """For a shared-key link: 'main' (the main name is shared) or 'minor' (initial or
+        middle-name keys only)."""
+        okeys, akeys = set(r.author_keys), set(r.full_name_keys)
+        if arc_main.get(r.cluster_id, set()) & okeys or oax_main.get(int(r.author_idx)) in akeys:
+            return "main"
+        return "minor"
 
     def status(r):
         if (r.orcid, int(r.author_idx)) in accepts:
             return "accept_hand"
         if r.name_relation == "shared_key":
-            return "accept_name_key"
+            if key_kind(r) == "main":
+                return "accept_name_key"
+            ofull = _full_keys(r.author_keys)
+            if not ofull:
+                return "accept_initials_only"
+            if ofull & _full_keys(orcid_names.get(r.orcid, ())):
+                return "accept_orcid_names"
+            return "reject_orcid_names" if r.works_share < MINOR_SHARE else "review_initial_only"
         if r.name_relation in NAME_FORMS:
             return "accept_name_form"
         if r.name_relation == "same_family":
@@ -220,6 +252,30 @@ def decide(links: pd.DataFrame, accepts=frozenset()) -> pd.DataFrame:
         return "review_unrelated" if r.works_share >= MINOR_SHARE else "reject_unrelated"
     out["status"] = [status(r) for r in out.itertuples()]
     return out
+
+
+def load_name_evidence(links: pd.DataFrame):
+    """(arc_main, oax_main, orcid_names) for decide(), for the ACIFs, authors and ORCIDs in
+    `links`."""
+    import importlib
+    import diskcache
+    from config.settings import DISKCACHE_DIR
+    from src.acif.name_merge import main_keys
+    mk = main_keys()
+    rec = pd.read_parquet(ACIF_RECORDS, columns=["unique_id", "cluster_id"])
+    arc_main: dict[str, set[str]] = {}
+    for u, c in zip(rec.unique_id, rec.cluster_id):
+        if u in mk:
+            arc_main.setdefault(c, set()).add(mk[u])
+    con = duckdb.connect()
+    con.register("ids", pd.DataFrame({"a": sorted(set(links.author_idx.astype("int64")))}))
+    oax_main = dict(con.execute(f"SELECT author_idx, full_name_key FROM read_parquet('{AUTHORS_PREP}') "
+                                "WHERE author_idx IN (SELECT a FROM ids)").fetchall())
+    x00d = importlib.import_module("src.00d_extract_scopus")
+    orcids = set(links.orcid)
+    cache = diskcache.Cache(str(DISKCACHE_DIR / "orcid_records_authenticated"))
+    facts = x00d.orcid_facts(orcids, cache, x00d.bulk_rows(con, orcids))
+    return arc_main, oax_main, {r.orcid: set(r.name_keys) for r in facts.itertuples()}
 
 
 def unmatched(acifs: pd.DataFrame, links: pd.DataFrame) -> pd.DataFrame:

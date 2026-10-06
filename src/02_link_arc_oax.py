@@ -29,7 +29,8 @@ import pandas as pd
 
 from config.settings import OAX_LINK_DIR
 from src.oax.orcid_link import (MINOR_SHARE, apply_overrides, decide, load_acifs, load_authors,
-                                load_outside_authors, load_overrides, orcid_links, shared_orcids, unmatched)
+                                load_name_evidence, load_outside_authors, load_overrides, orcid_links,
+                                shared_orcids, unmatched)
 
 
 def _names(x) -> str:
@@ -67,7 +68,8 @@ def orcid_section(acifs, links, miss, rejected, shared) -> list[str]:
           "Name relation of links that share no name key:", ""]
     for rel, n in links.loc[links.name_relation != "shared_key", "name_relation"].value_counts().items():
         L.append(f"- {rel}: {n:,}")
-    for st in ("review_unrelated", "review_given_name", "reject_unrelated", "accept_hand"):
+    for st in ("review_initial_only", "review_unrelated", "review_given_name", "reject_orcid_names",
+               "reject_unrelated", "accept_hand"):
         sub = links[links.status == st].sort_values("works_count_global", ascending=False)
         if len(sub):
             L += ["", f"### {st} ({len(sub):,})", ""]
@@ -133,7 +135,8 @@ def main():
     authors, refused = apply_overrides(authors, rejects)
     accepts = set(zip(rejects.loc[rejects.action == "accept_link", "orcid"],
                       rejects.loc[rejects.action == "accept_link", "author_idx"]))
-    links = decide(orcid_links(acifs, authors), accepts)
+    links = orcid_links(acifs, authors)
+    links = decide(links, accepts, *load_name_evidence(links))
     miss = unmatched(acifs, links)
     a = acifs[acifs.orcids.map(len) > 0].assign(orcid=lambda d: d.orcids.map(lambda x: x[0]))
     rejected = (a[["cluster_id", "orcid", "full_names"]]

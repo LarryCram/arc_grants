@@ -3508,7 +3508,19 @@ Tests: `tests/test_acif_orcid_bulk.py` (4); 406 pass.
   Dinh -> Phai Vu Dinh), each with its evidence; Mary Anne Jebb had taken Susan Jebb's ORCID
   (Oxford nutrition) through Scopus on two records -> two `reject_scopus` rows. Left in review:
   Hung Ho-Nguyen (ARC-recorded ORCID whose record names only Nam Ho-Nguyen). Stage 1 now: 17,882
-  accepted links, 16,002 ACIFs with an accepted link; kept ACIFs with an ORCID 16,523.
+  accepted links, 16,002 ACIFs with an accepted link; kept ACIFs with an ORCID 16,523. Hung (Nam) Ho-Nguyen accepted by hand (ORCID record: Nam Ho-Nguyen, CMU PhD, Sydney lecturer;
+  same field and university as his 2025 DECRA).
+- Middle-name / initial-only matches (same day): of 17,698 links accepted on a shared key, 17,457
+  share the MAIN name (first given + family); 18 only a middle/part-given key, 223 only an initial
+  key (j_smith) -- mostly nicknames and middle-name users, but ~15 wrong (co-author/relative records:
+  Hui-Jing Li on Huijun Li's ORCID, Yong Xiang, Sidhanath Bhosale, Susan Laurance, ...). Stage 1
+  now accepts a shared key outright only when it is the main name; otherwise it uses the ORCID
+  record's own names (00d's orcid_facts(): cache, else bulk file): accept_orcid_names (the ORCID
+  names include the OpenAlex form; 194), accept_initials_only (OpenAlex has no full given name; 3),
+  reject_orcid_names (minor record, OpenAlex form not in the ORCID names; 21 -- 11 wrong ones and
+  10 one-or-two-work fragments of the right person, accepted cost), review_initial_only (main
+  record; 22). Douglas Morgan (LP0560406) had taken Deidre Morgan's ORCID through Scopus pass one
+  (two-way link + surname) -> `reject_scopus` row. Stage 1: 17,839 accepted links, 15,982 ACIFs.
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.

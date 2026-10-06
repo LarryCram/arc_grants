@@ -81,14 +81,25 @@ def test_name_relation_kinds():
 def test_decide_statuses():
     from src.oax.orcid_link import decide
     links = pd.DataFrame([
-        {"orcid": "O1", "author_idx": 1, "full_name_keys": ["paul_hagan"], "author_keys": ["bruce_hebblewhite"],
+        {"cluster_id": "C1", "orcid": "O1", "author_idx": 1, "full_name_keys": ["paul_hagan"], "author_keys": ["bruce_hebblewhite"],
          "author_name": "Bruce Hebblewhite", "works_share": 0.05},
-        {"orcid": "O1", "author_idx": 2, "full_name_keys": ["paul_hagan"], "author_keys": ["bruce_hebblewhite"],
+        {"cluster_id": "C1", "orcid": "O1", "author_idx": 2, "full_name_keys": ["paul_hagan"], "author_keys": ["bruce_hebblewhite"],
          "author_name": "Bruce Hebblewhite", "works_share": 0.5},
-        {"orcid": "O2", "author_idx": 3, "full_name_keys": ["william_corcoran"], "author_keys": ["bill_corcoran"],
+        {"cluster_id": "C2", "orcid": "O2", "author_idx": 3, "full_name_keys": ["william_corcoran"], "author_keys": ["bill_corcoran"],
          "author_name": "Bill Corcoran", "works_share": 1.0},
-        {"orcid": "O3", "author_idx": 4, "full_name_keys": ["jan_smith"], "author_keys": ["jan_smith"],
+        {"cluster_id": "C3", "orcid": "O3", "author_idx": 4, "full_name_keys": ["jan_smith", "j_smith"], "author_keys": ["jan_smith"],
          "author_name": "Jan Smith", "works_share": 1.0},
+        # initial-only links: judged by the ORCID record's own names
+        {"cluster_id": "C4", "orcid": "O4", "author_idx": 5, "full_name_keys": ["christopher_power", "c_power"],
+         "author_keys": ["chris_power", "c_power"], "author_name": "Chris Power", "works_share": 1.0},
+        {"cluster_id": "C5", "orcid": "O5", "author_idx": 6, "full_name_keys": ["yang_xiang", "y_xiang"],
+         "author_keys": ["yong_xiang", "y_xiang"], "author_name": "Yong Xiang", "works_share": 0.05},
+        {"cluster_id": "C6", "orcid": "O6", "author_idx": 7, "full_name_keys": ["takashi_kubota", "t_kubota"],
+         "author_keys": ["tomoya_kubota", "t_kubota"], "author_name": "T. Kubota", "works_share": 1.0},
+        {"cluster_id": "C7", "orcid": "O7", "author_idx": 8, "full_name_keys": ["asa_ferrier", "a_ferrier"],
+         "author_keys": ["a_ferrier"], "author_name": "A. Ferrier", "works_share": 1.0},
     ])
-    d = decide(links, accepts={("O2", 3)})
-    assert list(d.status) == ["reject_unrelated", "review_unrelated", "accept_hand", "accept_name_key"]
+    d = decide(links, accepts={("O2", 3)}, arc_main={"C3": {"jan_smith"}},
+               orcid_names={"O4": {"chris_power", "christopher_power"}, "O5": {"yang_xiang"}, "O6": {"takashi_kubota"}})
+    assert list(d.status) == ["reject_unrelated", "review_unrelated", "accept_hand", "accept_name_key",
+                              "accept_orcid_names", "reject_orcid_names", "review_initial_only", "accept_initials_only"]
