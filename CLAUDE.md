@@ -3501,6 +3501,14 @@ Tests: `tests/test_acif_orcid_bulk.py` (4); 406 pass.
   review_unrelated 14, reject_unrelated 21 (unrelated names on a record holding < 20% of the
   ACIF's linked works); accept_hand via a new `accept_link` action in oax_link_overrides.csv.
   Accepted: 17,847 links, 15,969 ACIFs; 37 ACIFs have only review/reject links. Tests: 409 pass.
+  The 42 review cases were then settled from each ORCID record's own name forms (e.g. "Yuan
+  (Helena) Wang", "Francis David Bulbeck", "Debra Bernhardt / other: Debra Searles"): 36
+  `accept_link` and 4 `reject_link` rows (OpenAlex record of a co-author or another person: Paul
+  Hagan -> Hebblewhite, Susan Harris Rimmer -> Elise Stephenson, Jane Beh -> Chau Chun Beh, Hoang
+  Dinh -> Phai Vu Dinh), each with its evidence; Mary Anne Jebb had taken Susan Jebb's ORCID
+  (Oxford nutrition) through Scopus on two records -> two `reject_scopus` rows. Left in review:
+  Hung Ho-Nguyen (ARC-recorded ORCID whose record names only Nam Ho-Nguyen). Stage 1 now: 17,882
+  accepted links, 16,002 ACIFs with an accepted link; kept ACIFs with an ORCID 16,523.
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
