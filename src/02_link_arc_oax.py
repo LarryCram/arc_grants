@@ -3,12 +3,15 @@ src/02_link_arc_oax.py -- the ARC<->OpenAlex linker of the rebuild (2026-10-06),
 at a time; each stage writes its own table and report section so its effect can be seen alone.
 
 Stages so far:
-  1. ORCID links (src/oax/orcid_link.py): every OpenAlex author carrying the ACIF's ORCID.
+  1. ORCID links (src/oax/orcid_link.py): every OpenAlex author carrying the ACIF's ORCID -- in
+     the HEP-context pool, or, for an ORCID no pool author carries, anywhere in OpenAlex
+     (in_pool=False) -- less the links refused in data_persisted/oax_link_overrides.csv.
 
 Inputs: acifs_arc.parquet (src/01_build_arc_acifs.py), openalex_authors_prep.parquet (00b).
 Outputs (OAX_LINK_DIR = processed/oax_link/):
-    orcid_links.parquet       one row per (ACIF, author) sharing an ORCID
-    orcid_unmatched.parquet   ACIFs whose ORCID no pool author carries, with any full-OpenAlex hit
+    orcid_links.parquet       one row per (ACIF, author) sharing an ORCID (in_pool flag)
+    orcid_rejected.parquet    links refused by hand (oax_link_overrides.csv), with the reason
+    orcid_unmatched.parquet   ACIFs with an ORCID and no accepted link
     report.md                 statistics and examples per stage
 
 Usage: .venv/bin/python src/02_link_arc_oax.py
@@ -23,20 +26,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pandas as pd
 
 from config.settings import OAX_LINK_DIR
-from src.oax.orcid_link import load_acifs, load_authors, orcid_links, outside_pool, shared_orcids, unmatched
+from src.oax.orcid_link import (apply_overrides, load_acifs, load_authors, load_outside_authors, load_overrides,
+                                orcid_links, shared_orcids, unmatched)
 
 
 def _names(x) -> str:
     return ", ".join(x)
 
 
-def orcid_section(acifs, links, miss, outside, shared) -> list[str]:
+def orcid_section(acifs, links, miss, rejected, shared) -> list[str]:
     with_orcid = acifs[acifs.orcids.map(len) > 0]
     src = Counter(s for ss in with_orcid.orcid_sources for s in ss)
     per = links.groupby("cluster_id").size()
     dist = Counter(per.tolist())
     dist[0] = len(miss)
-    found_outside = set(outside.orcid)
+    pool = links[links.in_pool]
     frag = links[links.n_authors > 1]
     top_share = frag.groupby("cluster_id").works_share.max()
     nokey = links[~links.shares_name_key]
@@ -44,26 +48,30 @@ def orcid_section(acifs, links, miss, outside, shared) -> list[str]:
          f"- Kept ACIFs: {len(acifs):,}; with an ORCID: {len(with_orcid):,} "
          f"(ORCID sources: " + ", ".join(f"{k} {v:,}" for k, v in sorted(src.items())) + ")",
          f"- ACIF-author pairs sharing an ORCID: {len(links):,}; ACIFs linked: {links.cluster_id.nunique():,}; "
-         f"OpenAlex authors linked: {links.author_idx.nunique():,}", "",
-         "OpenAlex authors found per ACIF (HEP-context pool):", "",
+         f"OpenAlex authors linked: {links.author_idx.nunique():,}",
+         f"- in the HEP-context pool: {len(pool):,} pairs ({pool.cluster_id.nunique():,} ACIFs); outside it: "
+         f"{int((~links.in_pool).sum()):,} pairs ({links.loc[~links.in_pool, 'cluster_id'].nunique():,} ACIFs)",
+         f"- refused by hand (oax_link_overrides.csv): {len(rejected):,}", "",
+         "OpenAlex authors linked per ACIF:", "",
          "| authors | ACIFs |", "|---|---|"]
     for k in sorted(dist):
         L.append(f"| {k} | {dist[k]:,} |")
     L += ["", "By ORCID source (ACIFs with an ORCID / linked):", ""]
-    for s, sub in with_orcid.groupby(with_orcid.orcid_sources.map(lambda x: "+".join(x))):
-        L.append(f"- {s}: {len(sub):,} / {int(sub.cluster_id.isin(set(links.cluster_id)).sum()):,}")
-    L += ["", f"### ORCID not in the pool: {len(miss):,} ACIFs", "",
-          f"- in full OpenAlex, outside the HEP-context pool: {int(miss.orcid.isin(found_outside).sum()):,}",
-          f"- not in OpenAlex at all: {int((~miss.orcid.isin(found_outside)).sum()):,}", "",
-          "Examples in full OpenAlex (largest first):", ""]
-    o = outside.sort_values("works_count", ascending=False).drop_duplicates("orcid")
-    m = miss.merge(o, on="orcid")
-    for r in m.head(10).itertuples():
-        L.append(f"- {r.cluster_id} ({_names(r.full_names)}, grants {int(r.first_year)}-{int(r.last_year)}) -> "
-                 f"A{r.author_idx} {r.display_name}, {r.works_count} works")
-    L += ["", "Examples not in OpenAlex:", ""]
-    for r in miss[~miss.orcid.isin(found_outside)].sort_values("last_year", ascending=False).head(10).itertuples():
+    for s_, sub in with_orcid.groupby(with_orcid.orcid_sources.map(lambda x: "+".join(x))):
+        L.append(f"- {s_}: {len(sub):,} / {int(sub.cluster_id.isin(set(links.cluster_id)).sum()):,}")
+    rej_ids = set(rejected.cluster_id) if len(rejected) else set()
+    L += ["", f"### ACIFs with an ORCID but no accepted link: {len(miss):,}", "",
+          f"- ORCID not in OpenAlex: {int((~miss.cluster_id.isin(rej_ids)).sum()):,}",
+          f"- only links refused by hand: {int(miss.cluster_id.isin(rej_ids).sum()):,}", "",
+          "Examples not in OpenAlex (latest grants first):", ""]
+    for r in miss[~miss.cluster_id.isin(rej_ids)].sort_values("last_year", ascending=False).head(10).itertuples():
         L.append(f"- {r.cluster_id} ({_names(r.full_names)}, {r.orcid}, grants {int(r.first_year)}-{int(r.last_year)})")
+    L += ["", "Links refused by hand:", ""]
+    for r in rejected.itertuples():
+        L.append(f"- {r.cluster_id} ({_names(r.full_names)}) ~ A{r.author_idx} {r.author_name}: {r.notes[:140]}")
+    L += ["", "Links outside the pool (accepted):", ""]
+    for r in links[~links.in_pool].sort_values("cluster_id").itertuples():
+        L.append(f"- {r.cluster_id} ({_names(r.full_names)}) ~ A{r.author_idx} {r.author_name} ({r.works_count_global} works)")
     L += ["", f"### Fragments: {frag.cluster_id.nunique():,} ACIFs with 2+ OpenAlex authors", "",
           "Share of works in the largest author: "
           + ", ".join(f"p{q}: {top_share.quantile(q / 100):.3f}" for q in (10, 50, 90)), ""]
@@ -74,7 +82,7 @@ def orcid_section(acifs, links, miss, outside, shared) -> list[str]:
                  + ", ".join(f"{r.author_name} ({r.works_count_global})" for r in sub.itertuples()))
     even = top_share[top_share < 0.8].index
     L += ["", f"ACIFs whose largest author holds < 80% of works: {len(even):,}", ""]
-    for cid in list(even)[:8]:
+    for cid in list(even)[:12]:
         sub = frag[frag.cluster_id == cid]
         L.append(f"- {cid} ({_names(sub.full_names.iloc[0])}): "
                  + ", ".join(f"{r.author_name} ({r.works_count_global})" for r in sub.itertuples()))
@@ -95,14 +103,22 @@ def main():
     OAX_LINK_DIR.mkdir(parents=True, exist_ok=True)
     acifs = load_acifs()
     orcids = {o for os in acifs.orcids for o in os}
-    links = orcid_links(acifs, load_authors(orcids))
+    pool = load_authors(orcids)
+    authors = pd.concat([pool, load_outside_authors(orcids - set(pool.orcid))], ignore_index=True)
+    rejects = load_overrides()
+    authors, refused = apply_overrides(authors, rejects)
+    links = orcid_links(acifs, authors)
     miss = unmatched(acifs, links)
-    outside = outside_pool(miss.orcid)
+    a = acifs[acifs.orcids.map(len) > 0].assign(orcid=lambda d: d.orcids.map(lambda x: x[0]))
+    rejected = (a[["cluster_id", "orcid", "full_names"]]
+                .merge(refused.rename(columns={"full_name": "author_name"})[["orcid", "author_idx", "author_name"]], on="orcid")
+                .merge(rejects, on=["orcid", "author_idx"]))
     shared = shared_orcids(acifs)
 
     links.to_parquet(OAX_LINK_DIR / "orcid_links.parquet", index=False)
-    miss.merge(outside, on="orcid", how="left").to_parquet(OAX_LINK_DIR / "orcid_unmatched.parquet", index=False)
-    text = "\n".join(["# ARC<->OpenAlex linking", ""] + orcid_section(acifs, links, miss, outside, shared))
+    rejected.to_parquet(OAX_LINK_DIR / "orcid_rejected.parquet", index=False)
+    miss.to_parquet(OAX_LINK_DIR / "orcid_unmatched.parquet", index=False)
+    text = "\n".join(["# ARC<->OpenAlex linking", ""] + orcid_section(acifs, links, miss, rejected, shared))
     (OAX_LINK_DIR / "report.md").write_text(text, encoding="utf-8")
     print(text)
 

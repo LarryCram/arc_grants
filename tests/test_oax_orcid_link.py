@@ -53,3 +53,14 @@ def test_shared_orcids():
     a = _acifs()
     a.loc[1, "orcids"] = ["O1"]
     assert sorted(shared_orcids(a).cluster_id) == ["DP1_jan_smith", "DP2_ann_lee"]
+
+
+def test_apply_overrides_refuses_a_link_and_checks_rows():
+    import pytest
+    from src.oax.orcid_link import apply_overrides
+    a = _authors()
+    rej = pd.DataFrame([{"orcid": "O1", "author_idx": 11, "notes": "x"}])
+    kept, refused = apply_overrides(a, rej)
+    assert list(kept.author_idx) == [10, 20] and list(refused.author_idx) == [11]
+    with pytest.raises(SystemExit):
+        apply_overrides(a, pd.DataFrame([{"orcid": "O1", "author_idx": 99, "notes": "x"}]))

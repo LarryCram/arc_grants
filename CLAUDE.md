@@ -3485,7 +3485,12 @@ Tests: `tests/test_acif_orcid_bulk.py` (4); 406 pass.
   `reject_scopus` row; several are OpenAlex records carrying the right ORCID but another person's
   works (John Forster -> Berlin "John Förster"; David Forrest -> Columbia psychiatrist David V.
   Forrest; probably Steven Duvall) -- for the decision stage's name/field checks. Kept ACIFs with an
-  ORCID now 16,524.
+  ORCID now 16,524. Then (user: accept the ones found) stage 1 links an ACIF ORCID that no pool author carries
+  to OpenAlex authors anywhere (`in_pool=False`, names parsed with NameParser), and a new hand file
+  `data_persisted/oax_link_overrides.csv` (`reject_link, orcid, oax_author, notes`) refuses 6 links
+  (John Forster, David Forrest, Steven Duvall; unclear: Simon Lewis, Leonid Petrov, Barry Williams).
+  Stage 1 now: 17,910 pairs, 16,006 ACIFs linked (15,973 in the pool + 33 outside); 518 ACIFs with an
+  ORCID and no accepted link (512 not in OpenAlex, 6 only refused links).
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.

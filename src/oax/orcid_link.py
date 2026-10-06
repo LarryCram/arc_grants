@@ -5,10 +5,18 @@ found is kept: OpenAlex often splits one person into a large record plus small f
 
 Sides:
   ACIFs    acifs_arc.parquet, kept ACIFs only (excluded=False); `orcids` holds at most one ORCID
-           (ARC, Scopus-found or hand; the build's ORCID veto), `orcid_sources` says which.
-  authors  openalex_authors_prep.parquet (00b): the HEP-context pool, ORCID already bare.
-           Authors outside that pool are looked up in the full OpenAlex authors table only to
-           explain ACIF ORCIDs not found in the pool.
+           (ARC, Scopus-found, hand or ORCID-bulk; the build's ORCID veto), `orcid_sources` says
+           which.
+  authors  openalex_authors_prep.parquet (00b): the HEP-context pool, ORCID already bare. An
+           ACIF ORCID no pool author carries is looked up in the full OpenAlex authors table, and
+           those authors are linked too (2026-10-06, user), flagged in_pool=False; their names
+           are parsed here with NameParser (display name and alternatives) and only the global
+           works count is known.
+
+Hand decisions: data_persisted/oax_link_overrides.csv, rows `reject_link, orcid, oax_author
+(A-number), notes` -- that OpenAlex author is not the person holding that ORCID (OpenAlex put
+the ORCID on another person's record). A rejected link is left out and reported; a row that
+matches no candidate link stops the run.
 
 Name keys are not used to link; `shares_name_key` / `shares_full_name_key` only report whether
 the two sides' parser keys agree (a check on the link, and input to step 2's design).
@@ -16,10 +24,16 @@ the two sides' parser keys agree (a check on the link, and input to step 2's des
 
 from __future__ import annotations
 
+import csv
+from pathlib import Path
+
 import duckdb
 import pandas as pd
 
 from config.settings import ACIFS_ARC, OAX_AUTHORS, PROCESSED_DATA
+from src.utils.names import HumanNameParser
+
+OVERRIDES = Path(__file__).resolve().parents[2] / "data_persisted" / "oax_link_overrides.csv"
 
 AUTHORS_PREP = PROCESSED_DATA / "openalex_authors_prep.parquet"
 ACIF_COLUMNS = ["cluster_id", "orcids", "orcid_sources", "full_names", "full_name_keys",
@@ -35,13 +49,51 @@ def load_acifs(path=ACIFS_ARC) -> pd.DataFrame:
 
 
 def load_authors(orcids, path=AUTHORS_PREP) -> pd.DataFrame:
-    """Pool authors whose ORCID is in `orcids`."""
+    """Pool authors whose ORCID is in `orcids` (in_pool=True)."""
     con = duckdb.connect()
     con.register("want", pd.DataFrame({"orcid": sorted(set(orcids))}))
     return con.execute(f"""
-        SELECT {', '.join(AUTHOR_COLUMNS)} FROM read_parquet('{path}')
+        SELECT {', '.join(AUTHOR_COLUMNS)}, TRUE AS in_pool FROM read_parquet('{path}')
         WHERE orcid IN (SELECT orcid FROM want)
     """).fetchdf()
+
+
+def load_outside_authors(orcids) -> pd.DataFrame:
+    """Authors outside the pool, from the full OpenAlex authors table, carrying any of `orcids`;
+    same columns as load_authors() (in_pool=False; names parsed here; works_count and
+    works_count_au unknown)."""
+    raw = outside_pool(orcids, alternatives=True)
+    parser = HumanNameParser()
+    keys = []
+    for r in raw.itertuples():
+        names = [r.display_name, *(list(r.alternatives) if r.alternatives is not None else [])]
+        keys.append(sorted({k for n in names if isinstance(n, str) and n for k in parser.parse(n).full_name_keys}))
+    return pd.DataFrame({"author_idx": raw.author_idx, "orcid": raw.orcid, "full_name": raw.display_name,
+                         "full_name_keys": keys, "works_count": pd.NA, "works_count_au": pd.NA,
+                         "works_count_global": raw.works_count, "in_pool": False})
+
+
+def load_overrides(path=OVERRIDES) -> pd.DataFrame:
+    """reject_link rows: (orcid, author_idx, notes)."""
+    with open(path, newline="", encoding="utf-8") as f:
+        rows = [r for r in csv.DictReader(f)]
+    bad = [r for r in rows if r["action"] != "reject_link"]
+    if bad:
+        raise SystemExit(f"{path.name}: unknown action(s) {sorted({r['action'] for r in bad})}")
+    return pd.DataFrame([{"orcid": r["orcid"].strip(), "author_idx": int(r["oax_author"].strip().lstrip("Aa")),
+                          "notes": r["notes"]} for r in rows], columns=["orcid", "author_idx", "notes"])
+
+
+def apply_overrides(authors: pd.DataFrame, rejects: pd.DataFrame):
+    """(authors without the rejected (orcid, author) pairs, the rejected rows). A reject row that
+    matches no author carrying that ORCID stops the run."""
+    key = set(zip(authors.orcid, authors.author_idx.astype("int64")))
+    missing = [(o, a) for o, a in zip(rejects.orcid, rejects.author_idx) if (o, a) not in key]
+    if missing:
+        raise SystemExit(f"oax_link_overrides.csv rows match no candidate link: {missing}")
+    rej = set(zip(rejects.orcid, rejects.author_idx))
+    hit = [(o, int(a)) in rej for o, a in zip(authors.orcid, authors.author_idx)]
+    return authors[[not h for h in hit]].reset_index(drop=True), authors[hit].reset_index(drop=True)
 
 
 def _full_keys(keys) -> set[str]:
@@ -78,12 +130,13 @@ def unmatched(acifs: pd.DataFrame, links: pd.DataFrame) -> pd.DataFrame:
     return a[~a.cluster_id.isin(set(links.cluster_id))].drop(columns="orcids").reset_index(drop=True)
 
 
-def outside_pool(orcids) -> pd.DataFrame:
+def outside_pool(orcids, alternatives: bool = False) -> pd.DataFrame:
     """Authors in the full OpenAlex authors table carrying any of `orcids` (bare form)."""
     con = duckdb.connect()
     con.register("want", pd.DataFrame({"orcid": sorted(set(orcids))}))
+    alt = ", display_name_alternatives AS alternatives" if alternatives else ""
     return con.execute(f"""
-        SELECT author_idx, replace(orcid, 'https://orcid.org/', '') AS orcid, display_name, works_count
+        SELECT author_idx, replace(orcid, 'https://orcid.org/', '') AS orcid, display_name, works_count{alt}
         FROM read_parquet('{OAX_AUTHORS}/*.parquet')
         WHERE replace(orcid, 'https://orcid.org/', '') IN (SELECT orcid FROM want)
     """).fetchdf()
