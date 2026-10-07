@@ -6,10 +6,11 @@ drop reason that applies, in this order:
   paratext        is_paratext (front matter, tables of contents, ...)
   retracted       is_retracted
   type            type not in KEEP_TYPES (datasets, letters, editorials, errata, peer reviews, ...)
-  no_inst_no_doi  no author on the whole work has an institution AND the work has no DOI -- a sign
-                  of a corrupt works record (half of such works have no DOI, against 5% of the
-                  rest); some real older books and papers fall here too, accepted: they can be
-                  rebuilt from the works and authorships tables if needed
+  no_inst_no_doi  the ACIF's own authorship(s) on the work have no institution AND the work has no
+                  DOI (user, 2026-10-07) -- a sign of a corrupt works record (half of the rows with
+                  no own institution have no DOI, against 4% of the rest); some real older books
+                  and papers fall here too, accepted: they can be rebuilt from the works and
+                  authorships tables if needed
 
 Kept rows go to acif_works_kept.parquet (all columns); dropped rows to work_drops.parquet
 (cluster_id, work_idx, type, publication_year, drop_reason).
@@ -24,7 +25,7 @@ DROP_REASON_SQL = f"""
     CASE WHEN is_paratext THEN 'paratext'
          WHEN is_retracted THEN 'retracted'
          WHEN type IS NULL OR type NOT IN {KEEP_TYPES} THEN 'type'
-         WHEN coalesce(work_authors_with_institution, 0) = 0 AND doi IS NULL THEN 'no_inst_no_doi'
+         WHEN NOT list_bool_or([len(a.institutions) > 0 FOR a IN authorships]) AND doi IS NULL THEN 'no_inst_no_doi'
     END"""
 
 

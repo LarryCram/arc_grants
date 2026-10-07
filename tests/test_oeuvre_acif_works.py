@@ -64,19 +64,48 @@ def test_build_acif_works(tmp_path):
 
 def test_filter_works(tmp_path):
     from src.oeuvre.work_filter import filter_works
-    row = dict(is_paratext=False, is_retracted=False, type="article", doi="10.1/x", work_authors=2,
-               work_authors_with_institution=1, publication_year=2010)
+    inst = [{"author_idx": 1, "institutions": [{"institution_idx": 7, "name": "U", "country": "AU"}]}]
+    none = [{"author_idx": 1, "institutions": []}]
+    row = dict(is_paratext=False, is_retracted=False, type="article", doi="10.1/x", authorships=inst,
+               publication_year=2010)
     rows = [dict(row, work_idx=1),                                          # kept
             dict(row, work_idx=2, is_paratext=True, is_retracted=True),      # paratext comes first
             dict(row, work_idx=3, is_retracted=True),
             dict(row, work_idx=4, type="dataset"),
             dict(row, work_idx=5, type="dissertation"),                      # kept
-            dict(row, work_idx=6, doi=None, work_authors_with_institution=0),
+            dict(row, work_idx=6, doi=None, authorships=none),
             dict(row, work_idx=7, doi=None),                                 # kept: institution present
-            dict(row, work_idx=8, work_authors_with_institution=0)]          # kept: DOI present
+            dict(row, work_idx=8, authorships=none)]                         # kept: DOI present
     pd.DataFrame([dict(r, cluster_id="C1") for r in rows]).to_parquet(tmp_path / "in.parquet")
     kept, dropped = filter_works(connect(), tmp_path / "in.parquet", tmp_path / "k.parquet", tmp_path / "d.parquet")
     assert (kept, dropped) == (4, 4)
     assert sorted(pd.read_parquet(tmp_path / "k.parquet").work_idx) == [1, 5, 7, 8]
     d = pd.read_parquet(tmp_path / "d.parquet").set_index("work_idx").drop_reason.to_dict()
     assert d == {2: "paratext", 3: "retracted", 4: "type", 6: "no_inst_no_doi"}
+
+
+def test_reduce_versions(tmp_path):
+    from src.oeuvre.versions import reduce_versions
+    pd.DataFrame([{"source_idx": 1, "type": "journal"}, {"source_idx": 2, "type": "repository"}]
+                 ).to_parquet(tmp_path / "s.parquet")
+    T = "A long enough title about lentils"
+    r = lambda w, **k: dict(dict(cluster_id="C1", work_idx=w, doi=None, title=T, publication_year=2010,
+                                 type="article", cited_by_count=1, source_id=1), **k)
+    rows = [r(1, type="preprint", publication_year=2008, source_id=2, cited_by_count=3, doi="10.48550/x"),
+            r(2, cited_by_count=10, doi="10.1/a"),                        # version of record (journal article)
+            r(3, title="Something else entirely, long", doi="10.1/A"),    # same DOI as 2 (case): chained in
+            r(4, source_id=2, publication_year=2020),                     # repository copy, most recent
+            r(5, cluster_id="C2"),                                        # other ACIF: never linked
+            r(6, title="Generic title shared by many works", cluster_id="C1"),
+            r(7, title="Generic title shared by many works", cluster_id="C1")]
+    rows += [r(100 + i, title="Generic title shared by many works", cluster_id=f"X{i}") for i in range(6)]
+    pd.DataFrame(rows).to_parquet(tmp_path / "k.parquet")
+    n = reduce_versions(connect(), tmp_path / "k.parquet", tmp_path / "v.parquet", sources=tmp_path / "s.parquet")
+    v = pd.read_parquet(tmp_path / "v.parquet").set_index(["cluster_id", "work_idx"])
+    vor = v.loc[("C1", 2)]
+    assert vor.n_versions == 4 and vor.linked_by == "doi+title"
+    assert vor.publication_year == 2008 and vor.vor_publication_year == 2010
+    assert vor.cited_by_count == 10 and vor.cited_by_count_versions == 15
+    assert [x["work_idx"] for x in vor.versions][0] == 2
+    assert ("C2", 5) in v.index and ("C1", 6) in v.index and ("C1", 7) in v.index    # generic title not linked
+    assert n["titles_refused"] == 1

@@ -37,8 +37,11 @@ src/03_build_oeuvres.py + src/oeuvre/ → the oeuvre extractor (2026-10-07), on 
                                   authorships through the ACIF's linked authors, work metadata,
                                   field/subfield shares), then step 2, acif_works_kept.parquet
                                   (drops paratext, retracted, types other than article/preprint/
-                                  book/book-chapter/review/report/dissertation, and works with no
-                                  institution on any author and no DOI) → processed/oeuvre/
+                                  book/book-chapter/review/report/dissertation, and works where the
+                                  ACIF's own authorship has no institution and no DOI), then step 3,
+                                  acif_works_single.parquet (versions sharing a DOI or a usable
+                                  normalised title reduced to the version of record; publication_year
+                                  = earliest version) → processed/oeuvre/
 src/utils/acif_oax_linker.py    → the OLD ARC↔OpenAlex candidate finder (with sql/01-04; reads
                                   acifs_arc.parquet); to be archived when the new linker replaces it
 ```

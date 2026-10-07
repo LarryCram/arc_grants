@@ -9,7 +9,10 @@ Steps so far:
                           (src/oeuvre/acif_works.py)
   2. acif_works_kept.parquet / work_drops.parquet   rows dropped as paratext, retracted, a type not
                           kept, or no institution on the work and no DOI (src/oeuvre/work_filter.py)
-Next: one version per work (preprint/published), evidence per (ACIF, work), decision, person report.
+  3. acif_works_single.parquet   one row per (ACIF, work): versions (same DOI or usable normalised
+                          title) reduced to the version of record, earliest year as publication_year
+                          (src/oeuvre/versions.py)
+Next: evidence per (ACIF, work), decision (the person's / not), person report.
 
 Usage: .venv/bin/python src/03_build_oeuvres.py
 """
@@ -24,6 +27,7 @@ import pandas as pd
 
 from config.settings import OEUVRE_DIR
 from src.oeuvre.acif_works import DOMINANT_SHARE, LINKS, accepted_links, build_acif_works, connect
+from src.oeuvre.versions import MAX_TITLE_WORKS, reduce_versions
 from src.oeuvre.work_filter import KEEP_TYPES, filter_works
 
 
@@ -98,6 +102,49 @@ def filter_section(con, n_in: int, kept: int, dropped: int) -> list[str]:
     return L + [""]
 
 
+def versions_section(con, counts: dict) -> list[str]:
+    path = OEUVRE_DIR / "acif_works_single.parquet"
+    con.execute(f"CREATE OR REPLACE TEMP VIEW sv AS SELECT * FROM read_parquet('{path}')")
+    q = lambda s_: con.execute(s_).fetchall()
+    one = lambda s_: con.execute(s_).fetchone()
+    multi = "n_versions > 1"
+    L = ["## Step 3: one version per work", "",
+         f"- rows in {counts['rows_in']:,}; works out {counts['rows_out']:,}; works with 2+ versions "
+         f"{counts['groups']:,} (rows merged away: {counts['rows_in'] - counts['rows_out']:,})",
+         f"- titles refused as generic (held by more than {MAX_TITLE_WORKS} distinct works): {counts['titles_refused']:,}",
+         "- ACIFs / distinct work_idx out: " + " / ".join(f"{x:,}" for x in one(
+             "SELECT count(DISTINCT cluster_id), count(DISTINCT work_idx) FROM sv")), "",
+         "| versions | works |", "|---|---|"]
+    L += [f"| {n} | {c:,} |" for n, c in q("SELECT least(n_versions, 6), count(*) FROM sv GROUP BY 1 ORDER BY 1")]
+    L += ["", "| linked by | works |", "|---|---|"]
+    L += [f"| {k} | {c:,} |" for k, c in q(f"SELECT linked_by, count(*) FROM sv WHERE {multi} GROUP BY 1 ORDER BY 2 DESC")]
+    L += ["", "Years between the earliest version and the version of record:", "", "| years | works |", "|---|---|"]
+    L += [f"| {'missing' if d is None else d} | {c:,} |" for d, c in q(
+        f"SELECT least(vor_publication_year - publication_year, 11), count(*) FROM sv WHERE {multi} GROUP BY 1 ORDER BY 1 NULLS LAST")]
+    L += ["", "Version of record, works with 2+ versions:", "", "| type | source type | works |", "|---|---|---|"]
+    L += [f"| {t_} | {st} | {c:,} |" for t_, st, c in q(
+        f"SELECT type, coalesce(source_type, '(none)'), count(*) FROM sv WHERE {multi} GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 15")]
+    later = one(f"""SELECT count(*) FROM sv WHERE {multi} AND
+                    list_max([x.publication_year FOR x IN versions]) > vor_publication_year""")[0]
+    share = one(f"""SELECT quantile_cont(cited_by_count / cited_by_count_versions, [0.1, 0.25, 0.5]) FROM sv
+                    WHERE {multi} AND cited_by_count_versions > 0""")[0]
+    L += ["", f"- version of record older than another version: {later:,}",
+          "- version of record's share of all versions' citations: "
+          + ", ".join(f"p{p}: {x:.2f}" for p, x in zip((10, 25, 50), share)), "", "Examples (random works with 2+ versions):", ""]
+    def show(where, n):
+        out = []
+        for r in con.execute(f"SELECT cluster_id, title, versions FROM sv WHERE {where} "
+                             f"ORDER BY hash(cluster_id || work_idx) LIMIT {n}").fetchall():
+            out.append(f"- {r[0]}: {r[1][:90]} -- " + "; ".join(
+                f"{x['type']} {x['publication_year']} {x['source_type'] or '-'} {x['doi'] or 'no DOI'} ({x['cited_by_count']} cites)"
+                for x in r[2]))
+        return out
+    L += show(multi, 10)
+    L += ["", "Examples, versions 10+ years apart:", ""] + show(f"{multi} AND vor_publication_year - publication_year >= 10", 6)
+    L += ["", "Examples, 5+ versions:", ""] + show("n_versions >= 5", 4)
+    return L + [""]
+
+
 def main():
     OEUVRE_DIR.mkdir(parents=True, exist_ok=True)
     links = pd.read_parquet(LINKS)
@@ -107,8 +154,9 @@ def main():
     secs = time.time() - t
     kept, dropped = filter_works(con, OEUVRE_DIR / "acif_works.parquet", OEUVRE_DIR / "acif_works_kept.parquet",
                                  OEUVRE_DIR / "work_drops.parquet")
+    counts = reduce_versions(con, OEUVRE_DIR / "acif_works_kept.parquet", OEUVRE_DIR / "acif_works_single.parquet")
     text = "\n".join(["# Oeuvres", ""] + acif_works_section(con, OEUVRE_DIR / "acif_works.parquet", links, secs)
-                     + filter_section(con, n_in, kept, dropped))
+                     + filter_section(con, n_in, kept, dropped) + versions_section(con, counts))
     (OEUVRE_DIR / "report.md").write_text(text, encoding="utf-8")
     print(text)
 
