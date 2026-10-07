@@ -35,7 +35,10 @@ src/02_link_arc_oax.py + src/oax/ → the NEW ARC↔OpenAlex linker, built one s
 src/03_build_oeuvres.py + src/oeuvre/ → the oeuvre extractor (2026-10-07), on stage-1 accepted
                                   links: so far step 1, acif_works.parquet (one row per ACIF x work:
                                   authorships through the ACIF's linked authors, work metadata,
-                                  field/subfield shares) → processed/oeuvre/
+                                  field/subfield shares), then step 2, acif_works_kept.parquet
+                                  (drops paratext, retracted, types other than article/preprint/
+                                  book/book-chapter/review/report/dissertation, and works with no
+                                  institution on any author and no DOI) → processed/oeuvre/
 src/utils/acif_oax_linker.py    → the OLD ARC↔OpenAlex candidate finder (with sql/01-04; reads
                                   acifs_arc.parquet); to be archived when the new linker replaces it
 ```

@@ -58,3 +58,25 @@ def test_build_acif_works(tmp_path):
     assert len(w.loc[("C1", 2), "authorships"][0]["institutions"]) == 0
     assert w.loc[("C1", 1), "dominant_field"] == "Medicine" and pd.isna(w.loc[("C1", 1), "dominant_subfield"])
     assert pd.isna(w.loc[("C1", 2), "dominant_field"])
+    assert w.loc[("C1", 1), ["work_authors", "work_authors_with_institution"]].tolist() == [2, 2]
+    assert w.loc[("C1", 2), ["work_authors", "work_authors_with_institution"]].tolist() == [1, 0]
+
+
+def test_filter_works(tmp_path):
+    from src.oeuvre.work_filter import filter_works
+    row = dict(is_paratext=False, is_retracted=False, type="article", doi="10.1/x", work_authors=2,
+               work_authors_with_institution=1, publication_year=2010)
+    rows = [dict(row, work_idx=1),                                          # kept
+            dict(row, work_idx=2, is_paratext=True, is_retracted=True),      # paratext comes first
+            dict(row, work_idx=3, is_retracted=True),
+            dict(row, work_idx=4, type="dataset"),
+            dict(row, work_idx=5, type="dissertation"),                      # kept
+            dict(row, work_idx=6, doi=None, work_authors_with_institution=0),
+            dict(row, work_idx=7, doi=None),                                 # kept: institution present
+            dict(row, work_idx=8, work_authors_with_institution=0)]          # kept: DOI present
+    pd.DataFrame([dict(r, cluster_id="C1") for r in rows]).to_parquet(tmp_path / "in.parquet")
+    kept, dropped = filter_works(connect(), tmp_path / "in.parquet", tmp_path / "k.parquet", tmp_path / "d.parquet")
+    assert (kept, dropped) == (4, 4)
+    assert sorted(pd.read_parquet(tmp_path / "k.parquet").work_idx) == [1, 5, 7, 8]
+    d = pd.read_parquet(tmp_path / "d.parquet").set_index("work_idx").drop_reason.to_dict()
+    assert d == {2: "paratext", 3: "retracted", 4: "type", 6: "no_inst_no_doi"}

@@ -7,7 +7,9 @@ Steps so far:
   1. acif_works.parquet   one row per (ACIF, work): the authorships through the ACIF's linked
                           authors (printed name, institutions), work metadata, field weights
                           (src/oeuvre/acif_works.py)
-Next: evidence per (ACIF, work), decision (the person's / not), combine versions, person report.
+  2. acif_works_kept.parquet / work_drops.parquet   rows dropped as paratext, retracted, a type not
+                          kept, or no institution on the work and no DOI (src/oeuvre/work_filter.py)
+Next: one version per work (preprint/published), evidence per (ACIF, work), decision, person report.
 
 Usage: .venv/bin/python src/03_build_oeuvres.py
 """
@@ -22,6 +24,7 @@ import pandas as pd
 
 from config.settings import OEUVRE_DIR
 from src.oeuvre.acif_works import DOMINANT_SHARE, LINKS, accepted_links, build_acif_works, connect
+from src.oeuvre.work_filter import KEEP_TYPES, filter_works
 
 
 def acif_works_section(con, path, links: pd.DataFrame, seconds: float) -> list[str]:
@@ -71,14 +74,41 @@ def acif_works_section(con, path, links: pd.DataFrame, seconds: float) -> list[s
     return L + [""]
 
 
+def filter_section(con, n_in: int, kept: int, dropped: int) -> list[str]:
+    kp, dp = OEUVRE_DIR / "acif_works_kept.parquet", OEUVRE_DIR / "work_drops.parquet"
+    one = lambda q: con.execute(q).fetchone()
+    L = ["## Step 2: drop non-research and corrupt records", "",
+         f"- kept types: {', '.join(KEEP_TYPES)}",
+         f"- rows in {n_in:,}; kept {kept:,}; dropped {dropped:,}", "",
+         "| drop reason | rows |", "|---|---|"]
+    for r, n in con.execute(f"SELECT drop_reason, count(*) FROM read_parquet('{dp}') GROUP BY 1").fetchall():
+        L.append(f"| {r} | {n:,} |")
+    L += ["", "Dropped types (reason 'type'):", "", "| type | rows |", "|---|---|"]
+    for t_, n in con.execute(f"SELECT coalesce(type, '(none)'), count(*) n FROM read_parquet('{dp}') "
+                             "WHERE drop_reason = 'type' GROUP BY 1 ORDER BY 2 DESC").fetchall():
+        L.append(f"| {t_} | {n:,} |")
+    L += ["", "Dropped as no_inst_no_doi, by decade:", "", "| decade | rows |", "|---|---|"]
+    for d, n in con.execute(f"SELECT (publication_year // 10) * 10 AS d, count(*) FROM read_parquet('{dp}') "
+                            "WHERE drop_reason = 'no_inst_no_doi' GROUP BY 1 ORDER BY 1 NULLS LAST").fetchall():
+        L.append(f"| {'missing' if d is None else int(d)} | {n:,} |")
+    n_acif, n_work = one(f"SELECT count(DISTINCT cluster_id), count(DISTINCT work_idx) FROM read_parquet('{kp}')")
+    L += ["", f"- kept: {n_acif:,} ACIFs, {n_work:,} distinct works", "", "| type | kept rows |", "|---|---|"]
+    for t_, n in con.execute(f"SELECT type, count(*) n FROM read_parquet('{kp}') GROUP BY 1 ORDER BY 2 DESC").fetchall():
+        L.append(f"| {t_} | {n:,} |")
+    return L + [""]
+
+
 def main():
     OEUVRE_DIR.mkdir(parents=True, exist_ok=True)
     links = pd.read_parquet(LINKS)
     con = connect()
     t = time.time()
-    build_acif_works(links, OEUVRE_DIR / "acif_works.parquet", con)
+    n_in = build_acif_works(links, OEUVRE_DIR / "acif_works.parquet", con)
     secs = time.time() - t
-    text = "\n".join(["# Oeuvres", ""] + acif_works_section(con, OEUVRE_DIR / "acif_works.parquet", links, secs))
+    kept, dropped = filter_works(con, OEUVRE_DIR / "acif_works.parquet", OEUVRE_DIR / "acif_works_kept.parquet",
+                                 OEUVRE_DIR / "work_drops.parquet")
+    text = "\n".join(["# Oeuvres", ""] + acif_works_section(con, OEUVRE_DIR / "acif_works.parquet", links, secs)
+                     + filter_section(con, n_in, kept, dropped))
     (OEUVRE_DIR / "report.md").write_text(text, encoding="utf-8")
     print(text)
 

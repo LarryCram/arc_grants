@@ -16,6 +16,9 @@ Per row:
                 on that paper; institutions is a list of {institution_idx, name, country}
   work metadata doi, title, publication_year, type, authors_count, cited_by_count, is_retracted,
                 is_paratext, source_id (the journal/book/repository)
+  work_authors / work_authors_with_institution
+                distinct authors on the whole work, and how many of them have an institution
+                (all authorships of the work, not only the ACIF's)
   fields        fields / subfields with their share of the work's summed topic scores; dominant_field
                 / dominant_subfield only when one holds MORE than DOMINANT_SHARE (a single top topic
                 is not used: a work usually has three nearly equal topics, median top share 0.34)
@@ -73,6 +76,11 @@ def build_acif_works(links: pd.DataFrame, out_path, con=None, authorships=AUTHOR
         FROM per_author GROUP BY cluster_id, work_idx""")
     con.execute("CREATE OR REPLACE TEMP TABLE want AS SELECT DISTINCT work_idx FROM per_work")
     con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE work_authors AS
+        SELECT work_idx, count(DISTINCT author_idx) AS work_authors,
+               count(DISTINCT author_idx) FILTER (WHERE institution_idx IS NOT NULL) AS work_authors_with_institution
+        FROM read_parquet('{authorships}/*.parquet') JOIN want USING (work_idx) GROUP BY 1""")
+    con.execute(f"""
         CREATE OR REPLACE TEMP TABLE t AS
         SELECT t.work_idx, t.score, t.subfield_name, t.field_name
         FROM read_parquet('{topics}/*.parquet') t JOIN want USING (work_idx)""")
@@ -90,6 +98,7 @@ def build_acif_works(links: pd.DataFrame, out_path, con=None, authorships=AUTHOR
             SELECT p.cluster_id, p.work_idx, p.authorships,
                    w.doi, w.title, w.publication_year, w.type, w.authors_count, w.cited_by_count,
                    w.is_retracted, w.is_paratext, w.source_id,
+                   wa.work_authors, wa.work_authors_with_institution,
                    f.fields,
                    CASE WHEN f.top_share > {DOMINANT_SHARE} THEN f.top END AS dominant_field,
                    f.top_share AS dominant_field_share,
@@ -98,6 +107,7 @@ def build_acif_works(links: pd.DataFrame, out_path, con=None, authorships=AUTHOR
                    sf.top_share AS dominant_subfield_share
             FROM per_work p
             LEFT JOIN read_parquet('{works}/*.parquet') w USING (work_idx)
+            LEFT JOIN work_authors wa USING (work_idx)
             LEFT JOIN fields f USING (work_idx)
             LEFT JOIN subfields sf USING (work_idx)
             ORDER BY p.cluster_id, p.work_idx
