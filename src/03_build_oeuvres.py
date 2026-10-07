@@ -12,7 +12,10 @@ Steps so far:
   3. acif_works_single.parquet   one row per (ACIF, work): versions (same DOI or usable normalised
                           title) reduced to the version of record, earliest year as publication_year
                           (src/oeuvre/versions.py)
-Next: evidence per (ACIF, work), decision (the person's / not), person report.
+  4. acif_work_graph.parquet     each ACIF's works joined by shared co-author / own institution /
+                          venue; connected components; anchors (ARC co-investigator co-author,
+                          grant university in grant years); the anchored core (src/oeuvre/work_graph.py)
+Next: accept / reject / unsure for works outside the core (rules, then Gemini), person report.
 
 Usage: .venv/bin/python src/03_build_oeuvres.py
 """
@@ -29,6 +32,8 @@ from config.settings import OEUVRE_DIR
 from src.oeuvre.acif_works import DOMINANT_SHARE, LINKS, accepted_links, build_acif_works, connect
 from src.oeuvre.versions import MAX_TITLE_WORKS, reduce_versions
 from src.oeuvre.work_filter import KEEP_TYPES, filter_works
+from src.oeuvre.work_graph import HYPER_AUTHORS, VENUE_MAX_WORKS, acif_inputs, build_work_graph
+from src.oeuvre.work_graph import HYPER_AUTHORS, VENUE_MAX_WORKS, acif_inputs, build_work_graph
 
 
 def acif_works_section(con, path, links: pd.DataFrame, seconds: float) -> list[str]:
@@ -156,6 +161,110 @@ def versions_section(con, counts: dict) -> list[str]:
     return L + [""]
 
 
+def graph_section(con, counts: dict) -> list[str]:
+    path = OEUVRE_DIR / "acif_work_graph.parquet"
+    con.execute(f"CREATE OR REPLACE TEMP VIEW gv AS SELECT * FROM read_parquet('{path}')")
+    q = lambda s_: con.execute(s_).fetchall()
+    one = lambda s_: con.execute(s_).fetchone()
+    n = one("SELECT count(*), count(DISTINCT cluster_id) FROM gv")
+    L = ["## Step 4: work graph and core", "",
+         f"- links (work, feature) kept: " + ", ".join(f"{k[6:]} {v:,}" for k, v in counts.items() if k.startswith("links_"))
+         + f"; co-author links only on works with < {HYPER_AUTHORS} authors; venues: no repositories or ebook "
+           f"platforms, none with > {VENUE_MAX_WORKS:,} works",
+         f"- label propagation converged in {counts['iterations']} iterations",
+         f"- (ACIF, work) rows {n[0]:,}; ACIFs {n[1]:,}", "",
+         "| work is | rows | share |", "|---|---|---|"]
+    for k, c in q("""SELECT CASE WHEN in_core THEN 'in the core' WHEN component_size = 1 THEN 'isolated (no link)'
+                     ELSE 'in another component' END, count(*) FROM gv GROUP BY 1 ORDER BY 2 DESC"""):
+        L.append(f"| {k} | {c:,} | {c / n[0]:.1%} |")
+    L += ["", "Links of works in the core (a work can have several kinds):", ""]
+    L += [f"- {k}: {c:,}" for k, c in q("""SELECT unnest(['coauthor', 'institution', 'venue']),
+          unnest([count(*) FILTER (WHERE coauthor_links > 0), count(*) FILTER (WHERE institution_links > 0),
+                  count(*) FILTER (WHERE venue_links > 0)]) FROM gv WHERE in_core""")]
+    L += ["", "Anchored works: " + ", ".join(f"{k} {c:,}" for k, c in q(
+        """SELECT unnest(['co-investigator co-author', 'grant university', 'either', 'either, outside the core']),
+                  unnest([count(*) FILTER (WHERE anchor_coinvestigator), count(*) FILTER (WHERE anchor_grant_university),
+                          count(*) FILTER (WHERE anchor_coinvestigator OR anchor_grant_university),
+                          count(*) FILTER (WHERE (anchor_coinvestigator OR anchor_grant_university) AND NOT in_core)])
+           FROM gv"""))]
+    con.execute("""CREATE OR REPLACE TEMP TABLE acs AS
+        SELECT cluster_id, count(*) n, count(*) FILTER (WHERE in_core) n_core, any_value(core_by) core_by,
+               count(DISTINCT component) n_comp, count(*) FILTER (WHERE component_size = 1) n_iso,
+               max(component_size) FILTER (WHERE NOT in_core) AS n_second, max(component_size) AS biggest
+        FROM gv GROUP BY 1""")
+    L += ["", "Per ACIF, share of works in the core:", "", "| core share | ACIFs |", "|---|---|"]
+    L += [f"| {k} | {c:,} |" for k, c in q("""SELECT CASE WHEN n_core = n THEN '100%' WHEN n_core >= 0.95 * n THEN '95-99%'
+        WHEN n_core >= 0.8 * n THEN '80-94%' WHEN n_core >= 0.5 * n THEN '50-79%' ELSE '< 50%' END k, count(*)
+        FROM acs GROUP BY 1 ORDER BY min(n_core / n) DESC""")]
+    L += ["", "- core chosen by anchors / by size: " + " / ".join(f"{c:,}" for c in one(
+        "SELECT count(*) FILTER (WHERE core_by = 'anchors'), count(*) FILTER (WHERE core_by = 'size') FROM acs")),
+          f"- core is not the largest component: {one('SELECT count(*) FROM acs WHERE n_core < biggest')[0]:,}",
+          f"- ACIFs with a second component of 5+ works and 10%+ of works (possible mixed record): "
+          f"{one('SELECT count(*) FROM acs WHERE n_second >= 5 AND n_second >= 0.1 * n')[0]:,}", "",
+          "Largest second components:", ""]
+    for r in q("""SELECT cluster_id, n, n_core, n_second, n_iso, core_by FROM acs WHERE n_second >= 5
+                  ORDER BY n_second DESC LIMIT 15"""):
+        L.append(f"- {r[0]}: {r[1]} works, core {r[2]}, second component {r[3]}, isolated {r[4]} (core by {r[5]})")
+    L += ["", "Test cases:", ""]
+    for pat in ("%_ian_white", "%_linda_graham", "%_peter_hoffmann", "%_kaile_su", "%_yasir_ali", "%_willy_susilo"):
+        for r in q(f"""SELECT cluster_id, n, n_core, n_comp, n_iso, n_second, core_by FROM acs WHERE cluster_id LIKE '{pat}'"""):
+            L.append(f"- {r[0]}: {r[1]} works, core {r[2]}, components {r[3]}, isolated {r[4]}, "
+                     f"largest other component {r[5]}, core by {r[6]}")
+    return L + [""]
+
+
+def graph_section(con, counts: dict) -> list[str]:
+    path = OEUVRE_DIR / "acif_work_graph.parquet"
+    con.execute(f"CREATE OR REPLACE TEMP VIEW gv AS SELECT * FROM read_parquet('{path}')")
+    q = lambda s_: con.execute(s_).fetchall()
+    one = lambda s_: con.execute(s_).fetchone()
+    n = one("SELECT count(*), count(DISTINCT cluster_id) FROM gv")
+    L = ["## Step 4: work graph and core", "",
+         f"- links (work, feature) kept: " + ", ".join(f"{k[6:]} {v:,}" for k, v in counts.items() if k.startswith("links_"))
+         + f"; co-author links only on works with < {HYPER_AUTHORS} authors; venues: no repositories or ebook "
+           f"platforms, none with > {VENUE_MAX_WORKS:,} works",
+         f"- label propagation converged in {counts['iterations']} iterations",
+         f"- (ACIF, work) rows {n[0]:,}; ACIFs {n[1]:,}", "",
+         "| work is | rows | share |", "|---|---|---|"]
+    for k, c in q("""SELECT CASE WHEN in_core THEN 'in the core' WHEN component_size = 1 THEN 'isolated (no link)'
+                     ELSE 'in another component' END, count(*) FROM gv GROUP BY 1 ORDER BY 2 DESC"""):
+        L.append(f"| {k} | {c:,} | {c / n[0]:.1%} |")
+    L += ["", "Links of works in the core (a work can have several kinds):", ""]
+    L += [f"- {k}: {c:,}" for k, c in q("""SELECT unnest(['coauthor', 'institution', 'venue']),
+          unnest([count(*) FILTER (WHERE coauthor_links > 0), count(*) FILTER (WHERE institution_links > 0),
+                  count(*) FILTER (WHERE venue_links > 0)]) FROM gv WHERE in_core""")]
+    L += ["", "Anchored works: " + ", ".join(f"{k} {c:,}" for k, c in q(
+        """SELECT unnest(['co-investigator co-author', 'grant university', 'either', 'either, outside the core']),
+                  unnest([count(*) FILTER (WHERE anchor_coinvestigator), count(*) FILTER (WHERE anchor_grant_university),
+                          count(*) FILTER (WHERE anchor_coinvestigator OR anchor_grant_university),
+                          count(*) FILTER (WHERE (anchor_coinvestigator OR anchor_grant_university) AND NOT in_core)])
+           FROM gv"""))]
+    con.execute("""CREATE OR REPLACE TEMP TABLE acs AS
+        SELECT cluster_id, count(*) n, count(*) FILTER (WHERE in_core) n_core, any_value(core_by) core_by,
+               count(DISTINCT component) n_comp, count(*) FILTER (WHERE component_size = 1) n_iso,
+               max(component_size) FILTER (WHERE NOT in_core) AS n_second, max(component_size) AS biggest
+        FROM gv GROUP BY 1""")
+    L += ["", "Per ACIF, share of works in the core:", "", "| core share | ACIFs |", "|---|---|"]
+    L += [f"| {k} | {c:,} |" for k, c in q("""SELECT CASE WHEN n_core = n THEN '100%' WHEN n_core >= 0.95 * n THEN '95-99%'
+        WHEN n_core >= 0.8 * n THEN '80-94%' WHEN n_core >= 0.5 * n THEN '50-79%' ELSE '< 50%' END k, count(*)
+        FROM acs GROUP BY 1 ORDER BY min(n_core / n) DESC""")]
+    L += ["", "- core chosen by anchors / by size: " + " / ".join(f"{c:,}" for c in one(
+        "SELECT count(*) FILTER (WHERE core_by = 'anchors'), count(*) FILTER (WHERE core_by = 'size') FROM acs")),
+          f"- core is not the largest component: {one('SELECT count(*) FROM acs WHERE n_core < biggest')[0]:,}",
+          f"- ACIFs with a second component of 5+ works and 10%+ of works (possible mixed record): "
+          f"{one('SELECT count(*) FROM acs WHERE n_second >= 5 AND n_second >= 0.1 * n')[0]:,}", "",
+          "Largest second components:", ""]
+    for r in q("""SELECT cluster_id, n, n_core, n_second, n_iso, core_by FROM acs WHERE n_second >= 5
+                  ORDER BY n_second DESC LIMIT 15"""):
+        L.append(f"- {r[0]}: {r[1]} works, core {r[2]}, second component {r[3]}, isolated {r[4]} (core by {r[5]})")
+    L += ["", "Test cases:", ""]
+    for pat in ("%_ian_white", "%_linda_graham", "%_peter_hoffmann", "%_kaile_su", "%_yasir_ali", "%_willy_susilo"):
+        for r in q(f"""SELECT cluster_id, n, n_core, n_comp, n_iso, n_second, core_by FROM acs WHERE cluster_id LIKE '{pat}'"""):
+            L.append(f"- {r[0]}: {r[1]} works, core {r[2]}, components {r[3]}, isolated {r[4]}, "
+                     f"largest other component {r[5]}, core by {r[6]}")
+    return L + [""]
+
+
 def main():
     OEUVRE_DIR.mkdir(parents=True, exist_ok=True)
     links = pd.read_parquet(LINKS)
@@ -166,8 +275,12 @@ def main():
     kept, dropped = filter_works(con, OEUVRE_DIR / "acif_works.parquet", OEUVRE_DIR / "acif_works_kept.parquet",
                                  OEUVRE_DIR / "work_drops.parquet")
     counts = reduce_versions(con, OEUVRE_DIR / "acif_works_kept.parquet", OEUVRE_DIR / "acif_works_single.parquet")
+    acifs, coinv = acif_inputs()
+    gcounts = build_work_graph(con, OEUVRE_DIR / "acif_works_single.parquet", OEUVRE_DIR / "acif_work_graph.parquet",
+                               acifs, coinv)
     text = "\n".join(["# Oeuvres", ""] + acif_works_section(con, OEUVRE_DIR / "acif_works.parquet", links, secs)
-                     + filter_section(con, n_in, kept, dropped) + versions_section(con, counts))
+                     + filter_section(con, n_in, kept, dropped) + versions_section(con, counts)
+                     + graph_section(con, gcounts))
     (OEUVRE_DIR / "report.md").write_text(text, encoding="utf-8")
     print(text)
 

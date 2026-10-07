@@ -43,7 +43,10 @@ src/03_build_oeuvres.py + src/oeuvre/ → the oeuvre extractor (2026-10-07), on 
                                   normalised title reduced to the version of record; publication_year
                                   = earliest version; updated editions -- same source or book chapters
                                   in different years -- kept apart; duplicate records at one source/
-                                  volume/issue/page resolved to the most cited) → processed/oeuvre/
+                                  volume/issue/page resolved to the most cited), then step 4,
+                                  acif_work_graph.parquet (works joined by shared co-author / own
+                                  institution / specific venue; components by SQL label propagation;
+                                  the core = component with most anchored works) → processed/oeuvre/
 src/utils/acif_oax_linker.py    → the OLD ARC↔OpenAlex candidate finder (with sql/01-04; reads
                                   acifs_arc.parquet); to be archived when the new linker replaces it
 ```
