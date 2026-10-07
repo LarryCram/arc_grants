@@ -46,7 +46,11 @@ src/03_build_oeuvres.py + src/oeuvre/ → the oeuvre extractor (2026-10-07), on 
                                   volume/issue/page resolved to the most cited), then step 4,
                                   acif_work_graph.parquet (works joined by shared co-author / own
                                   institution / specific venue; components by SQL label propagation;
-                                  the core = component with most anchored works) → processed/oeuvre/
+                                  the core = component with most anchored works), then step 5,
+                                  acif_works_classified.parquet (accept / reject / unsure / pending: rules,
+                                  then Gemini verdicts) → processed/oeuvre/
+src/03a_gemini_judge.py         → sends step 5's Gemini requests within a budget (GEMINI_API_KEY in
+                                  .env); answers saved once in processed/oeuvre/gemini_verdicts.jsonl
 src/utils/acif_oax_linker.py    → the OLD ARC↔OpenAlex candidate finder (with sql/01-04; reads
                                   acifs_arc.parquet); to be archived when the new linker replaces it
 ```

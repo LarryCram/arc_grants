@@ -8,33 +8,37 @@ Steps so far:
                           authors (printed name, institutions), work metadata, field weights
                           (src/oeuvre/acif_works.py)
   2. acif_works_kept.parquet / work_drops.parquet   rows dropped as paratext, retracted, a type not
-                          kept, or no institution on the work and no DOI (src/oeuvre/work_filter.py)
+                          kept, or no institution on the ACIF's own authorship and no DOI (src/oeuvre/work_filter.py)
   3. acif_works_single.parquet   one row per (ACIF, work): versions (same DOI or usable normalised
                           title) reduced to the version of record, earliest year as publication_year
                           (src/oeuvre/versions.py)
   4. acif_work_graph.parquet     each ACIF's works joined by shared co-author / own institution /
                           venue; connected components; anchors (ARC co-investigator co-author,
                           grant university in grant years); the anchored core (src/oeuvre/work_graph.py)
-Next: accept / reject / unsure for works outside the core (rules, then Gemini), person report.
+  5. acif_works_classified.parquet   accept / reject / unsure / pending per (ACIF, work): rules, then
+                          Gemini verdicts saved by src/03a_gemini_judge.py (src/oeuvre/classify.py);
+                          gemini_requests.parquet lists the requests still to send
+Next: person report.
 
-Usage: .venv/bin/python src/03_build_oeuvres.py
+Usage: .venv/bin/python src/03_build_oeuvres.py [--from-step 5]   (5: reuse steps 1-4's files)
 """
 
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pandas as pd
 
-from config.settings import OEUVRE_DIR
+from config.settings import ACIFS_ARC, OEUVRE_DIR
+from src.oeuvre import classify as cls
 from src.oeuvre.acif_works import DOMINANT_SHARE, LINKS, accepted_links, build_acif_works, connect
+from src.oeuvre.gemini import load_verdicts
 from src.oeuvre.versions import MAX_TITLE_WORKS, reduce_versions
 from src.oeuvre.work_filter import KEEP_TYPES, filter_works
 from src.oeuvre.work_graph import HYPER_AUTHORS, VENUE_MAX_WORKS, acif_inputs, build_work_graph
-from src.oeuvre.work_graph import HYPER_AUTHORS, VENUE_MAX_WORKS, acif_inputs, build_work_graph
-
 
 def acif_works_section(con, path, links: pd.DataFrame, seconds: float) -> list[str]:
     acc = accepted_links(links)
@@ -265,10 +269,58 @@ def graph_section(con, counts: dict) -> list[str]:
     return L + [""]
 
 
+def classify_section(con, req: pd.DataFrame, verdicts: dict) -> list[str]:
+    path = OEUVRE_DIR / "acif_works_classified.parquet"
+    con.execute(f"CREATE OR REPLACE TEMP VIEW kv AS SELECT * FROM read_parquet('{path}')")
+    q = lambda s_: con.execute(s_).fetchall()
+    n = con.execute("SELECT count(*) FROM kv").fetchone()[0]
+    L = ["## Step 5: accept / reject / unsure", "",
+         f"Rules: pre-career {cls.PRE_CAREER} years; namesake component = {cls.BIG_COMPONENT}+ works, "
+         f">= {cls.SAME_YEARS:.0%} in the core's years, field cosine < {cls.SIMILAR_FIELD}; fits core = core field "
+         f"(>= {cls.FIELD_MIN_SHARE:.0%} of core works) or unknown, within {cls.FIT_PAD} years of the core.", "",
+         "| decision | rule | decided by | rows | share |", "|---|---|---|---|---|"]
+    for d, r, b, c in q("SELECT decision, rule, coalesce(decided_by, '-'), count(*) FROM kv GROUP BY ALL ORDER BY 1, 4 DESC"):
+        L.append(f"| {d} | {r} | {b} | {c:,} | {c / n:.2%} |")
+    L += ["", "| decision | rows |", "|---|---|"]
+    L += [f"| {d} | {c:,} |" for d, c in q("SELECT decision, count(*) FROM kv GROUP BY 1 ORDER BY 2 DESC")]
+    answered = req.request_key.isin(set(verdicts))
+    L += ["", "Gemini requests:", "", "| kind | requests | answered | works in them | est. input tokens of unanswered |",
+          "|---|---|---|---|---|"]
+    for k, sub in req.groupby("kind"):
+        a = sub.request_key.isin(set(verdicts))
+        L.append(f"| {k} | {len(sub):,} | {int(a.sum()):,} | {int(sub.work_idxs.map(len).sum()):,} | "
+                 f"{int(sub.loc[~a, 'prompt'].str.len().sum() / 4):,} |")
+    used = [v for v in verdicts.values()]
+    if used:
+        L += ["", f"Gemini calls saved: {len(used):,}; input tokens {sum(v['input_tokens'] or 0 for v in used):,}; "
+              f"output tokens {sum(v['output_tokens'] or 0 for v in used):,}; unparsed answers "
+              f"{sum(v['answer'] is None for v in used):,}", "", "Component verdicts:", ""]
+        comp = [v for v in used if v["kind"] == "component" and isinstance(v["answer"], dict)]
+        L += [f"- {k}: {c}" for k, c in Counter((v["answer"].get("verdict"), v["answer"].get("confidence")) for v in comp).most_common()]
+        L += ["", "Examples:", ""]
+        rk = req.set_index("request_key")
+        for v in comp[:40]:
+            r = rk.loc[v["request_key"]] if v["request_key"] in rk.index else None
+            n_w = len(r.work_idxs) if r is not None else "?"
+            L.append(f"- {v['cluster_id']} ({n_w} works): {v['answer'].get('verdict')} / {v['answer'].get('confidence')} -- "
+                     f"{v['answer'].get('reason')}")
+    return L + [""]
+
+
 def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--from-step", type=int, default=1, choices=[1, 5])
+    args = ap.parse_args()
     OEUVRE_DIR.mkdir(parents=True, exist_ok=True)
-    links = pd.read_parquet(LINKS)
     con = connect()
+    if args.from_step == 5:
+        old = (OEUVRE_DIR / "report.md").read_text(encoding="utf-8").split("## Step 5")[0].rstrip("\n").split("\n")
+        text = "\n".join(old + [""] + step5(con))
+        (OEUVRE_DIR / "report.md").write_text(text, encoding="utf-8")
+        print("\n".join(step5_lines_cache))
+        return
+    links = pd.read_parquet(LINKS)
     t = time.time()
     n_in = build_acif_works(links, OEUVRE_DIR / "acif_works.parquet", con)
     secs = time.time() - t
@@ -280,9 +332,23 @@ def main():
                                acifs, coinv)
     text = "\n".join(["# Oeuvres", ""] + acif_works_section(con, OEUVRE_DIR / "acif_works.parquet", links, secs)
                      + filter_section(con, n_in, kept, dropped) + versions_section(con, counts)
-                     + graph_section(con, gcounts))
+                     + graph_section(con, gcounts) + step5(con))
     (OEUVRE_DIR / "report.md").write_text(text, encoding="utf-8")
     print(text)
+
+
+step5_lines_cache: list[str] = []
+
+
+def step5(con) -> list[str]:
+    acifs_full = pd.read_parquet(ACIFS_ARC)
+    verdicts = load_verdicts(OEUVRE_DIR / "gemini_verdicts.jsonl")
+    req = cls.classify(con, OEUVRE_DIR / "acif_works_single.parquet", OEUVRE_DIR / "acif_work_graph.parquet",
+                       acifs_full, verdicts, OEUVRE_DIR / "acif_works_classified.parquet",
+                       OEUVRE_DIR / "gemini_requests.parquet")
+    lines = classify_section(con, req, verdicts)
+    step5_lines_cache[:] = lines
+    return lines
 
 
 if __name__ == "__main__":
