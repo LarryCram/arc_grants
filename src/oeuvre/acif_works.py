@@ -15,7 +15,7 @@ Per row:
                 author on the work (almost always one); printed_name is the author name as printed
                 on that paper; institutions is a list of {institution_idx, name, country}
   work metadata doi, title, publication_year, type, authors_count, cited_by_count, is_retracted,
-                is_paratext, source_id (the journal/book/repository)
+                is_paratext, source_id (the journal/book/repository), volume, issue, first_page
   work_authors / work_authors_with_institution
                 distinct authors on the whole work, and how many of them have an institution
                 (all authorships of the work, not only the ACIF's)
@@ -97,7 +97,7 @@ def build_acif_works(links: pd.DataFrame, out_path, con=None, authorships=AUTHOR
         COPY (
             SELECT p.cluster_id, p.work_idx, p.authorships,
                    w.doi, w.title, w.publication_year, w.type, w.authors_count, w.cited_by_count,
-                   w.is_retracted, w.is_paratext, w.source_id,
+                   w.is_retracted, w.is_paratext, w.source_id, w.volume, w.issue, w.first_page,
                    wa.work_authors, wa.work_authors_with_institution,
                    f.fields,
                    CASE WHEN f.top_share > {DOMINANT_SHARE} THEN f.top END AS dominant_field,

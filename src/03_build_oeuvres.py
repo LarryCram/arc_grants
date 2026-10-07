@@ -112,6 +112,10 @@ def versions_section(con, counts: dict) -> list[str]:
          f"- rows in {counts['rows_in']:,}; works out {counts['rows_out']:,}; works with 2+ versions "
          f"{counts['groups']:,} (rows merged away: {counts['rows_in'] - counts['rows_out']:,})",
          f"- titles refused as generic (held by more than {MAX_TITLE_WORKS} distinct works): {counts['titles_refused']:,}",
+         f"- version groups split into editions (same source, or book chapters, in different years): "
+         f"{counts['split_groups']:,}; editions out: " + f"{one('SELECT count(*) FROM sv WHERE edition_year IS NOT NULL')[0]:,}",
+         f"- duplicate records (same source, volume, issue, first page) resolved to the most cited: "
+         f"{counts['duplicate_places']:,}",
          "- ACIFs / distinct work_idx out: " + " / ".join(f"{x:,}" for x in one(
              "SELECT count(DISTINCT cluster_id), count(DISTINCT work_idx) FROM sv")), "",
          "| versions | works |", "|---|---|"]
@@ -142,6 +146,13 @@ def versions_section(con, counts: dict) -> list[str]:
     L += show(multi, 10)
     L += ["", "Examples, versions 10+ years apart:", ""] + show(f"{multi} AND vor_publication_year - publication_year >= 10", 6)
     L += ["", "Examples, 5+ versions:", ""] + show("n_versions >= 5", 4)
+    L += ["", "| editions in the group | type of record | works |", "|---|---|---|"]
+    L += [f"| {n} | {t_} | {c:,} |" for n, t_, c in q(
+        "SELECT least(n_editions, 5), type, count(*) FROM sv WHERE n_editions > 1 GROUP BY 1, 2 ORDER BY 1, 3 DESC")]
+    L += ["", "Examples, editions (one line per edition):", ""]
+    for g in con.execute("SELECT DISTINCT cluster_id, version_group FROM sv WHERE n_editions > 1 "
+                         "ORDER BY hash(cluster_id || version_group) LIMIT 6").fetchall():
+        L += show(f"cluster_id = '{g[0]}' AND version_group = {g[1]}", 10)
     return L + [""]
 
 

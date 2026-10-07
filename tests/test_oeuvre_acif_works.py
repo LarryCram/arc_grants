@@ -90,7 +90,8 @@ def test_reduce_versions(tmp_path):
                  ).to_parquet(tmp_path / "s.parquet")
     T = "A long enough title about lentils"
     r = lambda w, **k: dict(dict(cluster_id="C1", work_idx=w, doi=None, title=T, publication_year=2010,
-                                 type="article", cited_by_count=1, source_id=1), **k)
+                                 type="article", cited_by_count=1, source_id=1, volume=None, issue=None,
+                                 first_page=None), **k)
     rows = [r(1, type="preprint", publication_year=2008, source_id=2, cited_by_count=3, doi="10.48550/x"),
             r(2, cited_by_count=10, doi="10.1/a"),                        # version of record (journal article)
             r(3, title="Something else entirely, long", doi="10.1/A"),    # same DOI as 2 (case): chained in
@@ -109,3 +110,32 @@ def test_reduce_versions(tmp_path):
     assert [x["work_idx"] for x in vor.versions][0] == 2
     assert ("C2", 5) in v.index and ("C1", 6) in v.index and ("C1", 7) in v.index    # generic title not linked
     assert n["titles_refused"] == 1
+
+
+def test_editions_and_duplicate_records(tmp_path):
+    from src.oeuvre.versions import reduce_versions
+    pd.DataFrame([{"source_idx": 1, "type": "journal"}, {"source_idx": 2, "type": "repository"}]
+                 ).to_parquet(tmp_path / "s.parquet")
+    r = lambda w, **k: dict(dict(cluster_id="C1", work_idx=w, doi=f"10.1/{w}", title="A long title for a review update",
+                                 publication_year=2010, type="review", cited_by_count=1, source_id=1, volume=None,
+                                 issue=None, first_page=None), **k)
+    rows = [r(1, publication_year=2012, issue="4", first_page="CD1"),           # edition 2012
+            r(2, publication_year=2016, issue="9", first_page="CD1"),           # edition 2016 (same source)
+            r(3, publication_year=2017, type="preprint", source_id=2),          # joins the 2016 edition
+            # duplicate records of one article: same source/volume/issue/page, years 2004/2005
+            r(10, title="Another title, long enough here", type="article", publication_year=2004, volume="49",
+              issue="1", first_page="46", cited_by_count=120),
+            r(11, title="Another title, long enough here", type="article", publication_year=2005, volume="49",
+              issue="1", first_page="46", cited_by_count=7),
+            # conference paper (no source) then journal version: one work
+            r(20, title="A conference paper became a journal paper", type="article", source_id=None, publication_year=2016),
+            r(21, title="A conference paper became a journal paper", type="article", publication_year=2017, first_page="9")]
+    pd.DataFrame(rows).to_parquet(tmp_path / "k.parquet")
+    n = reduce_versions(connect(), tmp_path / "k.parquet", tmp_path / "v.parquet", sources=tmp_path / "s.parquet")
+    v = pd.read_parquet(tmp_path / "v.parquet").set_index("work_idx")
+    assert sorted(v.index) == [1, 2, 10, 21]
+    assert v.loc[2, "edition_year"] == 2016 and v.loc[2, "n_editions"] == 2 and v.loc[2, "n_versions"] == 2
+    assert v.loc[1, "edition_year"] == 2012 and v.loc[1, "version_group"] == v.loc[2, "version_group"]
+    assert v.loc[10, "cited_by_count"] == 120 and v.loc[10, "publication_year"] == 2004   # dupe: most cited wins
+    assert pd.isna(v.loc[21, "edition_year"]) and v.loc[21, "n_editions"] == 1 and v.loc[21, "publication_year"] == 2016
+    assert n["split_groups"] == 1 and n["duplicate_places"] == 1

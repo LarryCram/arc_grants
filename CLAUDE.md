@@ -41,7 +41,9 @@ src/03_build_oeuvres.py + src/oeuvre/ → the oeuvre extractor (2026-10-07), on 
                                   ACIF's own authorship has no institution and no DOI), then step 3,
                                   acif_works_single.parquet (versions sharing a DOI or a usable
                                   normalised title reduced to the version of record; publication_year
-                                  = earliest version) → processed/oeuvre/
+                                  = earliest version; updated editions -- same source or book chapters
+                                  in different years -- kept apart; duplicate records at one source/
+                                  volume/issue/page resolved to the most cited) → processed/oeuvre/
 src/utils/acif_oax_linker.py    → the OLD ARC↔OpenAlex candidate finder (with sql/01-04; reads
                                   acifs_arc.parquet); to be archived when the new linker replaces it
 ```
