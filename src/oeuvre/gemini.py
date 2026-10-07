@@ -2,7 +2,9 @@
 Gemini calls for step 5 of the oeuvre extractor (2026-10-07): each request in
 processed/oeuvre/gemini_requests.parquet (written by src/oeuvre/classify.py) is sent once; the
 answer is appended to gemini_verdicts.jsonl with its token counts and model version, and is never
-sent again. A run stops cleanly at its budget (calls and input tokens). The key is GEMINI_API_KEY
+sent again. A run stops cleanly at its budget (calls and input tokens) or when the model's daily request
+quota is used up (10,000 requests per day for gemini-3.8-flash on this project, 2026-10-08); an
+answer that could not be parsed as JSON is sent again on the next run. The key is GEMINI_API_KEY
 in .env (a Google AI Studio key: billed to its Cloud project, or free tier; separate from any Gemini
 app subscription).
 """
@@ -39,8 +41,8 @@ def run(requests, verdicts_path, max_calls: int, max_input_tokens: int, model: s
 
     load_dotenv()
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    done = load_verdicts(verdicts_path)
-    todo = requests[~requests.request_key.isin(set(done))].copy()
+    done = {k for k, v in load_verdicts(verdicts_path).items() if v["answer"] is not None}  # unparsed: resend
+    todo = requests[~requests.request_key.isin(done)].copy()
     if kinds:
         todo = todo[todo.kind.isin(kinds)]
     todo["_o"] = [hash_key(k + order_seed) for k in todo.request_key]
@@ -50,6 +52,8 @@ def run(requests, verdicts_path, max_calls: int, max_input_tokens: int, model: s
 
     def one(r):
         with lock:
+            if tot["stopped_by"]:
+                return
             if tot["calls"] >= max_calls:
                 tot["stopped_by"] = "max_calls"
                 return
@@ -83,6 +87,12 @@ def run(requests, verdicts_path, max_calls: int, max_input_tokens: int, model: s
                     tot["thinking_tokens"] += getattr(u, "thoughts_token_count", None) or 0
                 return
             except Exception as e:  # rate limits and transient errors: back off and retry
+                if "per_day" in str(e) or "PerDay" in str(e):  # daily quota used up: stop the whole run
+                    with lock:
+                        tot["stopped_by"] = "daily quota"
+                        tot["calls"] -= 1
+                    print(f"daily quota reached: {str(e)[:300]}")
+                    return
                 if attempt == 4:
                     with lock:
                         tot["errors"] += 1
