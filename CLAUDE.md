@@ -47,7 +47,8 @@ src/03_build_oeuvres.py + src/oeuvre/ → the oeuvre extractor (2026-10-07), on 
                                   acif_work_graph.parquet (works joined by shared co-author / own
                                   institution / specific venue; components by SQL label propagation;
                                   the core = component with most anchored works), then step 5,
-                                  acif_works_classified.parquet (accept / reject / unsure / pending: rules,
+                                  acif_works_classified.parquet (accept / reject / unsure / pending:
+                                  reference-work entries collapsed to one per book, then rules,
                                   then Gemini verdicts) → processed/oeuvre/
 src/03a_gemini_judge.py         → sends step 5's Gemini requests within a budget (GEMINI_API_KEY in
                                   .env); answers saved once in processed/oeuvre/gemini_verdicts.jsonl

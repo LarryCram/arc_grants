@@ -4,7 +4,18 @@ unsure, accepting liberally. Rules settle most works; the doubtful remainder bec
 Gemini (src/oeuvre/gemini.py, run separately with a budget by src/03a_gemini_judge.py), whose saved
 verdicts are applied here on the next run. Until a request is answered its works are 'pending'.
 
-Rules, in order (the core and components come from step 4, acif_work_graph.parquet):
+Reference-work entries first (2026-10-08, user): OpenAlex sometimes gives every chapter of a
+reference work (an encyclopedia) the whole book's contributor list, so a person who wrote one entry
+holds hundreds. A book chapter is such an entry when it has REF_AUTHORS+ authors, or REF_AUTHORS_MULTI+
+authors and the ACIF holds REF_SAME_BOOK+ such chapters of the same book (the book is the ISBN in the
+DOI). Below 20 authors chapters are claimed on people's ORCID lists as often as small ones (2026-10-08).
+  accept  'reference work: on ORCID list'  the entry's DOI is on the person's own ORCID record
+  accept  'reference work: one per book'   otherwise one entry per (ACIF, book) stands for the
+                                            contribution (lowest work_idx; its title is not
+                                            necessarily the person's entry)
+  reject  'reference work: collapsed'      the other entries of that book
+
+Then, in order (the core and components come from step 4, acif_work_graph.parquet):
   accept  'core'                works in the ACIF's anchored core
   accept  'anchored component'  another component holding an anchored work
   reject  'before career'       published more than PRE_CAREER years before both the first grant
@@ -20,7 +31,8 @@ Rules, in order (the core and components come from step 4, acif_work_graph.parqu
                                 FIT_PAD years of the core's years
   request 'works'               the rest, sent per ACIF as lists of up to MAX_WORKS_PER_REQUEST works
 Gemini verdicts: component 'same' -> accept, works 'in' -> accept; 'different' / 'out' with high
-confidence -> reject; anything else -> unsure.
+confidence -> reject; anything else -> unsure. Per-work verdicts are kept per (ACIF, work): a work
+already judged is not sent again even if the candidate list around it changes.
 """
 
 from __future__ import annotations
@@ -41,6 +53,9 @@ SAME_YEARS = 0.5
 SIMILAR_FIELD = 0.5
 PROMPT_VERSION = "2026-10-07a"
 MAX_LIST = 10
+REF_AUTHORS = 50
+REF_AUTHORS_MULTI = 20
+REF_SAME_BOOK = 3
 MAX_WORKS_PER_REQUEST = 40
 
 COMPONENT_PROMPT = """You are checking whether two groups of publications belong to the same researcher.
@@ -97,7 +112,7 @@ def _rules(con, works_path, graph_path) -> None:
     """Temp table cls: one row per (ACIF, work) with rule decision or request kind."""
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE cw AS
-        SELECT g.*, w.publication_year AS y, w.fields[1].name AS top_field, w.title, w.type, w.source_id,
+        SELECT g.*, w.publication_year AS y, w.fields[1].name AS top_field, w.title, w.type, w.source_id, w.doi,
                w.authors_count, w.cited_by_count, w.authorships, a.first_year
         FROM read_parquet('{graph_path}') g JOIN read_parquet('{works_path}') w USING (cluster_id, work_idx)
         JOIN acif_in a USING (cluster_id)""")
@@ -124,7 +139,23 @@ def _rules(con, works_path, graph_path) -> None:
                any_value(coalesce(cos.field_cos, 0)) AS field_cos
         FROM big b JOIN core_stats s USING (cluster_id) LEFT JOIN cos USING (cluster_id, component) GROUP BY 1, 2""")
     con.execute(f"""
-        CREATE OR REPLACE TEMP TABLE cls AS
+        CREATE OR REPLACE TEMP TABLE ref AS
+        WITH ch AS (SELECT cluster_id, work_idx, authors_count,
+                           replace(regexp_extract(doi, '(97[89][0-9-]{{10,14}})', 1), '-', '') AS isbn,
+                           EXISTS (SELECT 1 FROM orcid_dois o WHERE o.cluster_id = cw.cluster_id
+                                   AND o.doi = lower(cw.doi)) AS on_orcid
+                    FROM cw WHERE type = 'book-chapter' AND doi IS NOT NULL AND authors_count >= {REF_AUTHORS_MULTI}),
+             ch2 AS (SELECT *, count(*) OVER (PARTITION BY cluster_id, isbn) AS same_book FROM ch WHERE isbn <> ''),
+             r AS (SELECT * FROM ch2 WHERE authors_count >= {REF_AUTHORS} OR same_book >= {REF_SAME_BOOK})
+        SELECT cluster_id, work_idx,
+               CASE WHEN on_orcid THEN 'reference work: on ORCID list'
+                    WHEN NOT bool_or(on_orcid) OVER (PARTITION BY cluster_id, isbn)
+                         AND work_idx = min(work_idx) FILTER (WHERE NOT on_orcid) OVER (PARTITION BY cluster_id, isbn)
+                    THEN 'reference work: one per book'
+                    ELSE 'reference work: collapsed' END AS ref_rule
+        FROM r""")
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE cls0 AS
         SELECT cw.cluster_id, cw.work_idx, cw.component,
             CASE WHEN in_core THEN 'accept'
                  WHEN component_anchored > 0 THEN 'accept'
@@ -144,6 +175,13 @@ def _rules(con, works_path, graph_path) -> None:
                  ELSE 'works' END AS rule
         FROM cw LEFT JOIN core_stats s USING (cluster_id) LEFT JOIN comp_stats c USING (cluster_id, component)
         LEFT JOIN core_fields f ON f.cluster_id = cw.cluster_id AND f.top_field = cw.top_field""")
+    con.execute("""
+        CREATE OR REPLACE TEMP TABLE cls AS
+        SELECT c.cluster_id, c.work_idx, c.component,
+               CASE WHEN ref.ref_rule IS NULL THEN c.rule_decision
+                    WHEN ref.ref_rule = 'reference work: collapsed' THEN 'reject' ELSE 'accept' END AS rule_decision,
+               coalesce(ref.ref_rule, c.rule) AS rule
+        FROM cls0 c LEFT JOIN ref USING (cluster_id, work_idx)""")
 
 
 def _request_key(kind: str, cluster_id: str, items: list[int]) -> str:
@@ -158,7 +196,12 @@ def requests_table(con) -> pd.DataFrame:
                list(work_idx ORDER BY work_idx) AS work_idxs
         FROM (SELECT *, CASE WHEN rule = 'works' THEN (row_number() OVER (PARTITION BY cluster_id, rule ORDER BY work_idx) - 1)
                                                        // {MAX_WORKS_PER_REQUEST} END AS chunk
-              FROM cls WHERE rule_decision = 'request')
+              -- components as the graph made them (cls0), so a rule that overrides single works never changes
+              -- a component's request key; works only if still requested and not judged already
+              FROM (SELECT cluster_id, work_idx, component, rule FROM cls0 WHERE rule = 'component'
+                    UNION ALL
+                    SELECT cluster_id, work_idx, component, rule FROM cls WHERE rule = 'works'
+                      AND (cluster_id, work_idx) NOT IN (SELECT (cluster_id, work_idx) FROM saved_works)))
         GROUP BY rule, cluster_id, CASE WHEN rule = 'component' THEN component END, chunk""").fetchdf()
     r["request_key"] = [_request_key(k, c, list(w)) for k, c, w in zip(r.kind, r.cluster_id, r.work_idxs)]
     return r
@@ -233,26 +276,36 @@ def build_prompts(con, req: pd.DataFrame, acifs_full: pd.DataFrame) -> pd.DataFr
     return req.assign(prompt=prompts, id_order=orders)
 
 
-def apply_verdicts(con, verdicts: pd.DataFrame, req: pd.DataFrame, out_path) -> None:
+def saved_work_verdicts(verdicts: dict) -> pd.DataFrame:
+    """(cluster_id, work_idx, g_decision, g_reason) from every saved per-work answer (later answers win)."""
+    rows = {}
+    for v in verdicts.values():
+        if v.get("kind") != "works" or not isinstance(v.get("answer"), list):
+            continue
+        ans = {x.get("id"): x for x in v["answer"] if isinstance(x, dict)}
+        for k, w in enumerate(v["id_order"], 1):
+            x = ans.get(k, {})
+            dec = {"in": "accept"}.get(x.get("verdict"), "reject" if x.get("verdict") == "out"
+                                       and x.get("confidence") == "high" else "unsure")
+            rows[(v["cluster_id"], int(w))] = (dec, x.get("reason"))
+    return pd.DataFrame([(c, w, d, r) for (c, w), (d, r) in rows.items()],
+                        columns=["cluster_id", "work_idx", "g_decision", "g_reason"])
+
+
+def apply_verdicts(con, verdicts: dict, req: pd.DataFrame, out_path) -> None:
     """Write the classed works: decision accept/reject/unsure/pending, decided_by, reason."""
     rows = []
-    for r in req.itertuples():
+    for r in req[req.kind == "component"].itertuples():
         v = verdicts.get(r.request_key)
-        if v is None:
+        if v is None or not isinstance(v.get("answer"), dict):
             continue
-        if r.kind == "component":
-            d = v["answer"] if isinstance(v["answer"], dict) else {}
-            dec = {"same": "accept"}.get(d.get("verdict"), "reject" if d.get("verdict") == "different"
-                                         and d.get("confidence") == "high" else "unsure")
-            rows += [(r.cluster_id, w, dec, d.get("reason")) for w in r.work_idxs]
-        else:
-            ans = {x.get("id"): x for x in (v["answer"] if isinstance(v["answer"], list) else [])}
-            for k, w in enumerate(v["id_order"], 1):
-                x = ans.get(k, {})
-                dec = {"in": "accept"}.get(x.get("verdict"), "reject" if x.get("verdict") == "out"
-                                           and x.get("confidence") == "high" else "unsure")
-                rows.append((r.cluster_id, w, dec, x.get("reason")))
-    con.register("gv_in", pd.DataFrame(rows, columns=["cluster_id", "work_idx", "g_decision", "g_reason"]))
+        d = v["answer"]
+        dec = {"same": "accept"}.get(d.get("verdict"), "reject" if d.get("verdict") == "different"
+                                     and d.get("confidence") == "high" else "unsure")
+        rows += [(r.cluster_id, int(w), dec, d.get("reason")) for w in r.work_idxs]
+    g = pd.concat([pd.DataFrame(rows, columns=["cluster_id", "work_idx", "g_decision", "g_reason"]),
+                   saved_work_verdicts(verdicts)], ignore_index=True)
+    con.register("gv_in", g)
     con.execute(f"""
         COPY (
             SELECT cls.cluster_id, cls.work_idx, cls.component, cls.rule,
@@ -260,15 +313,22 @@ def apply_verdicts(con, verdicts: pd.DataFrame, req: pd.DataFrame, out_path) -> 
                         ELSE coalesce(g.g_decision, 'pending') END AS decision,
                    CASE WHEN cls.rule_decision <> 'request' THEN 'rule'
                         WHEN g.g_decision IS NOT NULL THEN 'gemini' END AS decided_by,
-                   g.g_reason AS reason
-            FROM cls LEFT JOIN gv_in g USING (cluster_id, work_idx)
+                   CASE WHEN cls.rule_decision = 'request' THEN g.g_reason END AS reason
+            FROM cls LEFT JOIN (SELECT DISTINCT ON (cluster_id, work_idx) * FROM gv_in) g USING (cluster_id, work_idx)
             ORDER BY cls.cluster_id, cls.work_idx
         ) TO '{out_path}' (FORMAT parquet)""")
 
 
-def classify(con, works_path, graph_path, acifs_full: pd.DataFrame, verdicts: dict, out_path, requests_path) -> pd.DataFrame:
-    """Run the rules, write the Gemini requests (with prompts) and the classed works; returns requests."""
+def classify(con, works_path, graph_path, acifs_full: pd.DataFrame, verdicts: dict, out_path, requests_path,
+             orcid_dois: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Run the rules, write the Gemini requests (with prompts) and the classed works; returns requests.
+    orcid_dois: (cluster_id, doi) on the people's own ORCID records (src/oeuvre/orcid_works.py)."""
     con.register("acif_in", acifs_full[["cluster_id", "first_year"]])
+    con.register("orcid_dois", orcid_dois if orcid_dois is not None
+                 else pd.DataFrame({"cluster_id": pd.Series(dtype=str), "doi": pd.Series(dtype=str)}))
+    sw = saved_work_verdicts(verdicts)[["cluster_id", "work_idx"]]
+    con.register("saved_works", sw.astype({"work_idx": "int64"}) if len(sw) else
+                 pd.DataFrame({"cluster_id": pd.Series(dtype=str), "work_idx": pd.Series(dtype="int64")}))
     _rules(con, works_path, graph_path)
     req = requests_table(con)
     req = build_prompts(con, req, acifs_full) if len(req) else req.assign(prompt=[], id_order=[])

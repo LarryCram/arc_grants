@@ -36,6 +36,7 @@ from config.settings import ACIFS_ARC, OEUVRE_DIR
 from src.oeuvre import classify as cls
 from src.oeuvre.acif_works import DOMINANT_SHARE, LINKS, accepted_links, build_acif_works, connect
 from src.oeuvre.gemini import load_verdicts
+from src.oeuvre.orcid_works import claimed_dois
 from src.oeuvre.versions import MAX_TITLE_WORKS, reduce_versions
 from src.oeuvre.work_filter import KEEP_TYPES, filter_works
 from src.oeuvre.work_graph import HYPER_AUTHORS, VENUE_MAX_WORKS, acif_inputs, build_work_graph
@@ -283,9 +284,10 @@ def classify_section(con, req: pd.DataFrame, verdicts: dict) -> list[str]:
         L.append(f"| {d} | {r} | {b} | {c:,} | {c / n:.2%} |")
     L += ["", "| decision | rows |", "|---|---|"]
     L += [f"| {d} | {c:,} |" for d, c in q("SELECT decision, count(*) FROM kv GROUP BY 1 ORDER BY 2 DESC")]
-    answered = req.request_key.isin(set(verdicts))
-    L += ["", "Gemini requests:", "", "| kind | requests | answered | works in them | est. input tokens of unanswered |",
-          "|---|---|---|---|---|"]
+    L += ["", f"Reference-work entries: {cls.REF_AUTHORS}+ authors, or {cls.REF_AUTHORS_MULTI}+ with "
+              f"{cls.REF_SAME_BOOK}+ chapters of one book held by the ACIF (book = ISBN in the DOI).", "",
+          "Gemini requests (works already judged are not re-sent; their verdicts are applied per work):", "",
+          "| kind | requests | answered | works in them | est. input tokens of unanswered |", "|---|---|---|---|---|"]
     for k, sub in req.groupby("kind"):
         a = sub.request_key.isin(set(verdicts))
         L.append(f"| {k} | {len(sub):,} | {int(a.sum()):,} | {int(sub.work_idxs.map(len).sum()):,} | "
@@ -345,7 +347,7 @@ def step5(con) -> list[str]:
     verdicts = load_verdicts(OEUVRE_DIR / "gemini_verdicts.jsonl")
     req = cls.classify(con, OEUVRE_DIR / "acif_works_single.parquet", OEUVRE_DIR / "acif_work_graph.parquet",
                        acifs_full, verdicts, OEUVRE_DIR / "acif_works_classified.parquet",
-                       OEUVRE_DIR / "gemini_requests.parquet")
+                       OEUVRE_DIR / "gemini_requests.parquet", orcid_dois=claimed_dois(acifs_full))
     lines = classify_section(con, req, verdicts)
     step5_lines_cache[:] = lines
     return lines
