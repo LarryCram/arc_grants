@@ -31,7 +31,11 @@ src/01_build_arc_acifs.py       → the ARC-stage list of people: acifs_arc.parq
                                   ACIF), acif_arc_records.parquet (record → ACIF),
                                   acif_arc_name_groups.parquet, acif_arc_build_report.md
 src/02_link_arc_oax.py + src/oax/ → the NEW ARC↔OpenAlex linker, built one stage at a time
-                                  (2026-10-06): so far stage 1, ORCID links → processed/oax_link/
+                                  (2026-10-06): stage 1, ORCID links; stage 2 (2026-10-08), name +
+                                  institution-in-time (src/oax/name_link.py: main name, else a not-
+                                  incompatible first given name; 2+ OpenAlex affiliation years at a
+                                  single-institution grant university, award -1..+3; exactly one passes)
+                                  → processed/oax_link/ (`--calibrate` scores stage 2 on ORCID-linked ACIFs)
 src/03_build_oeuvres.py + src/oeuvre/ → the oeuvre extractor (2026-10-07), on stage-1 accepted
                                   links: so far step 1, acif_works.parquet (one row per ACIF x work:
                                   authorships through the ACIF's linked authors, work metadata,

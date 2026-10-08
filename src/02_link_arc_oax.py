@@ -8,12 +8,18 @@ Stages so far:
      (in_pool=False) -- less the links refused in data_persisted/oax_link_overrides.csv; each
      link gets a name_relation and a status (accept_* / review_* / reject_unrelated; see
      src/oax/orcid_link.py).
+  2. Name + institution-in-time links (src/oax/name_link.py), for kept ACIFs stage 1 did not link:
+     candidates sharing a full given name (then, only if none passes, a not-incompatible name) whose
+     OpenAlex affiliations show 2+ years at a single-institution grant university near the grant;
+     accepted when exactly one passes.
 
 Inputs: acifs_arc.parquet (src/01_build_arc_acifs.py), openalex_authors_prep.parquet (00b).
 Outputs (OAX_LINK_DIR = processed/oax_link/):
     orcid_links.parquet       one row per (ACIF, author) sharing an ORCID: in_pool, name_relation, status
     orcid_rejected.parquet    links refused by hand (oax_link_overrides.csv), with the reason
     orcid_unmatched.parquet   ACIFs with an ORCID and no candidate link
+    name_links.parquet        stage 2: every name candidate with tier, years at a grant university, passes
+    name_decisions.parquet    stage 2: one row per ACIF not linked by stage 1 (status, tier, author_idx)
     report.md                 statistics and examples per stage
 
 Usage: .venv/bin/python src/02_link_arc_oax.py
@@ -25,9 +31,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import duckdb
 import pandas as pd
 
-from config.settings import OAX_LINK_DIR
+from config.settings import DUCKDB_TMP_DIR, OAX_LINK_DIR
+from src.oax.name_link import (MIN_YEARS, WINDOW_AFTER, WINDOW_BEFORE, acif_main_keys, calibrate, name_links,
+                                single_institution_windows)
 from src.oax.orcid_link import (MINOR_SHARE, apply_overrides, decide, load_acifs, load_authors,
                                 load_name_evidence, load_outside_authors, load_overrides, orcid_links,
                                 shared_orcids, unmatched)
@@ -125,7 +134,57 @@ def orcid_section(acifs, links, miss, rejected, shared) -> list[str]:
     return L + [""]
 
 
+def calibration_section(cal: dict) -> list[str]:
+    n = cal["acifs"]
+    return ["### Stage 2 calibration on ORCID-linked ACIFs (true record known, nothing taken)", "",
+            f"- testable ACIFs: {n:,}; only the correct record passes {cal['only_correct'] / n:.1%}; correct and another "
+            f"{cal['correct_and_other'] / n:.1%}; only others {cal['only_others'] / n:.1%}",
+            f"- accepted by the rule: {cal['accepted']:,}; of which the ORCID-linked record: {cal['accepted_correct']:,} "
+            f"({cal['accepted_correct'] / max(cal['accepted'], 1):.1%})", ""]
+
+
+def name_section(acifs, pairs, dec) -> list[str]:
+    a = acifs.set_index("cluster_id")
+    d = dec.join(a[["full_names", "last_year", "full_name_keys"]], on="cluster_id")
+    d["era"] = d.last_year.map(lambda y: "last grant < 2015" if y < 2015 else "last grant >= 2015")
+    d["initial_only"] = d.full_name_keys.map(lambda ks: all(len(k.split("_", 1)[0]) <= 1 for k in ks))
+    L = ["## Stage 2: name + institution-in-time links", "",
+         f"Rule: a candidate shares a main name (first given + family) with the ACIF (or, only if no such candidate "
+         f"passes, a not-incompatible first given name: equal, or one an initial of the other); it passes when its OpenAlex affiliations show >= {MIN_YEARS} distinct years at a "
+         f"single-institution grant university, from {WINDOW_BEFORE} year before to {WINDOW_AFTER} after the "
+         f"grant's commencement; the ACIF is linked when exactly one candidate passes.", "",
+         f"- ACIFs not linked by stage 1: {len(dec):,}; candidate pairs: {len(pairs):,}; passing: {int(pairs.passes.sum()):,}",
+         f"- **accepted: {int((dec.status == 'accept').sum()):,}** (full name {int(((dec.status == 'accept') & (dec.tier == 'full')).sum()):,}, "
+         f"not-incompatible name {int(((dec.status == 'accept') & (dec.tier == 'loose')).sum()):,})", "",
+         "| status | ACIFs | last grant < 2015 | >= 2015 | initial-only ARC names |", "|---|---|---|---|---|"]
+    for st, sub in d.groupby("status"):
+        L.append(f"| {st} | {len(sub):,} | {int((sub.era == 'last grant < 2015').sum()):,} | "
+                 f"{int((sub.era == 'last grant >= 2015').sum()):,} | {int(sub.initial_only.sum()):,} |")
+    acc = d[d.status == "accept"]
+    shared = acc.groupby("author_idx").cluster_id.apply(list)
+    shared = shared[shared.map(len) > 1]
+    L += ["", f"OpenAlex authors accepted for 2+ ACIFs (possible fragments of one person; reported only): {len(shared):,}", ""]
+    for aid, cids in shared.head(10).items():
+        L.append(f"- A{int(aid)}: " + "; ".join(f"{c} ({', '.join(a.loc[c, 'full_names'])})" for c in cids))
+    pn = pairs.set_index(["cluster_id", "author_idx"])
+    def ex(sub, n):
+        out = []
+        for r in sub.sample(min(n, len(sub)), random_state=3).itertuples():
+            ps = pairs[(pairs.cluster_id == r.cluster_id) & pairs.passes]
+            out.append(f"- {r.cluster_id} ({', '.join(r.full_names)}): " + "; ".join(
+                f"A{int(p.author_idx)} {p.author_name} [{p.tier}, {p.years_at_grant_university} yrs]" for p in ps.itertuples()))
+        return out
+    L += ["", "Examples, accepted:", ""] + ex(acc, 15)
+    L += ["", "Examples, accepted on a not-incompatible name:", ""] + ex(acc[acc.tier == "loose"], 10)
+    L += ["", "Examples, several pass:", ""] + ex(d[d.status == "several_pass"], 10)
+    return L + [""]
+
+
 def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--calibrate", action="store_true", help="also score stage 2 on the ORCID-linked ACIFs (~3 min)")
+    args = ap.parse_args()
     OAX_LINK_DIR.mkdir(parents=True, exist_ok=True)
     acifs = load_acifs()
     orcids = {o for os in acifs.orcids for o in os}
@@ -144,10 +203,27 @@ def main():
                 .merge(rejects[rejects.action == "reject_link"], on=["orcid", "author_idx"]))
     shared = shared_orcids(acifs)
 
+    linked = set(links.loc[links.status.str.startswith("accept"), "cluster_id"])
+    todo = acifs[~acifs.cluster_id.isin(linked)].reset_index(drop=True)
+    con = duckdb.connect()
+    con.execute(f"SET temp_directory='{DUCKDB_TMP_DIR}'")
+    pairs, dec = name_links(con, todo, set(links.loc[links.status.str.startswith("accept"), "author_idx"].astype("int64")),
+                            single_institution_windows(todo.cluster_id), acif_main_keys(todo.cluster_id))
+
+    cal_lines = []
+    if args.calibrate:
+        acc_links = links[links.status.str.startswith("accept")]
+        known = acifs[acifs.cluster_id.isin(set(acc_links.cluster_id))].reset_index(drop=True)
+        cp, cd = name_links(con, known, set(), single_institution_windows(known.cluster_id), acif_main_keys(known.cluster_id))
+        cal_lines = calibration_section(calibrate(cp, cd, acc_links[["cluster_id", "author_idx"]]))
+
     links.to_parquet(OAX_LINK_DIR / "orcid_links.parquet", index=False)
+    pairs.to_parquet(OAX_LINK_DIR / "name_links.parquet", index=False)
+    dec.to_parquet(OAX_LINK_DIR / "name_decisions.parquet", index=False)
     rejected.to_parquet(OAX_LINK_DIR / "orcid_rejected.parquet", index=False)
     miss.to_parquet(OAX_LINK_DIR / "orcid_unmatched.parquet", index=False)
-    text = "\n".join(["# ARC<->OpenAlex linking", ""] + orcid_section(acifs, links, miss, rejected, shared))
+    text = "\n".join(["# ARC<->OpenAlex linking", ""] + orcid_section(acifs, links, miss, rejected, shared)
+                     + name_section(acifs, pairs, dec) + cal_lines)
     (OAX_LINK_DIR / "report.md").write_text(text, encoding="utf-8")
     print(text)
 
