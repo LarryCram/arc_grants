@@ -12,6 +12,8 @@ Stages so far:
      candidates sharing a full given name (then, only if none passes, a not-incompatible name) whose
      OpenAlex affiliations show 2+ years at a single-institution grant university near the grant;
      accepted when exactly one passes.
+  3. Works-first links (src/oax/works_link.py), for ACIFs stage 2 left open: the same candidates'
+     works, linked on co-investigator co-authorship or works at a grant university in grant years.
 
 Inputs: acifs_arc.parquet (src/01_build_arc_acifs.py), openalex_authors_prep.parquet (00b).
 Outputs (OAX_LINK_DIR = processed/oax_link/):
@@ -20,6 +22,11 @@ Outputs (OAX_LINK_DIR = processed/oax_link/):
     orcid_unmatched.parquet   ACIFs with an ORCID and no candidate link
     name_links.parquet        stage 2: every name candidate with tier, years at a grant university, passes
     name_decisions.parquet    stage 2: one row per ACIF not linked by stage 1 (status, tier, author_idx)
+    works_evidence.parquet    works-first: every candidate with its works / co-investigator / university counts
+    works_decisions.parquet   works-first: one row per ACIF left open by stage 2
+    works_links.parquet       works-first: accepted (ACIF, author) links
+    calibration_works_evidence.parquet   (--calibrate) works-first evidence on ORCID-linked ACIFs, with
+                              `correct` = the record is the ACIF's accepted ORCID link
     report.md                 statistics and examples per stage
 
 Usage: .venv/bin/python src/02_link_arc_oax.py
@@ -34,9 +41,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import duckdb
 import pandas as pd
 
-from config.settings import DUCKDB_TMP_DIR, OAX_LINK_DIR
+from config.settings import ACIFS_ARC, DUCKDB_TMP_DIR, OAX_LINK_DIR
 from src.oax.name_link import (MIN_YEARS, WINDOW_AFTER, WINDOW_BEFORE, acif_main_keys, calibrate, name_links,
                                 single_institution_windows)
+from src.oax import works_link as wl
 from src.oax.orcid_link import (MINOR_SHARE, apply_overrides, decide, load_acifs, load_authors,
                                 load_name_evidence, load_outside_authors, load_overrides, orcid_links,
                                 shared_orcids, unmatched)
@@ -143,6 +151,46 @@ def calibration_section(cal: dict) -> list[str]:
             f"({cal['accepted_correct'] / max(cal['accepted'], 1):.1%})", ""]
 
 
+def works_section(acifs, ev, wdec, wlinks, cal) -> list[str]:
+    a = acifs.set_index("cluster_id")
+    d = wdec.join(a[["full_names", "last_year"]], on="cluster_id")
+    L = ["## Stage 2, works-first: co-investigator and university anchors", "",
+         f"Rule: the one candidate record with the most works co-authored by a linked OpenAlex author of one of the "
+         f"ACIF's ARC co-investigators is linked, when it has >= {wl.MIN_COINV_WORKS} such works and no other record ties "
+         f"it; otherwise a record is linked when it is the only one with works at an administering university of one "
+         f"of the ACIF's grants in >= {wl.MIN_UNI_YEARS} distinct years, from {wl.WINDOW_BEFORE} year before the grant "
+         f"to {wl.WINDOW_AFTER} after its funded years.", "",
+         f"- ACIFs left open by the first kind: {len(wdec):,}; candidate records: {len(ev):,}",
+         f"- **linked ACIFs: {int(wdec.status.str.startswith('accept').sum()):,}** ({len(wlinks):,} records)", "",
+         "| status | ACIFs | last grant < 2015 | >= 2015 | records linked |", "|---|---|---|---|---|"]
+    for st, sub in d.groupby("status"):
+        L.append(f"| {st} | {len(sub):,} | {int((sub.last_year < 2015).sum()):,} | {int((sub.last_year >= 2015).sum()):,} | "
+                 f"{int(sub.n_linked.sum()):,} |")
+    if cal:
+        L += ["", "Calibration on ORCID-linked ACIFs (true records known, nothing taken):", ""]
+        for st, v in cal.items():
+            if st != "decisions":
+                L.append(f"- {st}: {v['acifs']:,} ACIFs, {v['records']:,} records linked, {v['correct_records']:,} of them the "
+                         f"ORCID-linked record ({v['correct_records'] / max(v['records'], 1):.1%}); ACIFs whose correct record is "
+                         f"among those linked {v['acifs_with_correct'] / max(v['acifs'], 1):.1%}")
+        L.append(f"- decisions: {cal['decisions']}")
+    e = ev.set_index(["cluster_id", "author_idx"])
+    def ex(st, n):
+        out = []
+        sub = d[d.status == st]
+        for r in sub.sample(min(n, len(sub)), random_state=5).itertuples():
+            rows = wlinks[wlinks.cluster_id == r.cluster_id] if st.startswith("accept") else \
+                ev[(ev.cluster_id == r.cluster_id) & (ev.uni_years >= wl.MIN_UNI_YEARS)]
+            out.append(f"- {r.cluster_id} ({', '.join(r.full_names)}): " + "; ".join(
+                f"A{int(x.author_idx)} [{e.loc[(r.cluster_id, x.author_idx), 'n_works']} works, "
+                f"{e.loc[(r.cluster_id, x.author_idx), 'coinv_works']} co-inv, {e.loc[(r.cluster_id, x.author_idx), 'uni_years']} uni yrs]"
+                for x in rows.itertuples()))
+        return out
+    for st in ("accept_coinvestigator", "accept_university", "several_university"):
+        L += ["", f"Examples, {st}:", ""] + ex(st, 10)
+    return L + [""]
+
+
 def name_section(acifs, pairs, dec) -> list[str]:
     a = acifs.set_index("cluster_id")
     d = dec.join(a[["full_names", "last_year", "full_name_keys"]], on="cluster_id")
@@ -217,13 +265,35 @@ def main():
         cp, cd = name_links(con, known, set(), single_institution_windows(known.cluster_id), acif_main_keys(known.cluster_id))
         cal_lines = calibration_section(calibrate(cp, cd, acc_links[["cluster_id", "author_idx"]]))
 
+    # works-first, for ACIFs the first kind left open
+    open_ids = dec.loc[dec.status != "accept", "cluster_id"]
+    coaw = pd.read_parquet(ACIFS_ARC, columns=["cluster_id", "coawardee_acif_ids"])
+    linked_all = pd.concat([links.loc[links.status.str.startswith("accept"), ["cluster_id", "author_idx"]],
+                            dec.loc[dec.status == "accept", ["cluster_id", "author_idx"]]]).astype({"author_idx": "int64"})
+    coinv = wl.coinvestigator_authors(coaw, linked_all)
+    ev = wl.works_evidence(con, pairs[pairs.cluster_id.isin(set(open_ids))], coinv[coinv.cluster_id.isin(set(open_ids))],
+                           wl.grant_windows(open_ids))
+    wdec, wlinks = wl.decide(open_ids, ev)
+    wcal = None
+    if args.calibrate:
+        known_coinv = coinv[coinv.cluster_id.isin(set(known.cluster_id))]
+        kev = wl.works_evidence(con, cp, known_coinv, wl.grant_windows(known.cluster_id))
+        kdec, klinks = wl.decide(known.cluster_id, kev)
+        wcal = wl.calibrate(kdec, klinks, acc_links[["cluster_id", "author_idx"]])
+        ok = set(zip(acc_links.cluster_id, acc_links.author_idx.astype("int64")))
+        kev.assign(correct=[(c, int(a)) in ok for c, a in zip(kev.cluster_id, kev.author_idx)]).to_parquet(
+            OAX_LINK_DIR / "calibration_works_evidence.parquet", index=False)
+
     links.to_parquet(OAX_LINK_DIR / "orcid_links.parquet", index=False)
+    ev.to_parquet(OAX_LINK_DIR / "works_evidence.parquet", index=False)
+    wdec.to_parquet(OAX_LINK_DIR / "works_decisions.parquet", index=False)
+    wlinks.to_parquet(OAX_LINK_DIR / "works_links.parquet", index=False)
     pairs.to_parquet(OAX_LINK_DIR / "name_links.parquet", index=False)
     dec.to_parquet(OAX_LINK_DIR / "name_decisions.parquet", index=False)
     rejected.to_parquet(OAX_LINK_DIR / "orcid_rejected.parquet", index=False)
     miss.to_parquet(OAX_LINK_DIR / "orcid_unmatched.parquet", index=False)
     text = "\n".join(["# ARC<->OpenAlex linking", ""] + orcid_section(acifs, links, miss, rejected, shared)
-                     + name_section(acifs, pairs, dec) + cal_lines)
+                     + name_section(acifs, pairs, dec) + cal_lines + works_section(acifs, ev, wdec, wlinks, wcal))
     (OAX_LINK_DIR / "report.md").write_text(text, encoding="utf-8")
     print(text)
 

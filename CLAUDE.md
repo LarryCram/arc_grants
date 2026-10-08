@@ -35,6 +35,9 @@ src/02_link_arc_oax.py + src/oax/ → the NEW ARC↔OpenAlex linker, built one s
                                   institution-in-time (src/oax/name_link.py: main name, else a not-
                                   incompatible first given name; 2+ OpenAlex affiliation years at a
                                   single-institution grant university, award -1..+3; exactly one passes)
+                                  then works-first for ACIFs left open (src/oax/works_link.py: the one
+                                  record with most works co-authored with linked ARC co-investigators,
+                                  else the only record with works at a grant university in grant years)
                                   → processed/oax_link/ (`--calibrate` scores stage 2 on ORCID-linked ACIFs)
 src/03_build_oeuvres.py + src/oeuvre/ → the oeuvre extractor (2026-10-07), on stage-1 accepted
                                   links: so far step 1, acif_works.parquet (one row per ACIF x work:
