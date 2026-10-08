@@ -18,17 +18,25 @@ PURPOSE (2026-10-08, user decision: Scopus replaces paid Gemini for the oeuvre w
     BACKOFF waits (1, 2, 4, 8, 16, 30 minutes); if the last wait still fails the run stops cleanly,
     logging why. Other errors are logged and the profile skipped (retried on the next run).
 
-TARGETS (default): kept ACIFs with works still pending or accepted only by the liberal 'fits core'
-    rule (processed/oeuvre/acif_works_classified.parquet) that have a trusted profile.
-    --all-trusted: every kept ACIF with a trusted profile.
+TARGETS (--targets):
+    open-oeuvre (default)  kept ACIFs with works still pending or accepted only by the liberal 'fits
+                           core' rule (processed/oeuvre/acif_works_classified.parquet) that have a
+                           trusted profile
+    all-trusted            every kept ACIF with a trusted profile
+    unlinked               kept ACIFs the linker left unlinked (processed/oax_link/works_decisions.parquet,
+                           not accepted): EVERY profile 00d's search found for them, trusted or not --
+                           for the Scopus-to-OpenAlex DOI bridge, where a profile is only trusted once
+                           its DOIs overlap an OpenAlex record (2026-10-08)
+    Output is cumulative: profiles fetched by earlier runs stay in scopus_profile_documents.parquet;
+    a run replaces only the profiles it fetches.
 
 OUTPUT (SCOPUS_EXTRACT_DIR):
-    scopus_document_targets.parquet   (cluster_id, scopus_id)
-    scopus_profile_documents.parquet  (scopus_id, eid, doi, year, subtype, title, source) -- profiles
-                                      fetched so far (rewritten at the end of every run)
+    scopus_document_targets_<targets>.parquet   (cluster_id, scopus_id)
+    scopus_profile_documents.parquet  (scopus_id, eid, doi, year, subtype, title, source) -- every profile
+                                      fetched by any run (this run's profiles replace their old rows)
     scopus_documents_run.log          progress, waits, failures, stop reason
 
-Usage: .venv/bin/python src/00f_extract_scopus_documents.py [--workers 4] [--all-trusted] [--limit N]
+Usage: .venv/bin/python src/00f_extract_scopus_documents.py [--workers 4] [--targets unlinked] [--limit N]
 """
 
 import argparse
@@ -71,6 +79,23 @@ def trusted_profiles() -> pd.DataFrame:
     p = p[[isinstance(o, str) and o in orc.get(a, set()) for o, a in zip(p.orcid, p.acif)]]
     return (p[["acif", "scopus_id"]].rename(columns={"acif": "cluster_id"}).astype({"scopus_id": str})
             .drop_duplicates().sort_values(["cluster_id", "scopus_id"]).reset_index(drop=True))
+
+
+def searched_profiles(acif_ids) -> pd.DataFrame:
+    """(cluster_id, scopus_id): every profile 00d's search found for the given current ACIFs."""
+    rec = dict(pd.read_parquet(ACIF_ARC_RECORDS, columns=["unique_id", "cluster_id"]).values)
+    summ = pd.read_parquet(SCOPUS_EXTRACT_DIR / "scopus_acif_summary.parquet", columns=["cluster_id", "unique_ids"])
+    m = summ.explode("unique_ids").assign(acif=lambda d: d.unique_ids.map(rec)).dropna(subset=["acif"])
+    m = m[m.acif.isin(set(acif_ids))][["cluster_id", "acif"]].drop_duplicates()
+    prof = pd.read_parquet(SCOPUS_EXTRACT_DIR / "scopus_acif_profiles.parquet", columns=["cluster_id", "scopus_id"])
+    p = prof.merge(m, on="cluster_id")[["acif", "scopus_id"]].rename(columns={"acif": "cluster_id"})
+    return p.astype({"scopus_id": str}).drop_duplicates().sort_values(["cluster_id", "scopus_id"]).reset_index(drop=True)
+
+
+def unlinked_acifs() -> set:
+    from config.settings import OAX_LINK_DIR
+    wd = pd.read_parquet(OAX_LINK_DIR / "works_decisions.parquet")
+    return set(wd.loc[~wd.status.str.startswith("accept"), "cluster_id"])
 
 
 def open_oeuvre_acifs() -> set:
@@ -127,27 +152,40 @@ class Fetcher:
                 return
 
 
+DOCS = SCOPUS_EXTRACT_DIR / "scopus_profile_documents.parquet"
+_prior = None
+
+
 def write_documents(rows: dict) -> pd.DataFrame:
-    """Write the documents fetched so far (also every 1,000 profiles, so a stopped run leaves them)."""
+    """Write the documents fetched so far, on top of earlier runs' profiles (also every 1,000
+    profiles, so a stopped run leaves them)."""
     docs = pd.DataFrame([r for v in list(rows.values()) for r in v],
                         columns=["scopus_id", "eid", "doi", "year", "subtype", "title", "source"])
-    docs.to_parquet(SCOPUS_EXTRACT_DIR / "scopus_profile_documents.parquet", index=False)
+    if _prior is not None and len(_prior):
+        docs = pd.concat([_prior[~_prior.scopus_id.isin(set(rows))], docs], ignore_index=True)
+    docs.to_parquet(DOCS, index=False)
     return docs
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--all-trusted", action="store_true")
+    ap.add_argument("--targets", choices=["open-oeuvre", "all-trusted", "unlinked"], default="open-oeuvre")
     ap.add_argument("--limit", type=int, default=None)
     args = ap.parse_args()
     SCOPUS_EXTRACT_DIR.mkdir(parents=True, exist_ok=True)
-    targets = trusted_profiles()
-    if not args.all_trusted:
-        targets = targets[targets.cluster_id.isin(open_oeuvre_acifs())]
-    targets.to_parquet(SCOPUS_EXTRACT_DIR / "scopus_document_targets.parquet", index=False)
+    global _prior
+    if args.targets == "unlinked":
+        targets = searched_profiles(unlinked_acifs())
+    else:
+        targets = trusted_profiles()
+        if args.targets == "open-oeuvre":
+            targets = targets[targets.cluster_id.isin(open_oeuvre_acifs())]
+    targets.assign(targets=args.targets).to_parquet(
+        SCOPUS_EXTRACT_DIR / f"scopus_document_targets_{args.targets}.parquet", index=False)
+    _prior = pd.read_parquet(DOCS) if DOCS.exists() else None
     sids = sorted(set(targets.scopus_id))[: args.limit]
-    log(f"start: {targets.cluster_id.nunique():,} ACIFs, {len(sids):,} profiles, {args.workers} workers")
+    log(f"start ({args.targets}): {targets.cluster_id.nunique():,} ACIFs, {len(sids):,} profiles, {args.workers} workers")
     init_scopus()
     f = Fetcher()
     f.checkpoint = write_documents

@@ -1,6 +1,8 @@
-"""Tests for src/00f_extract_scopus_documents.py: the throttling backoff (no network)."""
+"""Tests for src/00f_extract_scopus_documents.py: the throttling backoff and cumulative output (no network)."""
 import importlib
 import sys
+
+import pandas as pd
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -44,3 +46,13 @@ def test_stops_after_last_wait(monkeypatch, tmp_path):
     assert f.stop and f.stop.startswith("429") and f.done == 0
     f.one("456")                                                  # nothing more is fetched once stopped
     assert calls["n"] == 4
+
+
+def test_output_keeps_earlier_runs(monkeypatch, tmp_path):
+    cols = ["scopus_id", "eid", "doi", "year", "subtype", "title", "source"]
+    prior = pd.DataFrame([("1", "e1", None, "2001", "ar", "a", "J"), ("2", "e2", None, "2002", "ar", "old", "J")], columns=cols)
+    monkeypatch.setattr(m, "DOCS", tmp_path / "docs.parquet")
+    monkeypatch.setattr(m, "_prior", prior)
+    out = m.write_documents({"2": [("2", "e3", None, "2003", "ar", "new", "J")], "3": []})
+    assert sorted(out.eid) == ["e1", "e3"]                       # profile 2 replaced, profile 1 kept
+    assert len(pd.read_parquet(tmp_path / "docs.parquet")) == 2
