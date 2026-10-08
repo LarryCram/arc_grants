@@ -552,7 +552,31 @@ def extract_grant_flat(attrs: dict, grant_code: str) -> dict:
         "grant_summary":        safe_str(attrs.get("grant-summary")),
         "n_eligible_orgs":      len(n_eligible_names),
         "eligible_orgs":        sorted(eligible_orgs_names),
+        **grant_lifecycle(attrs),
     }
+
+
+def grant_lifecycle(attrs: dict) -> dict:
+    """Project dates and two derived flags (2026-10-08, user). ARC has no 'relinquished' field;
+    found through DE130100153 (Thomas Pryce: a 3-year DECRA, $347,556 announced, $0 current,
+    project 2014-01-01 to 2014-07-03 -- he left for CNRS).
+      declined     grant-status is 'Declined' (an offer not taken up)
+      ended_early  current funding 0 while the announced amount is > 0, or the project ran
+                   (start to anticipated end) less than half its funded years
+    end_year: the anticipated end date's year (None if absent)."""
+    start = safe_str(attrs.get("project-start-date")) or None
+    end = safe_str(attrs.get("anticipated-end-date")) or None
+    ys, cur, ann = attrs.get("years-funded"), attrs.get("funding-current"), attrs.get("funding-at-announcement")
+    dur = None
+    if start and end:
+        d0, d1 = pd.to_datetime(start, errors="coerce"), pd.to_datetime(end, errors="coerce")
+        if pd.notna(d0) and pd.notna(d1):
+            dur = (d1 - d0).days / 365.25
+    zero_now = cur is not None and ann is not None and float(cur) == 0 and float(ann) > 0
+    short = dur is not None and ys is not None and float(ys) > 0 and dur < 0.5 * float(ys)
+    end_year = int(end[:4]) if end and end[:4].isdigit() else None
+    return {"project_start_date": start, "anticipated_end_date": end, "end_year": end_year,
+            "declined": safe_str(attrs.get("grant-status")) == "Declined", "ended_early": bool(zero_now or short)}
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -689,6 +713,9 @@ def main():
     p(f"\n  Grant status counts:")
     for status, cnt in df_grants.grant_status.value_counts().items():
         p(f"    {status:<40} {cnt:>6,}")
+
+    p(f"\n  Declined grants:       {int(df_grants.declined.sum()):>8,}")
+    p(f"  Ended early (current funding 0, or ran < half its funded years): {int(df_grants.ended_early.sum()):,}")
 
     p(f"\n  Grants per year (sample):")
     year_counts = df_grants.funding_commence_year.value_counts().sort_index()

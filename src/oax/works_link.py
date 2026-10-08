@@ -9,7 +9,7 @@ looked at, and a record is linked on work-level anchors:
   university       the record's own affiliation on a work is an administering university of one of
                    the ACIF's grants (any grant, multi-institution ones included), published from
                    WINDOW_BEFORE years before the grant's commencement to WINDOW_AFTER years after
-                   its funded years end
+                   its funded years end (or after its anticipated end, if that is earlier)
 
 Decision per ACIF:
   accept_coinvestigator  the one record with the most co-investigator works, when it has >=
@@ -46,13 +46,15 @@ def grant_windows(acif_ids, records=ACIF_ARC_RECORDS, grants=GRANTS_FLAT) -> pd.
     from src.acif.build import load_grant_org_facts
     rec = pd.read_parquet(records, columns=["cluster_id", "grant_code"]).drop_duplicates()
     rec = rec[rec.cluster_id.isin(set(acif_ids))]
-    g = pd.read_parquet(grants, columns=["grant_code", "funding_commence_year", "years_funded"])
+    g = pd.read_parquet(grants, columns=["grant_code", "funding_commence_year", "years_funded", "end_year"])
     facts = load_grant_org_facts()
     gi = pd.DataFrame([(gc, i.rsplit("/", 1)[1]) for gc, f in facts.items() for i in f["inst_ids"]],
                       columns=["grant_code", "inst"])
     w = rec.merge(g, on="grant_code").merge(gi, on="grant_code")
     w["y0"] = (w.funding_commence_year - WINDOW_BEFORE).astype("int64")
     w["y1"] = (w.funding_commence_year + w.years_funded.fillna(3) + WINDOW_AFTER).astype("int64")
+    cap = w.end_year + WINDOW_AFTER          # a grant that ended early closes the window sooner
+    w["y1"] = w.y1.where(cap.isna() | (cap >= w.y1), cap).astype("int64")
     # also every OpenAlex institution whose lineage includes the university (its faculties, institutes)
     import duckdb
     con = duckdb.connect()

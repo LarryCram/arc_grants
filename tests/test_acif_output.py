@@ -56,3 +56,14 @@ def test_acif_rows_coawardees_orcids_and_universities():
     assert r.coawardee_acif_ids == ["DP1_ann_lee"] and rows.loc["DP1_ann_lee"].coawardee_acif_ids == ["DP1_jan_smith"]
     assert r.single_org_universities == ["Uni A"]
     assert list(record_rows([a, b]).cluster_id) == ["DP1_ann_lee", "DP1_jan_smith", "DP1_jan_smith"]
+
+
+def test_grant_lifecycle_flags_reach_acif_and_record_rows():
+    a = _acif(_item("DP1_jan_smith", [CHEM]), _item("DP2_jan_smith", [CHEM], year=2015))
+    life = {"DP2": {"project_start_date": "2015-01-01", "anticipated_end_date": "2015-06-30", "end_year": 2015,
+                    "declined": False, "ended_early": True}}
+    r = acif_rows([a], single=set(), crosswalk={}, hep_names=set(), life=life).iloc[0]
+    assert r.ended_early_grants == ["DP2"] and r.declined_grants == []
+    rec = record_rows([a], life=life).set_index("unique_id")
+    assert rec.loc["DP2_jan_smith", "ended_early"] and not rec.loc["DP1_jan_smith", "ended_early"]
+    assert rec.loc["DP2_jan_smith", "anticipated_end_date"] == "2015-06-30"

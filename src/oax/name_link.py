@@ -18,7 +18,8 @@ other than the ACIF's own (when the ACIF has one) is not a candidate.
 Test: the record's own OpenAlex affiliations (authors.affiliations: institution + years) show at
 least MIN_YEARS distinct years at a grant university of one of the ACIF's single-institution grants
 (n_eligible_orgs = 1; the institution or any institution whose lineage includes it), within
-WINDOW_BEFORE years before to WINDOW_AFTER years after the grant's commencement year.
+WINDOW_BEFORE years before to WINDOW_AFTER years after the grant's commencement year, closed
+one year after the grant's anticipated end when that is earlier (a grant ended early).
 
 Decision per ACIF: accept when exactly one candidate passes in the tier used; otherwise several_pass,
 none_pass, no_candidate or no_single_institution_grant (left for the works-first route).
@@ -45,7 +46,7 @@ def single_institution_windows(acif_ids, records=ACIF_ARC_RECORDS, grants=GRANTS
     from src.acif.build import load_grant_org_facts
     rec = pd.read_parquet(records, columns=["cluster_id", "grant_code"]).drop_duplicates()
     rec = rec[rec.cluster_id.isin(set(acif_ids))]
-    g = pd.read_parquet(grants, columns=["grant_code", "funding_commence_year", "n_eligible_orgs"])
+    g = pd.read_parquet(grants, columns=["grant_code", "funding_commence_year", "n_eligible_orgs", "end_year"])
     g = g[g.n_eligible_orgs == 1]
     facts = load_grant_org_facts()
     gi = pd.DataFrame([(gc, i.rsplit("/", 1)[1]) for gc, f in facts.items() for i in f["inst_ids"]],
@@ -53,6 +54,9 @@ def single_institution_windows(acif_ids, records=ACIF_ARC_RECORDS, grants=GRANTS
     w = rec.merge(g, on="grant_code").merge(gi, on="grant_code")
     w["y0"] = (w.funding_commence_year - WINDOW_BEFORE).astype("int64")
     w["y1"] = (w.funding_commence_year + WINDOW_AFTER).astype("int64")
+    # a grant that ended early (relinquished, e.g. Pryce's 2013 DECRA, ended 2014) closes the window
+    cap = w.end_year + 1
+    w["y1"] = w.y1.where(cap.isna() | (cap >= w.y1), cap).astype("int64")
     return w[["cluster_id", "grant_code", "inst", "y0", "y1"]].reset_index(drop=True)
 
 

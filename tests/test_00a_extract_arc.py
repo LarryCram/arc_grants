@@ -233,3 +233,17 @@ class TestRejectScopus:
                      "reject_scopus,G1,,Peter,Taylor,,,x\n")
         with pytest.raises(ValueError):
             _mod.load_name_overrides(f)
+
+
+def test_grant_lifecycle_flags():
+    import importlib
+    m = importlib.import_module("src.00a_extract_arc")
+    pryce = {"grant-status": "Closed", "years-funded": 3, "funding-current": 0.0, "funding-at-announcement": 347556,
+             "project-start-date": "2014-01-01", "anticipated-end-date": "2014-07-03"}
+    f = m.grant_lifecycle(pryce)
+    assert f["ended_early"] and not f["declined"] and f["end_year"] == 2014
+    normal = dict(pryce, **{"funding-current": 347556, "anticipated-end-date": "2016-12-31"})
+    assert not m.grant_lifecycle(normal)["ended_early"]
+    assert m.grant_lifecycle(dict(normal, **{"grant-status": "Declined"}))["declined"]
+    assert m.grant_lifecycle({"grant-status": "Active"}) == {"project_start_date": None, "anticipated_end_date": None,
+                                                           "end_year": None, "declined": False, "ended_early": False}

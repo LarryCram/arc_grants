@@ -28,7 +28,9 @@ src/acif/                       → the cyclic ACIF build (models, build, featur
                                   → name stage (clean name groups, then partial merges in
                                   flagged groups; src/acif/name_merge.py) → Indigenous set-aside
 src/01_build_arc_acifs.py       → the ARC-stage list of people: acifs_arc.parquet (one row per
-                                  ACIF), acif_arc_records.parquet (record → ACIF),
+                                  ACIF; declined_grants / ended_early_grants from 00a's grant
+                                  lifecycle flags, 2026-10-08), acif_arc_records.parquet (record → ACIF,
+                                  with project dates and declined / ended_early),
                                   acif_arc_name_groups.parquet, acif_arc_build_report.md
 src/02_link_arc_oax.py + src/oax/ → the NEW ARC↔OpenAlex linker, built one stage at a time
                                   (2026-10-06): stage 1, ORCID links; stage 2 (2026-10-08), name +

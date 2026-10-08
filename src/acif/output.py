@@ -48,10 +48,21 @@ def _single_org_universities():
     return single_org_grants(), crosswalk, hep_names
 
 
-def acif_rows(acifs: list[AwardsCIF], single=None, crosswalk=None, hep_names=None) -> pd.DataFrame:
+def grant_lifecycle(path=None) -> dict:
+    """grant_code -> {project_start_date, anticipated_end_date, end_year, declined, ended_early}
+    from grants_flat.parquet (00a's grant_lifecycle(), 2026-10-08)."""
+    from config.settings import PROCESSED_DATA
+    cols = ["grant_code", "project_start_date", "anticipated_end_date", "end_year", "declined", "ended_early"]
+    g = pd.read_parquet(path or PROCESSED_DATA / "grants_flat.parquet", columns=cols)
+    return {r["grant_code"]: r for r in g.to_dict("records")}
+
+
+def acif_rows(acifs: list[AwardsCIF], single=None, crosswalk=None, hep_names=None, life=None) -> pd.DataFrame:
     """One row per ACIF."""
     if single is None:
         single, crosswalk, hep_names = _single_org_universities()
+    if life is None:
+        life = grant_lifecycle()
     acif_of = {it.unique_id: a.cluster_id for a in acifs for it in a.items}
     on_grant = defaultdict(set)
     for u, c in acif_of.items():
@@ -86,19 +97,28 @@ def acif_rows(acifs: list[AwardsCIF], single=None, crosswalk=None, hep_names=Non
             "inst_ids": sorted({i for it in items for i in it.inst_ids}),
             "single_org_universities": unis,
             "coawardee_acif_ids": sorted({c for g in grants for c in on_grant[g]} - {a.cluster_id}),
+            "declined_grants": [g for g in grants if life.get(g, {}).get("declined")],
+            "ended_early_grants": [g for g in grants if life.get(g, {}).get("ended_early")],
             "excluded": bool(a.excluded),
             "excluded_reason": a.excluded_reason,
         })
     return pd.DataFrame(rows).sort_values("cluster_id", ignore_index=True)
 
 
-def record_rows(acifs: list[AwardsCIF]) -> pd.DataFrame:
-    """One row per record (grant x investigator): its ACIF and its own facts."""
+def record_rows(acifs: list[AwardsCIF], life=None) -> pd.DataFrame:
+    """One row per record (grant x investigator): its ACIF and its own facts, with its grant's
+    project dates and declined / ended_early flags."""
+    if life is None:
+        life = grant_lifecycle()
+    lf = lambda g, k: life.get(g, {}).get(k)
     rows = [{
         "unique_id": it.unique_id, "cluster_id": a.cluster_id, "grant_code": it.grant_code,
         "full_name": it.full_name, "role_code": it.role_code, "is_fellowship": it.is_fellowship,
         "funding_commence_year": it.funding_commence_year, "admin_org": it.admin_org,
         "admin_orgs": list(it.admin_orgs), "orcid": it.orcid, "scopus_orcid": it.scopus_orcid,
         "hand_orcid": it.hand_orcid, "bulk_orcid": it.bulk_orcid,
+        "project_start_date": lf(it.grant_code, "project_start_date"),
+        "anticipated_end_date": lf(it.grant_code, "anticipated_end_date"),
+        "declined": bool(lf(it.grant_code, "declined")), "ended_early": bool(lf(it.grant_code, "ended_early")),
     } for a in acifs for it in a.items]
     return pd.DataFrame(rows).sort_values("unique_id", ignore_index=True)
