@@ -33,18 +33,21 @@ def load_verdicts(path) -> dict:
 
 
 def run(requests, verdicts_path, max_calls: int, max_input_tokens: int, model: str = MODEL,
-        workers: int = 4, order_seed: str = "", kinds=None) -> dict:
+        workers: int = 4, order_seed: str = "", kinds=None, key_env: str = "GEMINI_API_KEY",
+        only_keys=None) -> dict:
     """Send unanswered requests (in a fixed pseudo-random order) until the budget is reached."""
     from dotenv import load_dotenv
     from google import genai
     from google.genai import types
 
     load_dotenv()
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    client = genai.Client(api_key=os.environ[key_env])
     done = {k for k, v in load_verdicts(verdicts_path).items() if v["answer"] is not None}  # unparsed: resend
     todo = requests[~requests.request_key.isin(done)].copy()
     if kinds:
         todo = todo[todo.kind.isin(kinds)]
+    if only_keys is not None:
+        todo = todo[todo.request_key.isin(set(only_keys))]
     todo["_o"] = [hash_key(k + order_seed) for k in todo.request_key]
     todo = todo.sort_values("_o")
     lock = threading.Lock()
