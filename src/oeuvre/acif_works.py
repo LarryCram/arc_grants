@@ -1,8 +1,9 @@
 """
 The ACIF works set (2026-10-07, user: one step from the linker's accepted links straight to one
 table, replacing the separate records / authorships / works steps): one row per (ACIF, work) for
-every work of every OpenAlex author (`author_idx`) accepted for the ACIF by linker stage 1
-(processed/oax_link/orcid_links.parquet, status accept_*).
+every work of every OpenAlex author (`author_idx`) accepted for the ACIF by the linker
+(processed/oax_link/accepted_links.parquet: ORCID links, and since 2026-10-09, user, also the
+stage-2 name, works-first and Scopus-bridge links).
 
 An `author_idx` is only an index to a set of works: its works may or may not be the person's, so
 every work is a candidate and later steps sort it into "the person's" / "not the person's". Once an
@@ -35,7 +36,7 @@ from config.settings import DUCKDB_TMP_DIR, OAX_LINK_DIR, OPENALEX_COMPACT_DIR
 AUTHORSHIPS = OPENALEX_COMPACT_DIR / "authorships"
 WORKS = OPENALEX_COMPACT_DIR / "works"
 TOPICS = OPENALEX_COMPACT_DIR / "work_topics"
-LINKS = OAX_LINK_DIR / "orcid_links.parquet"
+LINKS = OAX_LINK_DIR / "accepted_links.parquet"
 DOMINANT_SHARE = 0.5
 
 

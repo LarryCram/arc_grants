@@ -49,8 +49,8 @@ src/02_link_arc_oax.py + src/oax/ → the NEW ARC↔OpenAlex linker, built one s
                                   ACIF's one Scopus profile; the same-name record holding most of its
                                   DOIs, unless taken, other-ORCID or name-incompatible)
                                   → processed/oax_link/ (`--calibrate` scores stage 2 on ORCID-linked ACIFs)
-src/03_build_oeuvres.py + src/oeuvre/ → the oeuvre extractor (2026-10-07), on stage-1 accepted
-                                  links: so far step 1, acif_works.parquet (one row per ACIF x work:
+src/03_build_oeuvres.py + src/oeuvre/ → the oeuvre extractor (2026-10-07), on the linker's accepted
+                                  links (accepted_links.parquet; all stages since 2026-10-09): so far step 1, acif_works.parquet (one row per ACIF x work:
                                   authorships through the ACIF's linked authors, work metadata,
                                   field/subfield shares), then step 2, acif_works_kept.parquet
                                   (drops paratext, retracted, types other than article/preprint/

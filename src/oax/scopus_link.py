@@ -26,9 +26,9 @@ accept_scopus_nickname). The share floor stops a minor record
 being linked when the person's main record is out of reach (e.g. "Maria A. Fiatarone Singh", whose
 OpenAlex name parses to family "singh": 2 of 280 DOIs fell on a minor record).
 
-Calibration (2026-10-09) on 10,418 ORCID-linked ACIFs whose trusted profile (carrying the ACIF's ORCID)
-was fetched, nothing taken: a record is taken for 10,393, and it is the ORCID-linked one for 10,365
-(99.7%). (A first version limited to stage 2's name-compatible candidates linked minor records when
+Calibration (2026-10-09) on 11,940 ORCID-linked ACIFs whose trusted profile (carrying the ACIF's ORCID)
+was fetched, nothing taken: a record is taken for 11,909, and it is the ORCID-linked one for 11,853
+(99.5%). (A first version limited to stage 2's name-compatible candidates linked minor records when
 the main one was not a candidate -- 55 of 436 links held < 30% of the profile's DOIs.)
 
 Decision per ACIF: accept_scopus, accept_scopus_nickname, record_linked_elsewhere, record_other_orcid, record_name_differs,

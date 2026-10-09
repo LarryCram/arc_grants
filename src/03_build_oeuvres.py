@@ -1,6 +1,7 @@
 """
 src/03_build_oeuvres.py -- the oeuvre extractor (2026-10-06/07): works of each ACIF from the OpenAlex
-authors (author_idx) accepted for it by linker stage 1. Built one step at a time; each step writes
+authors (author_idx) accepted for it by the linker (processed/oax_link/accepted_links.parquet: every
+stage since 2026-10-09, user; ORCID links only before). Built one step at a time; each step writes
 its table to OEUVRE_DIR and a section of report.md. Plan: /home/lc/.claude/plans/sunny-sauteeing-peach.md.
 
 Steps so far:
@@ -67,7 +68,9 @@ def acif_works_section(con, path, links: pd.DataFrame, seconds: float) -> list[s
                           count(*) FILTER (WHERE dominant_subfield IS NOT NULL),
                           count(*) FILTER (WHERE authors_count >= 100), count(*) FILTER (WHERE authors_count >= 1000),
                           max(authors_count) FROM aw""")
+    by_stage = links.groupby("stage").cluster_id.nunique() if "stage" in links else pd.Series(dtype=int)
     L = ["## Step 1: ACIF works", "",
+         "- linked ACIFs by linker stage: " + ", ".join(f"{k} {v:,}" for k, v in by_stage.items()),
          f"- built in {seconds:,.0f} s from {acc.cluster_id.nunique():,} ACIFs' {acc.author_idx.nunique():,} accepted "
          f"OpenAlex authors",
          f"- rows (ACIF, work): {n_rows:,}; ACIFs with works: {n_acif:,}; distinct works: {n_work:,}",

@@ -41,10 +41,10 @@ KINDS = {1: "coauthor", 2: "institution", 3: "venue"}
 
 def acif_inputs() -> tuple[pd.DataFrame, pd.DataFrame]:
     """(acif rows: cluster_id, first_year, last_year, grant institution_idx list) and
-    (cluster_id, coinvestigator author_idx) from acifs_arc and the accepted ORCID links."""
+    (cluster_id, coinvestigator author_idx) from acifs_arc and the linker's accepted links."""
     a = pd.read_parquet(ACIFS_ARC, columns=["cluster_id", "first_year", "last_year", "inst_ids", "coawardee_acif_ids"])
     a["grant_inst"] = a.inst_ids.map(lambda xs: [int(x.rsplit("/I", 1)[1]) for x in xs] if xs is not None else [])
-    links = pd.read_parquet(OAX_LINK_DIR / "orcid_links.parquet", columns=["cluster_id", "author_idx", "status"])
+    links = pd.read_parquet(OAX_LINK_DIR / "accepted_links.parquet", columns=["cluster_id", "author_idx", "status"])
     acc = links[links.status.str.startswith("accept")][["cluster_id", "author_idx"]].astype({"author_idx": "int64"})
     co = a[["cluster_id", "coawardee_acif_ids"]].explode("coawardee_acif_ids").dropna()
     co = co.merge(acc.rename(columns={"cluster_id": "coawardee_acif_ids"}), on="coawardee_acif_ids")

@@ -31,6 +31,9 @@ Outputs (OAX_LINK_DIR = processed/oax_link/):
     scopus_evidence.parquet   DOI bridge: every (ACIF, profile, candidate) with the profile's DOIs and shared DOIs
     scopus_decisions.parquet  DOI bridge: one row per ACIF still unlinked after works-first
     scopus_links.parquet      DOI bridge: accepted (ACIF, author) links
+    accepted_links.parquet    every accepted (ACIF, author) link of every stage: status, stage
+                              (orcid / name / works / scopus), works_count_global -- what the oeuvre
+                              extractor reads (2026-10-09, user: oeuvres for all linked ACIFs)
     calibration_works_evidence.parquet   (--calibrate) works-first evidence on ORCID-linked ACIFs, with
                               `correct` = the record is the ACIF's accepted ORCID link
     report.md                 statistics and examples per stage
@@ -355,6 +358,17 @@ def main():
         kprof = kprof[kprof.cluster_id.map(kprof.cluster_id.value_counts()) == 1]
         scal = sl.calibrate(sl.bridge_evidence(con, known, kprof, docs), acc_links[["cluster_id", "author_idx"]])
 
+    acc = pd.concat([
+        links.loc[links.status.str.startswith("accept"), ["cluster_id", "author_idx", "status"]].assign(stage="orcid"),
+        dec.loc[dec.status == "accept", ["cluster_id", "author_idx"]].assign(status="accept_name_institution", stage="name"),
+        wlinks[["cluster_id", "author_idx", "status"]].assign(stage="works"),
+        slinks[["cluster_id", "author_idx", "status"]].assign(stage="scopus")], ignore_index=True)
+    acc = acc.astype({"author_idx": "int64"})
+    wcg = pd.read_parquet(AUTHORS_PREP, columns=["author_idx", "works_count_global"])
+    outside = links[["author_idx", "works_count_global"]].astype({"author_idx": "int64"})
+    wcg = pd.concat([wcg, outside]).drop_duplicates("author_idx")
+    acc = acc.merge(wcg, on="author_idx", how="left")
+    acc.to_parquet(OAX_LINK_DIR / "accepted_links.parquet", index=False)
     links.to_parquet(OAX_LINK_DIR / "orcid_links.parquet", index=False)
     sev.to_parquet(OAX_LINK_DIR / "scopus_evidence.parquet", index=False)
     sdec.to_parquet(OAX_LINK_DIR / "scopus_decisions.parquet", index=False)
