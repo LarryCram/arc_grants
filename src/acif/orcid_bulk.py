@@ -10,9 +10,11 @@ when exactly one bulk ORCID passes both tests:
     - employer: the record lists employment at an ARC HEP that is on one of the ACIF's grants
       (the ACIF's records' hep_codes: administering, announcement-administering and eligible
       organisations).
-No reject_scopus row (arc_name_overrides.csv) and no enrichment_blocklist.csv row may refuse that
-ORCID for one of the ACIF's records (both say the record must not take the ORCID). Reads only src/00e_extract_orcid_bulk.py's
-outputs and the Scopus extract's rejections.
+No hand file may refuse that ORCID for one of the ACIF's records (build.load_refused_orcids():
+reject_scopus rows, manual_orcid_corrections.csv, enrichment_blocklist.csv -- all say the record
+must not take the ORCID; the corrections file was not read here before 2026-10-09, so the bulk pass
+gave DP150102405 Wei Liu back the ORCID the file removes). Reads only src/00e_extract_orcid_bulk.py's
+outputs and the hand refusals.
 
 Decision per ORCID-less ACIF: accepted / several (2+ ORCIDs pass) / names_disagree (a candidate
 with an ARC-university employer, but no main keys agree) / no_employer_match (candidates by name
@@ -31,10 +33,8 @@ from dataclasses import dataclass, replace
 
 import pandas as pd
 
-import csv
-
 from config.settings import ORCID_BULK_EXTRACT_DIR, SCOPUS_EXTRACT_DIR
-from src.acif.build import DATA_PERSISTED, UnionFind, _item_orcids, merge_by_key
+from src.acif.build import DATA_PERSISTED, UnionFind, _item_orcids, load_refused_orcids, merge_by_key
 from src.acif.models import AwardsCIF
 from src.acif.scopus import _single_orcid, drop_unlinked_scopus_orcids
 
@@ -44,7 +44,7 @@ class OrcidBulkExtract:
     by_key: dict[str, set[str]]          # full_name_key -> ORCIDs carrying it (bulk keys)
     main_keys: dict[str, set[str]]       # orcid -> its name forms' main keys (current parser)
     hep_codes: dict[str, set[str]]       # orcid -> ARC HEP codes it was employed at
-    rejected: dict[str, set[str]]        # unique_id -> ORCIDs it must not take (hand rows)
+    rejected: dict[str, set[str]]        # unique_id -> ORCIDs it must not take (build.load_refused_orcids())
     arc_main: dict[str, str]             # unique_id -> the record's main name key (arc_names)
 
 
@@ -53,16 +53,10 @@ def load_orcid_bulk_extract(d=ORCID_BULK_EXTRACT_DIR, scopus_dir=SCOPUS_EXTRACT_
     from src.acif.name_merge import main_keys as arc_main_keys
     ko = pd.read_parquet(d / "key_orcids.parquet")
     facts = pd.read_parquet(d / "orcid_facts.parquet")
-    rej = pd.read_parquet(scopus_dir / "scopus_rejections.parquet")
     by_key: dict[str, set[str]] = {}
     for k, o in ko[["full_name_key", "orcid"]].itertuples(index=False):
         by_key.setdefault(k, set()).add(o)
-    rejected: dict[str, set[str]] = {}
-    for u, o in rej[["unique_id", "orcid"]].itertuples(index=False):
-        rejected.setdefault(u, set()).add(o)
-    with open(blocklist, newline="", encoding="utf-8") as f:
-        for r in csv.DictReader(f):
-            rejected.setdefault(r["cluster_id"].strip(), set()).add(r["orcid"].strip())
+    rejected = load_refused_orcids(scopus_dir=scopus_dir, blocklist=blocklist)
     return OrcidBulkExtract(
         by_key=by_key,
         main_keys={r.orcid: set(r.main_keys) for r in facts.itertuples()},

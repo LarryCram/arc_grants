@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.acif.build import UnionFind
+from src.acif.build import UnionFind, attach_refused_orcids
 from src.acif.hand import hand_stage, keep_apart_violations
 from src.acif.models import AwardCIFItem, AwardsCIF
 
@@ -45,6 +45,14 @@ def test_orcid_veto_and_keep_apart_refuse():
     out, rep = hand_stage([c, d], UnionFind(), orcids={}, merges=[("G3_jan_smith", "G4_jan_smith")],
                           distinct=[("G3_jan_smith", "G4_jan_smith")])
     assert len(out) == 2 and rep["refused_groups"][0]["reason"] == "keep_apart"
+
+
+def test_refused_orcid_blocks_hand_orcid_and_merge():
+    a, b = attach_refused_orcids([_acif("G1_jan_smith", orcid="O1"), _acif("G2_jan_smith")], {"G2_jan_smith": {"O1"}})
+    out, rep = hand_stage([a, b], UnionFind(), orcids={"G2_jan_smith": "O1"}, merges=[], distinct=[])
+    assert len(out) == 2 and rep["orcid_conflicts"] == [("G2_jan_smith", "O1", ["refused"])]
+    out, rep = hand_stage([a, b], UnionFind(), orcids={}, merges=[("G1_jan_smith", "G2_jan_smith")], distinct=[])
+    assert len(out) == 2 and rep["refused_groups"][0]["reason"] == "refused_orcid"
 
 
 def test_keep_apart_violations():

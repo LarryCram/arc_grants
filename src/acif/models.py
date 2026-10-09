@@ -108,6 +108,12 @@ class AwardCIFItem:
     # ORCID veto; never replaces the others.
     bulk_orcid: str | None = None
 
+    # 2026-10-09: ORCIDs this record must never hold or be joined to, from the hand files
+    # (build.load_refused_orcids(): manual_orcid_corrections.csv wrong_orcid, reject_scopus rows,
+    # enrichment_blocklist.csv). Set before the first merge; every stage honours it (a refusal used
+    # to stop only the stage it was written for -- Wei Liu, David Price).
+    refused_orcids: tuple[str, ...] = ()
+
     # --- new fields required by the cyclic-build plan (2026-09-19), not yet populated by
     # anything -- see the plan's "Full AwardCIFItem property list" section for each one's
     # rationale. ---

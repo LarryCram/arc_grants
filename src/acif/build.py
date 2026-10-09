@@ -77,6 +77,42 @@ def apply_manual_orcid_corrections(
     return out
 
 
+def load_refused_orcids(scopus_dir: Path | None = None, blocklist: Path | None = None,
+                        corrections: Path | None = None) -> dict[str, set[str]]:
+    """unique_id -> ORCIDs the record must never hold or be joined to, from every hand file that
+    says so: manual_orcid_corrections.csv (wrong_orcid), arc_name_overrides.csv reject_scopus rows
+    (as 00d resolved them to records: scopus_rejections.parquet) and enrichment_blocklist.csv.
+    The one loader for these refusals; the Scopus and ORCID-bulk extracts and the records' own
+    refused_orcids all come from it."""
+    from config.settings import SCOPUS_EXTRACT_DIR
+    scopus_dir = scopus_dir or SCOPUS_EXTRACT_DIR
+    blocklist = blocklist or (DATA_PERSISTED / "enrichment_blocklist.csv")
+    out: dict[str, set[str]] = defaultdict(set)
+    for uid, (wrong, _correct) in load_manual_orcid_corrections(corrections).items():
+        out[uid].add(wrong)
+    for uid, orcid in pd.read_parquet(scopus_dir / "scopus_rejections.parquet")[["unique_id", "orcid"]].itertuples(index=False):
+        out[uid].add(orcid)
+    with open(blocklist, newline="", encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            out[r["cluster_id"].strip()].add(r["orcid"].strip())
+    return dict(out)
+
+
+def attach_refused_orcids(acifs: list[AwardsCIF], refused: dict[str, set[str]]) -> list[AwardsCIF]:
+    """Put each record's refused ORCIDs on it (AwardCIFItem.refused_orcids)."""
+    for a in acifs:
+        a.items = [replace(it, refused_orcids=tuple(sorted(refused[it.unique_id])))
+                   if it.unique_id in refused else it for it in a.items]
+    return acifs
+
+
+def refusal_hits(acifs: list[AwardsCIF], orcids: set[str] | None = None) -> list[tuple[str, str]]:
+    """(unique_id, orcid) for each record among `acifs` that refuses an ORCID the ACIFs hold
+    (`orcids`; default: every ORCID on their records)."""
+    held = set().union(*(_item_orcids(a) for a in acifs)) if orcids is None else orcids
+    return [(it.unique_id, o) for a in acifs for it in a.items for o in it.refused_orcids if o in held]
+
+
 def load_items(con: duckdb.DuckDBPyConnection | None = None) -> list[AwardCIFItem]:
     """Raw ARC facts only -- investigators_raw.parquet joined to grants_flat.parquet and
     grant_summaries.csv, filtered to KEEP_ROLES / KEEP_SCHEMES / genuine-HEP admin_org (the same
@@ -401,6 +437,10 @@ def merge_by_key(
     key carries A's ORCID into the next call, and C can't then bring in B with a different ORCID
     by another key. When the key is itself an ORCID the veto can't fire (one ORCID per group).
 
+    Refused ORCID (2026-10-09): a group is also left unmerged ("refused_orcid") when one of its
+    records refuses (AwardCIFItem.refused_orcids, from the hand files) an ORCID the group holds --
+    a hand refusal holds for the record in every stage, not only the one it was written for.
+
     check(keys, group) -> None or a reason string: a caller's own extra test, run after the name
     and ORCID tests; a group it gives a reason for is left unmerged and reported with that reason.
 
@@ -408,7 +448,7 @@ def merge_by_key(
     orcids/orcid_status of each survivor are recomputed from its items.
 
     Returns (updated_acifs, mismatches): one entry per group left unmerged, with `reason`
-    ("names_do_not_link", "orcid_veto" or the check's reason), `orcid` (the group's first key),
+    ("names_do_not_link", "orcid_veto", "refused_orcid" or the check's reason), `orcid` (the group's first key),
     `keys`, the sub-groups, names and ORCIDs needed to review it."""
     mismatches: list[dict] = []
     to_merge: list[tuple[str, str]] = []
@@ -435,7 +475,10 @@ def merge_by_key(
             continue
 
         orcids = {a.cluster_id: sorted(orcids_of(a)) for a in group}
-        reason = "orcid_veto" if len({o for os in orcids.values() for o in os}) > 1 else None
+        held = {o for os in orcids.values() for o in os}
+        reason = "orcid_veto" if len(held) > 1 else None
+        if reason is None and refusal_hits(group, held):
+            reason = "refused_orcid"
         if reason is None and check is not None:
             reason = check(keys, group)
         if reason:
@@ -523,10 +566,12 @@ def build_acifs(scopus: bool = True, hand: bool = True, orcid_bulk: bool = True,
     (orcid_bulk=True) ORCIDs from the ORCID bulk file by name and ARC-university employer
     (src/acif/orcid_bulk.py) -> (names=True) the clean name groups (src/acif/name_merge.py); then Indigenous-focused ACIFs are
     flagged excluded (set_aside_indigenous_research()).
+    Each record carries its hand refusals (load_refused_orcids()) from the start; after the last
+    stage no record may hold or be joined to an ORCID it refuses (raises otherwise).
     One UnionFind runs through every stage. Returns (acifs, uf, report): report holds each
     stage's ACIF count and unmerged groups, and pass one's per-ACIF decisions."""
     uf = UnionFind({})
-    seeds = build_stage_zero()
+    seeds = attach_refused_orcids(build_stage_zero(), load_refused_orcids())
     acifs, m0 = merge_by_orcid(seeds, uf)
     report = {"n_seed": len(seeds), "n_arc_orcid": len(acifs), "arc_orcid_mismatches": m0}
     if scopus:
@@ -548,6 +593,9 @@ def build_acifs(scopus: bool = True, hand: bool = True, orcid_bulk: bool = True,
         from src.acif.name_merge import name_merge
         acifs, name_report = name_merge(acifs, uf)
         report.update(n_names=len(acifs), names=name_report)
+    hits = [h for a in acifs for h in refusal_hits([a])]
+    if hits:
+        raise ValueError(f"records holding or joined to an ORCID they refuse: {hits}")
     report["n_excluded_indigenous"] = set_aside_indigenous_research(acifs)
     return acifs, uf, report
 

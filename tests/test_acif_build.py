@@ -29,6 +29,9 @@ from src.acif.build import (
     merge_by_key,
     merge_by_orcid,
     render_orcid_mismatch_report,
+    attach_refused_orcids,
+    load_refused_orcids,
+    refusal_hits,
     UnionFind,
     DATA_PERSISTED,
 )
@@ -412,6 +415,41 @@ class TestOrcidVeto:
             orcids_of=lambda a: {it.orcid for it in a.items if it.orcid} | extra.get(a.cluster_id, set()),
         )
         assert len(survivors) == 2 and mismatches[0]["reason"] == "orcid_veto"
+
+
+class TestRefusedOrcids:
+    """A hand refusal holds for the record in every stage (2026-10-09): merge_by_key() never joins a
+    record to an ACIF holding an ORCID the record refuses, whatever the key."""
+    O1 = "0000-0000-0000-0001"
+
+    def _pair(self):
+        held = _acif("DP02_JohnSmith", [_item("DP02_JohnSmith", orcid=self.O1)])
+        frag = _acif("LP01_JohnSmith", [_item("LP01_JohnSmith")])
+        return attach_refused_orcids([held, frag], {"LP01_JohnSmith": {self.O1}})
+
+    def test_attach_and_hits(self):
+        held, frag = self._pair()
+        assert frag.items[0].refused_orcids == (self.O1,) and held.items[0].refused_orcids == ()
+        assert refusal_hits([held, frag]) == [("LP01_JohnSmith", self.O1)]
+        assert refusal_hits([frag]) == []
+
+    def test_name_key_merge_refused(self):
+        # the David Price case: a reject_scopus row refused the ORCID for the 2002 record, and the
+        # name stage then joined it to the ACIF holding that ORCID through ARC
+        survivors, mismatches = merge_by_key(self._pair(), UnionFind(), lambda a: "john_smith")
+        assert len(survivors) == 2 and mismatches[0]["reason"] == "refused_orcid"
+
+    def test_other_records_still_merge(self):
+        held, frag = self._pair()
+        other = _acif("DP03_JohnSmith", [_item("DP03_JohnSmith")])
+        survivors, _ = merge_by_key([held, other], UnionFind(), lambda a: "john_smith")
+        assert len(survivors) == 1
+
+    def test_real_loader_covers_every_hand_file(self):
+        r = load_refused_orcids()
+        assert "0000-0002-7409-0948" in r["DP150102405_wei_liu"]     # manual_orcid_corrections.csv
+        assert "0000-0003-0076-3123" in r["LP0211991_david_price"]   # reject_scopus row
+        assert "0000-0002-0510-1789" in r["DP0452211_robert_marks"]  # enrichment_blocklist.csv
 
 
 class TestManualOrcidCorrectionsPreventsWrongMerge:

@@ -3661,6 +3661,37 @@ cohort percentiles, archetypes, co-author track record, topic entropy, novelty.
   full given name nor an initial. Two Peter Schofields at UNSW share 4 consortium papers but have different
   ORCIDs. Shared works across different records is not merge evidence.
 
+## Hand refusals hold in every stage; ARC ORCID back-propagation counted; Wei Wang split (2026-10-09/10)
+
+**Back-propagation.** ARC's ORCID field is the person's current profile ORCID, back-filled to all
+their grants (27% of 2001-03 records carry one). Only 50 of 11,256 ARC-ORCID ACIFs mix records with
+and without it. A rule "don't give a record an outside ORCID that ARC shows on another record but
+left off this one" would refuse 8 Scopus and 17 bulk records -- but 3 hand merges (Paul Burke,
+Colin/Andrew Bell, Jennifer Smith/Smith-Merry) are the same person without propagation (ARC keeps two
+person accounts), so it is review evidence, not a veto. Not built. List:
+`processed/arc_orcid_backprop.md`. Why it stayed hidden: absence read as "unknown"; the veto only
+fires on two different ORCIDs; the ORCID-finding passes act exactly on ORCID-less records; checks
+compared name-based sources with each other; merge reports counted totals, not record origins.
+
+**Fix (user: "fix5").** A hand refusal used to stop only the stage it was written for: the bulk
+pass never read `manual_orcid_corrections.csv`, so DP150102405 Wei Liu got the RMIT Wei Liu's ORCID
+back; a `reject_scopus` row stopped Scopus but the name stage rejoined the 2002 David Price to the
+2024 mathematician. Now `build.load_refused_orcids()` reads all three files (corrections wrong_orcid,
+reject_scopus via 00d's `scopus_rejections.parquet`, `enrichment_blocklist.csv`) into
+`AwardCIFItem.refused_orcids`, set before the first merge; `merge_by_key()` leaves a group unmerged
+(`refused_orcid`) when a record refuses an ORCID the group holds; the hand stage and pass two
+(including claims) do the same; `build_acifs()` raises if a finished ACIF breaks a refusal. The
+Scopus and bulk extracts take their refusals from the same loader. Tests: 7 new, 429 pass.
+
+**Wei Wang.** 7 `enrichment_blocklist.csv` rows refuse DE230100180's ORCID (DECRA 2023, civil
+engineering, PhD 2019) for the 2008-21 Information Systems records; one more refuses Wei Chun Wang's
+ORCID (Cabrini/Monash biostatistician, taken by the bulk pass through the partner org) for
+DP180103411. The 7 records are now separate ACIFs with no ORCID (probably one person, Prof Wei Wang
+UNSW; not merged -- needs manual_merges rows if confirmed). Build: kept ACIFs 23,192; linked
+21,862 (ORCID 16,003, name 3,877, works 1,550, Scopus 432); accepted works 2,757,181.
+
+New-computer instructions: `docs/new_computer_setup.md`.
+
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
 

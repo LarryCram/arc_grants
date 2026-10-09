@@ -12,7 +12,9 @@ Pass one -- an ORCID found through Scopus. An ACIF with no ARC ORCID takes the O
 search's result only when all of these hold:
     1. the search found exactly one profile            (else: not_single_profile / no_profile)
     2. that profile carries an ORCID                   (else: no_orcid_on_profile)
-    3. no reject_scopus row refuses that ORCID for one of its records   (else: rejected_by_hand)
+    3. no hand file refuses that ORCID for one of its records (build.load_refused_orcids():
+       reject_scopus rows, manual_orcid_corrections.csv, enrichment_blocklist.csv)
+                                                                        (else: rejected_by_hand)
     4. the ORCID's names are known (ORCID cache, else bulk file)        (else: orcid_not_found)
     5. the ORCID fits the ACIF (orcid_fits()), either
        - names: its names agree with the ACIF's -- a shared full_name_key with a full given name
@@ -34,10 +36,12 @@ Such ACIFs get decision "dropped_names_do_not_link", and the ORCID merge runs ag
 those ORCIDs (the refused group had held its other parts apart too).
 
 Pass two -- a shared Scopus profile. Each record takes the Scopus author id of its search's one
-profile when the search found exactly one (none when it found 0 or 2+, or when a reject_scopus row
+profile when the search found exactly one (none when it found 0 or 2+, or when a hand file
 refuses that profile's ORCID for the record). ACIFs sharing a profile id -- or chained by shared
 ids -- form a group (build.key_components()). Different Scopus ids are not evidence of different
-people. Besides the name and ORCID-veto tests, a group is left unmerged when:
+people. Besides the name, ORCID-veto and refused-ORCID tests, a group is left unmerged when:
+    - refused_orcid: a record of the group refuses an ORCID the group holds or that claims its
+      profile (2026-10-09);
     - profile_claimed_by_another_name: an ORCID record lists one of the group's profiles as its own
       Scopus id and the ORCID doesn't fit the group (orcid_fits(): neither its names agree nor a
       two-way link with an agreeing family name);
@@ -55,7 +59,7 @@ from dataclasses import dataclass, replace
 import pandas as pd
 
 from config.settings import SCOPUS_EXTRACT_DIR
-from src.acif.build import UnionFind, _full_name_keys, _item_orcids, merge_by_key
+from src.acif.build import UnionFind, _full_name_keys, _item_orcids, load_refused_orcids, merge_by_key, refusal_hits
 from src.acif.models import AwardsCIF
 
 
@@ -68,7 +72,7 @@ class ScopusExtract:
     name_source: dict[str, str | None]
     listed_ids: dict[str, set[str]]           # orcid -> Scopus ids its own record lists
     claims: dict[str, set[str]]               # scopus_id -> ORCIDs whose record lists it
-    rejected: dict[str, set[str]]             # unique_id -> ORCIDs refused for it by hand
+    rejected: dict[str, set[str]]             # unique_id -> ORCIDs refused for it by hand (build.load_refused_orcids())
 
 
 def _orcid_or_none(x) -> str | None:
@@ -80,7 +84,6 @@ def load_scopus_extract(d=SCOPUS_EXTRACT_DIR) -> ScopusExtract:
     profiles = pd.read_parquet(d / "scopus_acif_profiles.parquet")
     facts = pd.read_parquet(d / "scopus_orcid_facts.parquet")
     claims = pd.read_parquet(d / "scopus_profile_claims.parquet")
-    rej = pd.read_parquet(d / "scopus_rejections.parquet")
     single = {}
     ones = set(summary.index[summary.n_profiles == 1])
     for r in profiles[profiles.cluster_id.isin(ones)].itertuples():
@@ -89,9 +92,7 @@ def load_scopus_extract(d=SCOPUS_EXTRACT_DIR) -> ScopusExtract:
     cl: dict[str, set[str]] = {}
     for r in claims.itertuples():
         cl.setdefault(str(r.scopus_id), set()).add(r.orcid)
-    rj: dict[str, set[str]] = {}
-    for r in rej.itertuples():
-        rj.setdefault(r.unique_id, set()).add(r.orcid)
+    rj = load_refused_orcids(scopus_dir=d)
     return ScopusExtract(
         lookup=summary, single_profile=single, profile_orcid=profile_orcid,
         name_keys={r.orcid: (set(r.name_keys) if isinstance(r.name_source, str) else None)
@@ -280,6 +281,8 @@ def pass_two_check(ext: ScopusExtract):
             if not any(orcid_fits(ext, names, o, k) for k in claimed):
                 return "profile_claimed_by_another_name"
         held = set().union(*(_item_orcids(a) for a in group))
+        if refusal_hits(group, held | claimers):
+            return "refused_orcid"
         if len(held | claimers) > 1:
             return "orcid_veto"
         for o in sorted(held):

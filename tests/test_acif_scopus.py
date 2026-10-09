@@ -7,7 +7,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.acif.build import UnionFind, key_components, merge_by_key
+from src.acif.build import UnionFind, attach_refused_orcids, key_components, merge_by_key
 from src.acif.models import AwardCIFItem, AwardsCIF
 from src.acif.scopus import (ScopusExtract, names_agree, orcid_fits, record_profiles,
                              scopus_orcid_decisions, scopus_pass_one, scopus_pass_two)
@@ -115,6 +115,14 @@ def test_pass_two_merges_on_a_shared_profile():
     ext = _ext({"G1_jan_smith": (1, ("7", None)), "G2_jan_smith": (1, ("7", None))})
     out, mm, n = scopus_pass_two([a, b], UnionFind(), ext)
     assert len(out) == 1 and mm == [] and n == 0
+
+
+def test_pass_two_refuses_a_claim_a_record_refuses():
+    a, b = attach_refused_orcids([_acif("G1_jan_smith"), _acif("G2_jan_smith")], {"G2_jan_smith": {"O7"}})
+    ext = _ext({"G1_jan_smith": (1, ("7", None)), "G2_jan_smith": (1, ("7", None))},
+               name_keys={"O7": {"jan_smith"}}, claims={"7": {"O7"}})
+    out, mm, n = scopus_pass_two([a, b], UnionFind(), ext)
+    assert len(out) == 2 and mm[0]["reason"] == "refused_orcid" and n == 0
 
 
 def test_pass_two_refuses_a_profile_claimed_under_another_name():

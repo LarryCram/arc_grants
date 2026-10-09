@@ -15,8 +15,9 @@ in-scope record is inert and counted.
 
 Hand decisions are not tested on names (they are the evidence). Joins are grouped transitively and
 a group is left unmerged, and reported, when its ACIFs carry 2+ different ORCIDs (ARC, Scopus or
-hand) or when it would put a keep-apart pair in one ACIF. A hand ORCID that differs from an
-ORCID the record already carries is reported and not applied.
+hand), when one of its records refuses an ORCID the group holds (AwardCIFItem.refused_orcids),
+or when it would put a keep-apart pair in one ACIF. A hand ORCID that differs from an ORCID the
+record already carries, or that the record refuses, is reported and not applied.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ import csv
 from dataclasses import replace
 
 from src.acif.build import DATA_PERSISTED
-from src.acif.build import UnionFind, _item_orcids, apply_unions
+from src.acif.build import UnionFind, _item_orcids, apply_unions, refusal_hits
 from src.acif.models import AwardsCIF
 
 MANUAL_ORCIDS = DATA_PERSISTED / "manual_orcids.csv"
@@ -74,7 +75,9 @@ def hand_stage(acifs: list[AwardsCIF], uf: UnionFind, orcids=None, merges=None, 
         for it in a.items:
             o = orcids.get(it.unique_id)
             held = {x for x in (it.orcid, it.scopus_orcid) if x}
-            if o and not held:
+            if o and o in it.refused_orcids:
+                report["orcid_conflicts"].append((it.unique_id, o, ["refused"]))
+            elif o and not held:
                 it = replace(it, hand_orcid=o)
                 report["orcids_applied"] += 1
             elif o and held == {o}:
@@ -120,6 +123,10 @@ def hand_stage(acifs: list[AwardsCIF], uf: UnionFind, orcids=None, merges=None, 
         names = sorted({it.full_name for g in group for it in g.items})
         if len(held) > 1:
             report["refused_groups"].append({"reason": "orcid_veto", "acifs": ids, "names": names,
+                                             "orcids": sorted(held)})
+            continue
+        if refusal_hits(group, held):
+            report["refused_groups"].append({"reason": "refused_orcid", "acifs": ids, "names": names,
                                              "orcids": sorted(held)})
             continue
         if any(p <= recs for p in pairs):

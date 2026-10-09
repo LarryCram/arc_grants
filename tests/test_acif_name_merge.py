@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.acif.build import UnionFind
+from src.acif.build import UnionFind, attach_refused_orcids
 from src.acif.models import AwardCIFItem, AwardsCIF
 from src.acif.name_merge import NameMergeInputs, name_merge, year_problems
 
@@ -64,6 +64,13 @@ def test_orcid_veto_and_keep_apart():
     out, rep = _run([_acif("DP1_jan_smith"), _acif("DP2_jan_smith")],
                     distinct=[("DP1_jan_smith", "DP2_jan_smith")])
     assert len(out) == 2 and rep["status_counts"] == {"kept_apart": 1}
+
+
+def test_refused_orcid_not_merged_by_name():
+    acifs = attach_refused_orcids([_acif("DP1_jan_smith", 2002), _acif("DP2_jan_smith", 2024, orcid="O1")],
+                                  {"DP1_jan_smith": {"O1"}})
+    out, rep = _run(acifs)
+    assert len(out) == 2 and rep["status_counts"] == {"refused_orcid": 1}
 
 
 def test_interleaved_universities():
