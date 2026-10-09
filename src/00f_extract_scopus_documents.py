@@ -16,7 +16,9 @@ PURPOSE (2026-10-08, user decision: Scopus replaces paid Gemini for the oeuvre w
     are threads in one process, so they share it) and retries server errors (5xx) briefly, but on a
     429 it raises at once. Here a 429 pauses every worker and the same profile is retried after
     BACKOFF waits (1, 2, 4, 8, 16, 30 minutes); if the last wait still fails the run stops cleanly,
-    logging why. Other errors are logged and the profile skipped (retried on the next run).
+    logging why. Any other error (in practice read timeouts on profiles full of very-many-author
+    papers) is retried once with SMALL_PAGE-document pages; if that fails too the profile is logged
+    and skipped (retried on the next run).
 
 TARGETS (--targets):
     open-oeuvre (default)  kept ACIFs with works still pending or accepted only by the liberal 'fits
@@ -50,10 +52,14 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config.settings import ACIF_ARC_RECORDS, ACIFS_ARC, OEUVRE_DIR, SCOPUS_EXTRACT_DIR
+from config.settings import ACIFS_ARC, OEUVRE_DIR, SCOPUS_EXTRACT_DIR
+from src.oax.scopus_link import searched_profiles
+from src.oeuvre.scopus_check import trusted_profiles
 from src.utils.scopus import init_scopus
 
 BACKOFF = [60, 120, 240, 480, 960, 1800]
+SMALL_PAGE = 25   # profiles of very-many-author papers (particle physics, genomics consortia) time out
+                  # at 200 documents a page (2026-10-09: Nash, Urquijo, Mitchell, Cerin, McNamara)
 LOG = SCOPUS_EXTRACT_DIR / "scopus_documents_run.log"
 
 
@@ -62,34 +68,6 @@ def log(msg: str) -> None:
     print(line, flush=True)
     with open(LOG, "a", encoding="utf-8") as f:
         f.write(line + "\n")
-
-
-def trusted_profiles() -> pd.DataFrame:
-    """(cluster_id, scopus_id) for kept ACIFs whose 00d search found a profile carrying the ACIF's
-    own ORCID. 00d searched per ACIF of an earlier stage; its records map to the current ACIFs."""
-    acifs = pd.read_parquet(ACIFS_ARC, columns=["cluster_id", "orcids", "excluded"])
-    acifs = acifs[~acifs.excluded]
-    orc = {c: set(o) for c, o in zip(acifs.cluster_id, acifs.orcids)}
-    rec = dict(pd.read_parquet(ACIF_ARC_RECORDS, columns=["unique_id", "cluster_id"]).values)
-    summ = pd.read_parquet(SCOPUS_EXTRACT_DIR / "scopus_acif_summary.parquet", columns=["cluster_id", "unique_ids"])
-    m = summ.explode("unique_ids").assign(acif=lambda d: d.unique_ids.map(rec)).dropna(subset=["acif"])
-    m = m[["cluster_id", "acif"]].drop_duplicates().rename(columns={"cluster_id": "search_id"})
-    prof = pd.read_parquet(SCOPUS_EXTRACT_DIR / "scopus_acif_profiles.parquet", columns=["cluster_id", "scopus_id", "orcid"])
-    p = prof.rename(columns={"cluster_id": "search_id"}).merge(m, on="search_id")
-    p = p[[isinstance(o, str) and o in orc.get(a, set()) for o, a in zip(p.orcid, p.acif)]]
-    return (p[["acif", "scopus_id"]].rename(columns={"acif": "cluster_id"}).astype({"scopus_id": str})
-            .drop_duplicates().sort_values(["cluster_id", "scopus_id"]).reset_index(drop=True))
-
-
-def searched_profiles(acif_ids) -> pd.DataFrame:
-    """(cluster_id, scopus_id): every profile 00d's search found for the given current ACIFs."""
-    rec = dict(pd.read_parquet(ACIF_ARC_RECORDS, columns=["unique_id", "cluster_id"]).values)
-    summ = pd.read_parquet(SCOPUS_EXTRACT_DIR / "scopus_acif_summary.parquet", columns=["cluster_id", "unique_ids"])
-    m = summ.explode("unique_ids").assign(acif=lambda d: d.unique_ids.map(rec)).dropna(subset=["acif"])
-    m = m[m.acif.isin(set(acif_ids))][["cluster_id", "acif"]].drop_duplicates()
-    prof = pd.read_parquet(SCOPUS_EXTRACT_DIR / "scopus_acif_profiles.parquet", columns=["cluster_id", "scopus_id"])
-    p = prof.merge(m, on="cluster_id")[["acif", "scopus_id"]].rename(columns={"acif": "cluster_id"})
-    return p.astype({"scopus_id": str}).drop_duplicates().sort_values(["cluster_id", "scopus_id"]).reset_index(drop=True)
 
 
 def unlinked_acifs() -> set:
@@ -116,12 +94,14 @@ class Fetcher:
         self.checkpoint = None
 
     def one(self, sid: str) -> None:
-        for attempt in range(len(BACKOFF) + 1):
+        small = False
+        for attempt in range(len(BACKOFF) + 2):
             if self.stop:
                 return
             self.go.wait()
             try:
-                q = self.search(f"AU-ID({sid})", view="STANDARD", subscriber=True, refresh=False)
+                kw = {"count": SMALL_PAGE} if small else {}
+                q = self.search(f"AU-ID({sid})", view="STANDARD", subscriber=True, refresh=False, **kw)
                 rows = [(sid, r.eid, (r.doi or "").lower() or None, (r.coverDate or "")[:4] or None, r.subtype,
                          r.title, r.publicationName) for r in (q.results or [])]
                 with self.lock:
@@ -133,7 +113,7 @@ class Fetcher:
                         self.checkpoint(self.rows)
                 return
             except self.e429 as e:
-                if attempt == len(BACKOFF):
+                if attempt >= len(BACKOFF):
                     with self.lock:
                         self.stop = f"429 after {len(BACKOFF)} waits: {e}"
                     log(f"STOP {self.stop}")
@@ -145,7 +125,11 @@ class Fetcher:
                         wait = BACKOFF[attempt]
                         log(f"429 on {sid} ({e}); all workers pause {wait} s (wait {attempt + 1}/{len(BACKOFF)})")
                         threading.Timer(wait, self.go.set).start()
-            except Exception as e:  # other errors: skip this profile now, it is retried on the next run
+            except Exception as e:  # other errors: once more with small pages, then skip (retried next run)
+                if not small:
+                    small = True
+                    log(f"error on {sid}: {repr(e)[:120]}; retrying with {SMALL_PAGE}-document pages")
+                    continue
                 with self.lock:
                     self.failed.append((sid, repr(e)[:200]))
                 log(f"error on {sid}: {repr(e)[:200]}")
@@ -176,9 +160,9 @@ def main():
     SCOPUS_EXTRACT_DIR.mkdir(parents=True, exist_ok=True)
     global _prior
     if args.targets == "unlinked":
-        targets = searched_profiles(unlinked_acifs())
+        targets = searched_profiles(unlinked_acifs())[["cluster_id", "scopus_id"]]
     else:
-        targets = trusted_profiles()
+        targets = trusted_profiles(pd.read_parquet(ACIFS_ARC, columns=["cluster_id", "orcids", "excluded"]))
         if args.targets == "open-oeuvre":
             targets = targets[targets.cluster_id.isin(open_oeuvre_acifs())]
     targets.assign(targets=args.targets).to_parquet(

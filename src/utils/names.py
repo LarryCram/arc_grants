@@ -607,3 +607,28 @@ def name_part_tokens(s: str) -> list[str]:
         if "-" in word and word not in out:
             out.append(word)
     return out
+
+
+# --- Given-name nicknames (2026-10-09, user: accept nicknames in the Scopus DOI bridge) ---------------
+_NICKNAMER = None
+MIN_CLIPPED = 3
+
+
+def given_names_related(a: str, b: str) -> bool:
+    """Whether two full given names (parser key given parts, lower case) can be one person's: equal,
+    related in the `nicknames` package's English name list (Jim/James, Ken/Kenneth, Alec/Alexander),
+    or one a clipped form of the other of MIN_CLIPPED+ letters (Lyn/Lynda, Bala/Balakanapathy).
+    Used only where other evidence already ties the two names to the same papers."""
+    global _NICKNAMER
+    if not a or not b or len(a) < 2 or len(b) < 2:
+        return False
+    if a == b:
+        return True
+    short, long_ = sorted((a, b), key=len)
+    if len(short) >= MIN_CLIPPED and long_.startswith(short):
+        return True
+    if _NICKNAMER is None:
+        from nicknames import NickNamer
+        _NICKNAMER = NickNamer()
+    n = _NICKNAMER
+    return b in n.nicknames_of(a) or a in n.nicknames_of(b) or b in n.canonicals_of(a) or a in n.canonicals_of(b)

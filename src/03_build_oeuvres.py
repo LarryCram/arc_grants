@@ -15,9 +15,10 @@ Steps so far:
   4. acif_work_graph.parquet     each ACIF's works joined by shared co-author / own institution /
                           venue; connected components; anchors (ARC co-investigator co-author,
                           grant university in grant years); the anchored core (src/oeuvre/work_graph.py)
-  5. acif_works_classified.parquet   accept / reject / unsure / pending per (ACIF, work): rules, then
-                          Gemini verdicts saved by src/03a_gemini_judge.py (src/oeuvre/classify.py);
-                          gemini_requests.parquet lists the requests still to send
+  5. acif_works_classified.parquet   accept / reject / unsure per (ACIF, work): rules, then the
+                          Gemini verdicts already saved by src/03a_gemini_judge.py, then the person's trusted
+                          Scopus profile for 'fits core' accepts and works still unjudged (src/oeuvre/classify.py,
+                          src/oeuvre/scopus_check.py; documents fetched by 00f)
 Next: person report.
 
 Usage: .venv/bin/python src/03_build_oeuvres.py [--from-step 5]   (5: reuse steps 1-4's files)
@@ -37,6 +38,7 @@ from src.oeuvre import classify as cls
 from src.oeuvre.acif_works import DOMINANT_SHARE, LINKS, accepted_links, build_acif_works, connect
 from src.oeuvre.gemini import load_verdicts
 from src.oeuvre.orcid_works import claimed_dois
+from src.oeuvre.scopus_check import trusted_profile_dois
 from src.oeuvre.versions import MAX_TITLE_WORKS, reduce_versions
 from src.oeuvre.work_filter import KEEP_TYPES, filter_works
 from src.oeuvre.work_graph import HYPER_AUTHORS, VENUE_MAX_WORKS, acif_inputs, build_work_graph
@@ -284,6 +286,14 @@ def classify_section(con, req: pd.DataFrame, verdicts: dict) -> list[str]:
         L.append(f"| {d} | {r} | {b} | {c:,} | {c / n:.2%} |")
     L += ["", "| decision | rows |", "|---|---|"]
     L += [f"| {d} | {c:,} |" for d, c in q("SELECT decision, count(*) FROM kv GROUP BY 1 ORDER BY 2 DESC")]
+    L += ["", "Scopus: 'fits core' accepts and unjudged works decided from the person's trusted Scopus profile "
+              "(carrying the ACIF's ORCID): on it -> accept; an article or review with a DOI absent from it -> reject; "
+              "otherwise unsure.", "",
+          "- ACIFs with a fetched trusted profile: " + f"{q('SELECT count(DISTINCT cluster_id) FROM kv WHERE on_scopus_profile IS NOT NULL')[0][0]:,}",
+          "", "Share of works on the trusted profile, by rule (ACIFs with a trusted profile):", "",
+          "| rule | works | on profile |", "|---|---|---|"]
+    L += [f"| {r} | {n:,} | {s_:.1%} |" for r, n, s_ in q(
+        "SELECT rule, count(*), avg(on_scopus_profile::int) FROM kv WHERE on_scopus_profile IS NOT NULL GROUP BY 1 ORDER BY 2 DESC")]
     L += ["", f"Reference-work entries: {cls.REF_AUTHORS}+ authors, or {cls.REF_AUTHORS_MULTI}+ with "
               f"{cls.REF_SAME_BOOK}+ chapters of one book held by the ACIF (book = ISBN in the DOI).", "",
           "Gemini requests (works already judged are not re-sent; their verdicts are applied per work):", "",
@@ -345,9 +355,11 @@ step5_lines_cache: list[str] = []
 def step5(con) -> list[str]:
     acifs_full = pd.read_parquet(ACIFS_ARC)
     verdicts = load_verdicts(OEUVRE_DIR / "gemini_verdicts.jsonl")
+    sdois, sacifs = trusted_profile_dois(acifs_full)
     req = cls.classify(con, OEUVRE_DIR / "acif_works_single.parquet", OEUVRE_DIR / "acif_work_graph.parquet",
                        acifs_full, verdicts, OEUVRE_DIR / "acif_works_classified.parquet",
-                       OEUVRE_DIR / "gemini_requests.parquet", orcid_dois=claimed_dois(acifs_full))
+                       OEUVRE_DIR / "gemini_requests.parquet", orcid_dois=claimed_dois(acifs_full),
+                       scopus_dois=sdois, scopus_acifs=sacifs)
     lines = classify_section(con, req, verdicts)
     step5_lines_cache[:] = lines
     return lines

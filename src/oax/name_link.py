@@ -156,6 +156,41 @@ def name_links(con, acifs: pd.DataFrame, taken, windows: pd.DataFrame, arc_main:
     return pairs, decide(acifs.cluster_id, pairs, set(windows.cluster_id))
 
 
+def name_tier(con, pairs: pd.DataFrame, acifs: pd.DataFrame, arc_main: pd.DataFrame, prep=AUTHORS_PREP) -> pd.DataFrame:
+    """The name tier of given (cluster_id, author_idx) pairs by the same tests as name_links():
+    'full' (a main name with a full given name is shared), 'loose' (main names not incompatible) or
+    None. acifs: cluster_id, full_name_keys; arc_main: acif_main_keys()."""
+    p = pairs[["cluster_id", "author_idx"]].astype({"author_idx": "int64"}).drop_duplicates()
+    con.register("nt_p", p)
+    con.register("nt_ak", _key_parts(acifs[acifs.cluster_id.isin(set(p.cluster_id))], "cluster_id")[["cluster_id", "k"]])
+    am = arc_main[arc_main.cluster_id.isin(set(p.cluster_id))].copy()
+    am["giv"] = am.k.str.split("_", n=1).str[0]
+    am["fam"] = am.k.str.split("_", n=1).str[1]
+    con.register("nt_am", am)
+    con.execute(f"""CREATE OR REPLACE TEMP TABLE nt_ok AS
+        SELECT author_idx, main_key, k FROM (SELECT author_idx, full_name_key AS main_key, unnest(full_name_keys) AS k
+            FROM read_parquet('{prep}') WHERE author_idx IN (SELECT author_idx FROM nt_p))""")
+    con.execute("""CREATE OR REPLACE TEMP TABLE nt_om AS
+        SELECT DISTINCT author_idx, main_key AS k, split_part(main_key, '_', 1) AS giv,
+               substr(main_key, strpos(main_key, '_') + 1) AS fam FROM nt_ok WHERE strpos(main_key, '_') > 0""")
+    return con.execute("""
+        WITH f AS (SELECT DISTINCT p.cluster_id, p.author_idx FROM nt_p p
+                   JOIN nt_am a ON a.cluster_id = p.cluster_id AND len(a.giv) > 1
+                   JOIN nt_ok o ON o.author_idx = p.author_idx AND o.k = a.k
+                   UNION
+                   SELECT DISTINCT p.cluster_id, p.author_idx FROM nt_p p
+                   JOIN nt_om m ON m.author_idx = p.author_idx AND len(m.giv) > 1
+                   JOIN nt_ak k ON k.cluster_id = p.cluster_id AND k.k = m.k),
+             l AS (SELECT DISTINCT p.cluster_id, p.author_idx FROM nt_p p
+                   JOIN nt_am a ON a.cluster_id = p.cluster_id
+                   JOIN nt_om m ON m.author_idx = p.author_idx AND m.fam = a.fam
+                   WHERE a.giv = m.giv OR (len(a.giv) = 1 AND left(m.giv, 1) = a.giv)
+                         OR (len(m.giv) = 1 AND left(a.giv, 1) = m.giv))
+        SELECT p.cluster_id, p.author_idx,
+               CASE WHEN f.author_idx IS NOT NULL THEN 'full' WHEN l.author_idx IS NOT NULL THEN 'loose' END AS tier
+        FROM nt_p p LEFT JOIN f USING (cluster_id, author_idx) LEFT JOIN l USING (cluster_id, author_idx)""").fetchdf()
+
+
 def decide(acif_ids, pairs: pd.DataFrame, testable: set) -> pd.DataFrame:
     """One row per ACIF: status, tier used, the accepted author_idx (if any), passing count."""
     out = []

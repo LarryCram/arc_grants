@@ -20,6 +20,11 @@ src/00d_extract_scopus.py       → processed/scopus_extract/: one Scopus Author
 src/00e_extract_orcid_bulk.py   → processed/orcid_bulk_extract/: ORCID bulk-file records sharing a
                                   full-given-name key with an ARC record, with employers resolved to
                                   ARC HEP codes (ROR or exact normalised name), names re-parsed
+src/00f_extract_scopus_documents.py → processed/scopus_extract/scopus_profile_documents.parquet: every
+                                  document of chosen Scopus profiles (one cached ScopusSearch AU-ID per
+                                  profile; 429 back-off, small pages for very-many-author profiles):
+                                  --targets all-trusted (profiles carrying the ACIF's ORCID, for step 5)
+                                  or unlinked (every 00d profile of ACIFs the linker left unlinked)
 src/acif/                       → the cyclic ACIF build (models, build, features, scopus); so far
                                   build_acifs(): load_items() → seed() → merge_by_orcid() → Scopus
                                   pass one (Scopus-found ORCIDs) → pass two (shared Scopus profile)
@@ -40,6 +45,9 @@ src/02_link_arc_oax.py + src/oax/ → the NEW ARC↔OpenAlex linker, built one s
                                   then works-first for ACIFs left open (src/oax/works_link.py: the one
                                   record with most works co-authored with linked ARC co-investigators,
                                   else the only record with works at a grant university in grant years)
+                                  then the Scopus DOI bridge (2026-10-09, src/oax/scopus_link.py: the
+                                  ACIF's one Scopus profile; the same-name record holding most of its
+                                  DOIs, unless taken, other-ORCID or name-incompatible)
                                   → processed/oax_link/ (`--calibrate` scores stage 2 on ORCID-linked ACIFs)
 src/03_build_oeuvres.py + src/oeuvre/ → the oeuvre extractor (2026-10-07), on stage-1 accepted
                                   links: so far step 1, acif_works.parquet (one row per ACIF x work:
@@ -56,9 +64,11 @@ src/03_build_oeuvres.py + src/oeuvre/ → the oeuvre extractor (2026-10-07), on 
                                   acif_work_graph.parquet (works joined by shared co-author / own
                                   institution / specific venue; components by SQL label propagation;
                                   the core = component with most anchored works), then step 5,
-                                  acif_works_classified.parquet (accept / reject / unsure / pending:
+                                  acif_works_classified.parquet (accept / reject / unsure:
                                   reference-work entries collapsed to one per book, then rules,
-                                  then Gemini verdicts) → processed/oeuvre/
+                                  then saved Gemini verdicts, then the person's trusted Scopus profile
+                                  for 'fits core' accepts and unjudged works -- Scopus replaced paid
+                                  Gemini 2026-10-08) → processed/oeuvre/
 src/03a_gemini_judge.py         → sends step 5's Gemini requests within a budget (GEMINI_API_KEY in
                                   .env); answers saved once in processed/oeuvre/gemini_verdicts.jsonl
 src/utils/acif_oax_linker.py    → the OLD ARC↔OpenAlex candidate finder (with sql/01-04; reads

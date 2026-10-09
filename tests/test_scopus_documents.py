@@ -56,3 +56,18 @@ def test_output_keeps_earlier_runs(monkeypatch, tmp_path):
     out = m.write_documents({"2": [("2", "e3", None, "2003", "ar", "new", "J")], "3": []})
     assert sorted(out.eid) == ["e1", "e3"]                       # profile 2 replaced, profile 1 kept
     assert len(pd.read_parquet(tmp_path / "docs.parquet")) == 2
+
+
+def test_other_error_retried_with_small_pages(monkeypatch, tmp_path):
+    monkeypatch.setattr(m, "LOG", tmp_path / "run.log")
+    f = m.Fetcher()
+    seen = []
+
+    def search(q, **kw):
+        seen.append(kw.get("count"))
+        if "count" not in kw:
+            raise ConnectionError("read timed out")
+        return SimpleNamespace(results=[])
+    f.search = search
+    f.one("123")
+    assert seen == [None, m.SMALL_PAGE] and f.done == 1 and not f.failed

@@ -14,6 +14,9 @@ Stages so far:
      accepted when exactly one passes.
   3. Works-first links (src/oax/works_link.py), for ACIFs stage 2 left open: the same candidates'
      works, linked on co-investigator co-authorship or works at a grant university in grant years.
+  4. Scopus DOI bridge (src/oax/scopus_link.py), for ACIFs still unlinked: the one Scopus profile
+     00d's search found for the ACIF (documents fetched by 00f --targets unlinked); the same-name
+     record holding the most of its DOIs is linked.
 
 Inputs: acifs_arc.parquet (src/01_build_arc_acifs.py), openalex_authors_prep.parquet (00b).
 Outputs (OAX_LINK_DIR = processed/oax_link/):
@@ -25,6 +28,9 @@ Outputs (OAX_LINK_DIR = processed/oax_link/):
     works_evidence.parquet    works-first: every candidate with its works / co-investigator / university counts
     works_decisions.parquet   works-first: one row per ACIF left open by stage 2
     works_links.parquet       works-first: accepted (ACIF, author) links
+    scopus_evidence.parquet   DOI bridge: every (ACIF, profile, candidate) with the profile's DOIs and shared DOIs
+    scopus_decisions.parquet  DOI bridge: one row per ACIF still unlinked after works-first
+    scopus_links.parquet      DOI bridge: accepted (ACIF, author) links
     calibration_works_evidence.parquet   (--calibrate) works-first evidence on ORCID-linked ACIFs, with
                               `correct` = the record is the ACIF's accepted ORCID link
     report.md                 statistics and examples per stage
@@ -41,9 +47,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import duckdb
 import pandas as pd
 
-from config.settings import ACIFS_ARC, DUCKDB_TMP_DIR, OAX_LINK_DIR
+from config.settings import ACIFS_ARC, DUCKDB_TMP_DIR, OAX_LINK_DIR, SCOPUS_EXTRACT_DIR
 from src.oax.name_link import (MIN_YEARS, WINDOW_AFTER, WINDOW_BEFORE, acif_main_keys, calibrate, name_links,
-                                single_institution_windows)
+                                name_tier, single_institution_windows)
+from src.oax import scopus_link as sl
+from src.oax.name_link import AUTHORS_PREP
 from src.oax import works_link as wl
 from src.oax.orcid_link import (MINOR_SHARE, apply_overrides, decide, load_acifs, load_authors,
                                 load_name_evidence, load_outside_authors, load_overrides, orcid_links,
@@ -191,6 +199,43 @@ def works_section(acifs, ev, wdec, wlinks, cal) -> list[str]:
     return L + [""]
 
 
+def scopus_section(acifs, sev, sdec, slinks, scal) -> list[str]:
+    a = acifs.set_index("cluster_id")
+    d = sdec.join(a[["full_names", "last_year"]], on="cluster_id")
+    L = ["## Stage 2, Scopus DOI bridge", "",
+         "Rule: the ACIF's one Scopus profile (from 00d's name + grant-university search, less profiles carrying "
+         "another ORCID or refused by hand); among the OpenAlex authors on its works sharing a first initial and family "
+         f"name with the ACIF, the one holding the most of its DOIs is taken when it holds >= {sl.MIN_SHARED} and "
+         f">= {sl.MIN_SHARE:.0%} of the profile's DOIs in OpenAlex, with no tie; it is linked unless an earlier stage "
+         "linked it to another ACIF, it carries another ORCID, or its main name is incompatible with the ACIF's "
+         "(stage 2's test) and no full given name of the two is a nickname of the other (accept_scopus_nickname).", "",
+         f"- ACIFs still unlinked after works-first: {len(sdec):,}; **linked: {int(sdec.status.str.startswith('accept').sum()):,}**", "",
+         "| status | ACIFs | last grant < 2015 | >= 2015 |", "|---|---|---|---|"]
+    for st, sub in d.groupby("status"):
+        L.append(f"| {st} | {len(sub):,} | {int((sub.last_year < 2015).sum()):,} | {int((sub.last_year >= 2015).sum()):,} |")
+    if scal:
+        L += ["", f"Calibration on ORCID-linked ACIFs with their trusted profile (carrying the ACIF's ORCID), nothing "
+              f"taken: {scal['acifs']:,} ACIFs; linked {scal['linked']:,}, of which the ORCID-linked record "
+              f"{scal['correct']:,} ({scal['correct'] / max(scal['linked'], 1):.1%}); ties {scal['ties']:,}. This checks the "
+              "DOI-to-record step only; the risk that a single profile found by search is a namesake's is the same as in "
+              "Scopus pass one of the ACIF build."]
+    L += ["", "Examples, accepted:", ""]
+    for r in slinks.merge(d[["cluster_id", "full_names"]], on="cluster_id").sample(min(15, len(slinks)), random_state=7).itertuples():
+        L.append(f"- {r.cluster_id} ({', '.join(r.full_names)}): A{r.author_idx} {r.author_name} via Scopus {r.scopus_id} "
+                 f"({r.shared_dois} of the profile's {r.profile_dois_in_openalex} OpenAlex DOIs)")
+    nm = {**dict(zip(sev.author_idx, sev.author_name))}
+    for st, title in (("accept_scopus_nickname", "Accepted on a nickname"),
+                      ("record_linked_elsewhere", "Record already linked to another ACIF (possibly the same person; reported only)"),
+                      ("record_other_orcid", "Record carries another ORCID than the ACIF's"),
+                      ("record_name_differs", "Record's main name incompatible with the ACIF's")):
+        sub = d[d.status == st]
+        L += ["", f"{title}: {len(sub):,}", ""]
+        for r in sub.itertuples():
+            other = f" -> {r.linked_to_acif} ({', '.join(a.loc[r.linked_to_acif, 'full_names'])})" if isinstance(r.linked_to_acif, str) else ""
+            L.append(f"- {r.cluster_id} ({', '.join(r.full_names)}): A{int(r.author_idx)} {nm.get(r.author_idx, '')}{other}")
+    return L + [""]
+
+
 def name_section(acifs, pairs, dec) -> list[str]:
     a = acifs.set_index("cluster_id")
     d = dec.join(a[["full_names", "last_year", "full_name_keys"]], on="cluster_id")
@@ -284,7 +329,36 @@ def main():
         kev.assign(correct=[(c, int(a)) in ok for c, a in zip(kev.cluster_id, kev.author_idx)]).to_parquet(
             OAX_LINK_DIR / "calibration_works_evidence.parquet", index=False)
 
+    # Scopus DOI bridge, for ACIFs works-first left unlinked
+    s_ids = wdec.loc[~wdec.status.str.startswith("accept"), "cluster_id"]
+    orc1 = {c: o[0] for c, o in zip(acifs.cluster_id, acifs.orcids) if len(o)}
+    docs = pd.read_parquet(SCOPUS_EXTRACT_DIR / "scopus_profile_documents.parquet", columns=["scopus_id", "doi"])
+    fetched = set(docs.scopus_id)
+    sprof = sl.usable_profiles(sl.searched_profiles(s_ids), orc1, sl.refused_orcids(s_ids))
+    one_prof = sprof[sprof.cluster_id.map(sprof.cluster_id.value_counts()) == 1]
+    sev = sl.bridge_evidence(con, acifs, one_prof[one_prof.scopus_id.isin(fetched)], docs)
+    taken = {int(a_): c for c, a_ in zip(linked_all.cluster_id, linked_all.author_idx)}
+    taken.update({int(a_): c for c, a_ in zip(wlinks.cluster_id, wlinks.author_idx)})
+    tops = pd.concat([sl.top_records(d_) for _, d_ in sev.groupby("cluster_id")]) if len(sev) else sev
+    tiers = {(c, int(a_)): t for c, a_, t in name_tier(con, tops, acifs, acif_main_keys(tops.cluster_id)).itertuples(index=False)}
+    rkeys = pd.read_parquet(AUTHORS_PREP, columns=["author_idx", "full_name_keys"])
+    rkeys = dict(zip(rkeys.author_idx, rkeys.full_name_keys)) if len(tops) else {}
+    akeys = dict(zip(acifs.cluster_id, acifs.full_name_keys))
+    nick = {(c, int(a_)) for c, a_ in zip(tops.cluster_id, tops.author_idx)
+            if sl.nickname_related(akeys.get(c), rkeys.get(int(a_)))}
+    sdec, slinks = sl.decide(s_ids, sprof, fetched, sev, orc1, taken, tiers, nick)
+    scal = None
+    if args.calibrate:
+        kprof = sl.searched_profiles(known.cluster_id)
+        trusted = pd.Series([orc1.get(c) == o for c, o in zip(kprof.cluster_id, kprof.profile_orcid)], index=kprof.index)
+        kprof = kprof[trusted & kprof.scopus_id.isin(fetched)]
+        kprof = kprof[kprof.cluster_id.map(kprof.cluster_id.value_counts()) == 1]
+        scal = sl.calibrate(sl.bridge_evidence(con, known, kprof, docs), acc_links[["cluster_id", "author_idx"]])
+
     links.to_parquet(OAX_LINK_DIR / "orcid_links.parquet", index=False)
+    sev.to_parquet(OAX_LINK_DIR / "scopus_evidence.parquet", index=False)
+    sdec.to_parquet(OAX_LINK_DIR / "scopus_decisions.parquet", index=False)
+    slinks.to_parquet(OAX_LINK_DIR / "scopus_links.parquet", index=False)
     ev.to_parquet(OAX_LINK_DIR / "works_evidence.parquet", index=False)
     wdec.to_parquet(OAX_LINK_DIR / "works_decisions.parquet", index=False)
     wlinks.to_parquet(OAX_LINK_DIR / "works_links.parquet", index=False)
@@ -293,7 +367,8 @@ def main():
     rejected.to_parquet(OAX_LINK_DIR / "orcid_rejected.parquet", index=False)
     miss.to_parquet(OAX_LINK_DIR / "orcid_unmatched.parquet", index=False)
     text = "\n".join(["# ARC<->OpenAlex linking", ""] + orcid_section(acifs, links, miss, rejected, shared)
-                     + name_section(acifs, pairs, dec) + cal_lines + works_section(acifs, ev, wdec, wlinks, wcal))
+                     + name_section(acifs, pairs, dec) + cal_lines + works_section(acifs, ev, wdec, wlinks, wcal)
+                     + scopus_section(acifs, sev, sdec, slinks, scal))
     (OAX_LINK_DIR / "report.md").write_text(text, encoding="utf-8")
     print(text)
 

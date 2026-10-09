@@ -2,7 +2,7 @@
 Step 5 of the oeuvre extractor (2026-10-07, user): class every (ACIF, work) as accept / reject /
 unsure, accepting liberally. Rules settle most works; the doubtful remainder becomes requests for
 Gemini (src/oeuvre/gemini.py, run separately with a budget by src/03a_gemini_judge.py), whose saved
-verdicts are applied here on the next run. Until a request is answered its works are 'pending'.
+verdicts are applied here on the next run; works still unjudged are decided from the person's Scopus profile.
 
 Reference-work entries first (2026-10-08, user): OpenAlex sometimes gives every chapter of a
 reference work (an encyclopedia) the whole book's contributor list, so a person who wrote one entry
@@ -33,6 +33,15 @@ Then, in order (the core and components come from step 4, acif_work_graph.parque
 Gemini verdicts: component 'same' -> accept, works 'in' -> accept; 'different' / 'out' with high
 confidence -> reject; anything else -> unsure. Per-work verdicts are kept per (ACIF, work): a work
 already judged is not sent again even if the candidate list around it changes.
+
+Scopus (2026-10-08, user: Scopus replaces paid Gemini for the works still to judge): works accepted
+by 'fits core' and works still pending (no Gemini verdict) are decided from the person's TRUSTED
+Scopus profile(s) (src/oeuvre/scopus_check.py), matching every version's DOI:
+  accept  on the profile
+  reject  an article or review with a DOI absent from a trusted profile
+  unsure  anything else: no trusted profile fetched, or not an article/review with a DOI (Scopus
+          holds only ~40% of the core's books and chapters)
+Column on_scopus_profile is filled for every work of an ACIF with a trusted profile.
 """
 
 from __future__ import annotations
@@ -113,7 +122,8 @@ def _rules(con, works_path, graph_path) -> None:
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE cw AS
         SELECT g.*, w.publication_year AS y, w.fields[1].name AS top_field, w.title, w.type, w.source_id, w.doi,
-               w.authors_count, w.cited_by_count, w.authorships, a.first_year
+               w.authors_count, w.cited_by_count, w.authorships, a.first_year,
+               list_distinct([lower(v.doi) FOR v IN w.versions IF v.doi IS NOT NULL]) AS version_dois
         FROM read_parquet('{graph_path}') g JOIN read_parquet('{works_path}') w USING (cluster_id, work_idx)
         JOIN acif_in a USING (cluster_id)""")
     con.execute("""
@@ -293,7 +303,7 @@ def saved_work_verdicts(verdicts: dict) -> pd.DataFrame:
 
 
 def apply_verdicts(con, verdicts: dict, req: pd.DataFrame, out_path) -> None:
-    """Write the classed works: decision accept/reject/unsure/pending, decided_by, reason."""
+    """Write the classed works: decision accept/reject/unsure, decided_by, reason."""
     rows = []
     for r in req[req.kind == "component"].itertuples():
         v = verdicts.get(r.request_key)
@@ -306,24 +316,49 @@ def apply_verdicts(con, verdicts: dict, req: pd.DataFrame, out_path) -> None:
     g = pd.concat([pd.DataFrame(rows, columns=["cluster_id", "work_idx", "g_decision", "g_reason"]),
                    saved_work_verdicts(verdicts)], ignore_index=True)
     con.register("gv_in", g)
+    con.execute("""CREATE OR REPLACE TEMP TABLE on_prof AS
+        SELECT DISTINCT d.cluster_id, d.work_idx
+        FROM (SELECT cluster_id, work_idx, unnest(version_dois) AS doi FROM cw
+              WHERE cluster_id IN (SELECT cluster_id FROM scopus_acifs)) d JOIN scopus_dois USING (cluster_id, doi)""")
     con.execute(f"""
         COPY (
-            SELECT cls.cluster_id, cls.work_idx, cls.component, cls.rule,
-                   CASE WHEN cls.rule_decision <> 'request' THEN cls.rule_decision
-                        ELSE coalesce(g.g_decision, 'pending') END AS decision,
-                   CASE WHEN cls.rule_decision <> 'request' THEN 'rule'
-                        WHEN g.g_decision IS NOT NULL THEN 'gemini' END AS decided_by,
-                   CASE WHEN cls.rule_decision = 'request' THEN g.g_reason END AS reason
-            FROM cls LEFT JOIN (SELECT DISTINCT ON (cluster_id, work_idx) * FROM gv_in) g USING (cluster_id, work_idx)
-            ORDER BY cls.cluster_id, cls.work_idx
+            WITH b AS (
+                SELECT cls.*, g.g_decision, g.g_reason, cw.type, cw.doi,
+                       cls.rule = 'fits core' OR (cls.rule_decision = 'request' AND g.g_decision IS NULL) AS to_scopus,
+                       sa.cluster_id IS NOT NULL AS has_profile, op.work_idx IS NOT NULL AS on_profile
+                FROM cls JOIN cw USING (cluster_id, work_idx)
+                LEFT JOIN (SELECT DISTINCT ON (cluster_id, work_idx) * FROM gv_in) g USING (cluster_id, work_idx)
+                LEFT JOIN scopus_acifs sa USING (cluster_id)
+                LEFT JOIN on_prof op USING (cluster_id, work_idx))
+            SELECT cluster_id, work_idx, component, rule,
+                   CASE WHEN to_scopus AND on_profile THEN 'accept'
+                        WHEN to_scopus AND has_profile AND type IN ('article', 'review') AND doi IS NOT NULL THEN 'reject'
+                        WHEN to_scopus THEN 'unsure'
+                        WHEN rule_decision <> 'request' THEN rule_decision
+                        ELSE g_decision END AS decision,
+                   CASE WHEN to_scopus THEN 'scopus' WHEN rule_decision <> 'request' THEN 'rule' ELSE 'gemini' END AS decided_by,
+                   CASE WHEN to_scopus AND on_profile THEN 'on the trusted Scopus profile'
+                        WHEN to_scopus AND has_profile AND type IN ('article', 'review') AND doi IS NOT NULL
+                             THEN 'article or review absent from the trusted Scopus profile'
+                        WHEN to_scopus AND has_profile THEN 'absent from the trusted Scopus profile; not an article or review with a DOI'
+                        WHEN to_scopus THEN 'no trusted Scopus profile'
+                        WHEN rule_decision = 'request' THEN g_reason END AS reason,
+                   CASE WHEN has_profile THEN on_profile END AS on_scopus_profile
+            FROM b ORDER BY cluster_id, work_idx
         ) TO '{out_path}' (FORMAT parquet)""")
 
 
 def classify(con, works_path, graph_path, acifs_full: pd.DataFrame, verdicts: dict, out_path, requests_path,
-             orcid_dois: pd.DataFrame | None = None) -> pd.DataFrame:
+             orcid_dois: pd.DataFrame | None = None, scopus_dois: pd.DataFrame | None = None,
+             scopus_acifs: pd.DataFrame | None = None) -> pd.DataFrame:
     """Run the rules, write the Gemini requests (with prompts) and the classed works; returns requests.
-    orcid_dois: (cluster_id, doi) on the people's own ORCID records (src/oeuvre/orcid_works.py)."""
+    orcid_dois: (cluster_id, doi) on the people's own ORCID records (src/oeuvre/orcid_works.py);
+    scopus_dois / scopus_acifs: (cluster_id, doi) on their trusted Scopus profiles and (cluster_id) of
+    the ACIFs with one (src/oeuvre/scopus_check.py)."""
     con.register("acif_in", acifs_full[["cluster_id", "first_year"]])
+    empty = pd.DataFrame({"cluster_id": pd.Series(dtype=str), "doi": pd.Series(dtype=str)})
+    con.register("scopus_dois", scopus_dois if scopus_dois is not None else empty)
+    con.register("scopus_acifs", scopus_acifs if scopus_acifs is not None else empty[["cluster_id"]])
     con.register("orcid_dois", orcid_dois if orcid_dois is not None
                  else pd.DataFrame({"cluster_id": pd.Series(dtype=str), "doi": pd.Series(dtype=str)}))
     sw = saved_work_verdicts(verdicts)[["cluster_id", "work_idx"]]

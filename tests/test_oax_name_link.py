@@ -54,3 +54,18 @@ def test_name_links_tiers_and_decisions(tmp_path):
     assert d.loc["F", "status"] == "no_single_institution_grant"
     assert d.loc["G", "status"] == "none_pass" or d.loc["G", "status"] == "no_candidate"      # Jillian != Robert
     assert 8 not in set(pairs[(pairs.cluster_id == "G")].author_idx)
+
+
+def test_name_tier(tmp_path):
+    import duckdb
+    from src.oax.name_link import name_tier
+    prep = pd.DataFrame({"author_idx": [1, 2, 3, 4], "full_name_key": ["shaowu_zhang", "senyuan_zhang", "s_zhang", "lyn_beazley"],
+                         "full_name_keys": [["shaowu_zhang", "s_zhang"], ["senyuan_zhang", "s_zhang"], ["s_zhang"],
+                                            ["lyn_beazley", "l_beazley"]]})
+    prep.to_parquet(tmp_path / "prep.parquet")
+    acifs = pd.DataFrame({"cluster_id": ["Z", "B"], "full_name_keys": [["shaowu_zhang", "s_zhang"], ["lynda_beazley", "l_beazley"]]})
+    main = pd.DataFrame({"cluster_id": ["Z", "B"], "k": ["shaowu_zhang", "lynda_beazley"]})
+    pairs = pd.DataFrame({"cluster_id": ["Z", "Z", "Z", "B"], "author_idx": [1, 2, 3, 4]})
+    t = name_tier(duckdb.connect(), pairs, acifs, main, prep=tmp_path / "prep.parquet")
+    got = {a: (None if pd.isna(x) else x) for a, x in zip(t.author_idx, t.tier)}
+    assert got == {1: "full", 2: None, 3: "loose", 4: None}
