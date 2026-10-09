@@ -1,371 +1,193 @@
 """
-analysis/utils/dossier_build.py
+analysis/utils/dossier_build.py -- builds Dossier objects (analysis/utils/dossier.py) from persisted
+outputs only (rebuilt 2026-10-09; the earlier builder read the archived pipeline's tables):
 
-`build_dossier()`: constructs a Dossier from currently-persisted tables only. Research-mode
-partial version -- most of the plan's upstream tables (outlet columns, own_institution_metrics,
-coauthor_track_record_at_award, work_topic_diversity, Uzzi novelty) don't exist yet, so those
-fields are left at their empty/None defaults rather than faked. Fields populated now: identity,
-award_contexts (grant_id/scheme/award_year/career_age_at_award, no coauthor data yet), works
-(field/type/title/year/citations only -- no outlet/institution), annual_series.
+  ARC          acifs_arc.parquet, acif_arc_records.parquet (01), grants_flat.parquet (00a)
+  linker       processed/oax_link/: accepted_links, orcid_links, name_links, name_decisions,
+               works_evidence, works_decisions, scopus_links, scopus_decisions (02)
+  works        processed/oeuvre/: acif_works_single, acif_works_classified, acif_work_graph,
+               acif_work_citations (03)
+  OpenAlex     openalex_authors_prep.parquet (00b) for record names/ORCIDs, sources.parquet for venues
 
-Reuses analysis/07_analyse_ecr_fellowships.py's build_cohort()/add_for_division_panel() for
-cohort membership and panel classification rather than re-deriving that logic here.
+DossierBuilder loads the small tables once; build(cluster_id) reads one person's rows from the large
+ones by a filtered scan, so building many dossiers in a loop stays cheap.
 """
 
+from __future__ import annotations
+
 import sys
+from collections import Counter
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import duckdb
 import pandas as pd
 
-from config.settings import PROCESSED_DATA, OUTPUT_ROOT, OPENALEX_DIR, ADMIN_ORGS_CSV
-from config.scope import KEEP_SCHEMES
-from analysis.utils.dossier import AwardContext, Dossier, PileDiagnostic, Work, YearRecord
-from analysis.utils.dedup import create_deduped_works, count_exclusions
-from src.utils.oeuvre_build import AUTH_GLOB, STAGE3_SURVIVORS
-from src.utils.work_piling import PILING_RESULTS_GLOB, _safe_list
-from src.utils.cluster_checks import for2020_all_fields, for2020_all_subfields
-from src.utils.pipeline_freshness import assert_fresh
-from importlib import import_module
+from analysis.utils.dossier import Award, Dossier, LinkedRecord, Work
+from config.settings import (ACIF_ARC_RECORDS, ACIFS_ARC, ADMIN_ORGS_CSV, DUCKDB_TMP_DIR, OAX_LINK_DIR, OEUVRE_DIR,
+                             OPENALEX_DIR, PROCESSED_DATA)
+from src.utils.for_resolve import Resolver
 
-_ecr = import_module("analysis.07_analyse_ecr_fellowships")
-
-GRANT_MAP = str(PROCESSED_DATA / "arc_grant_cluster_map.parquet")
-GRANTS_FLAT = str(PROCESSED_DATA / "grants_flat.parquet")
-INV_RAW = str(PROCESSED_DATA / "investigators_raw.parquet")
-OEUVRES = str(OUTPUT_ROOT / "analysis" / "oeuvres.parquet")
-RESOLVED = str(PROCESSED_DATA / "arc_oax_resolved.parquet")
-ANNUAL_METRICS = str(OUTPUT_ROOT / "analysis" / "annual_metrics.parquet")
-AWARDS_CIF = str(PROCESSED_DATA / "awards_cif.parquet")
-
-# annual_metrics.parquet is the sole source of truth for aggregate per-year oeuvre stats (see
-# analysis/03_annual_metrics.py's own docstring) -- it always fully regenerates when that script
-# is run, so the real risk isn't the script producing stale output, it's a *caller* here reading
-# an old copy after oeuvres.parquet changed underneath it (a Stage 1/3 rerun, a manual oeuvre
-# correction) without 03_annual_metrics.py having been rerun since. Checked once, not per-call,
-# to keep repeated build_dossier() calls in a batch loop cheap.
-_ANNUAL_METRICS_SOURCE = Path(__file__).resolve().parents[2] / "analysis" / "03_annual_metrics.py"
-_DEDUP_SOURCE = Path(__file__).resolve().parent / "dedup.py"
-_annual_metrics_checked = False
+PREP = PROCESSED_DATA / "openalex_authors_prep.parquet"
+GRANTS_FLAT = PROCESSED_DATA / "grants_flat.parquet"
+STAGE_ORDER = {"orcid": 0, "name": 1, "works": 2, "scopus": 3}
 
 
-def _ensure_annual_metrics_fresh() -> None:
-    global _annual_metrics_checked
-    if _annual_metrics_checked:
-        return
-    assert_fresh(
-        "dossier_build (annual_metrics.parquet)",
-        outputs=[Path(ANNUAL_METRICS)],
-        inputs=[Path(OEUVRES), _ANNUAL_METRICS_SOURCE, _DEDUP_SOURCE],
-    )
-    _annual_metrics_checked = True
+class DossierBuilder:
+    def __init__(self, con: duckdb.DuckDBPyConnection | None = None):
+        self.con = con or duckdb.connect()
+        self.con.execute(f"SET temp_directory='{DUCKDB_TMP_DIR}'")
+        self.acifs = pd.read_parquet(ACIFS_ARC).set_index("cluster_id")
+        self.records = pd.read_parquet(ACIF_ARC_RECORDS)
+        self.grants = pd.read_parquet(GRANTS_FLAT, columns=[
+            "grant_code", "scheme_name", "years_funded", "end_year", "funding_announced", "n_eligible_orgs",
+            "primary_for_name"]).set_index("grant_code")
+        L = OAX_LINK_DIR
+        self.accepted = pd.read_parquet(L / "accepted_links.parquet")
+        self.orcid_links = pd.read_parquet(L / "orcid_links.parquet", columns=[
+            "cluster_id", "author_idx", "author_name", "orcid", "name_relation", "works_share", "status", "in_pool"])
+        self.name_links = pd.read_parquet(L / "name_links.parquet")
+        self.name_dec = pd.read_parquet(L / "name_decisions.parquet").set_index("cluster_id")
+        self.works_ev = pd.read_parquet(L / "works_evidence.parquet")
+        self.works_dec = pd.read_parquet(L / "works_decisions.parquet").set_index("cluster_id")
+        self.scopus_links = pd.read_parquet(L / "scopus_links.parquet")
+        self.scopus_dec = pd.read_parquet(L / "scopus_decisions.parquet").set_index("cluster_id")
+        org = pd.read_csv(ADMIN_ORGS_CSV)
+        org = org[org.hep_code.notna()].drop_duplicates("hep_code")
+        self.hep_name = dict(zip(org.hep_code, org.institution_name))
+        self.resolver = Resolver()
 
-_admin_orgs = pd.read_csv(ADMIN_ORGS_CSV)
-HEP_CODE_TO_NAME: dict[str, str] = dict(
-    _admin_orgs[_admin_orgs["hep_code"].notna()]
-    .drop_duplicates("hep_code")[["hep_code", "institution_name"]]
-    .itertuples(index=False, name=None)
-)
+    # ---- ARC ------------------------------------------------------------------------------------
+    def _division(self, codes) -> str | None:
+        prim = [c["code"][:2] for c in codes if c.get("is_primary")] or [c["code"][:2] for c in codes]
+        if not prim:
+            return None
+        d = Counter(prim).most_common(1)[0][0]
+        try:
+            return f"{d} {self.resolver.resolve(d, 'FOR2020', 'FOR2020').label.capitalize()}"
+        except Exception:
+            return d
 
+    def _awards(self, cid: str) -> list[Award]:
+        rec = self.records[self.records.cluster_id == cid]
+        out = []
+        for r in rec.drop_duplicates("grant_code").sort_values(["funding_commence_year", "grant_code"]).itertuples():
+            g = self.grants.loc[r.grant_code] if r.grant_code in self.grants.index else None
+            others = self.records[(self.records.grant_code == r.grant_code) & (self.records.cluster_id != cid)]
+            out.append(Award(
+                grant_code=r.grant_code, scheme=r.grant_code[:2], scheme_name=None if g is None else g.scheme_name,
+                role_code=r.role_code, is_fellowship=bool(r.is_fellowship),
+                year=None if pd.isna(r.funding_commence_year) else int(r.funding_commence_year),
+                years_funded=None if g is None or pd.isna(g.years_funded) else int(g.years_funded),
+                end_year=None if g is None or pd.isna(g.end_year) else int(g.end_year),
+                funding_announced=None if g is None or pd.isna(g.funding_announced) else float(g.funding_announced),
+                admin_org=r.admin_org, n_eligible_orgs=None if g is None or pd.isna(g.n_eligible_orgs) else int(g.n_eligible_orgs),
+                primary_for=None if g is None else g.primary_for_name,
+                declined=bool(r.declined) if pd.notna(r.declined) else False,
+                ended_early=bool(r.ended_early) if pd.notna(r.ended_early) else False,
+                coinvestigators=sorted(f"{o.full_name} ({o.role_code})" for o in others.itertuples())))
+        return out
 
-def _fetch_ecr_roles(cluster_id: str, con: duckdb.DuckDBPyConnection) -> list[str]:
-    roles_sql = ", ".join(f"'{r}'" for r in _ecr.ECR_ROLES)
-    rows = con.execute(f"""
-        SELECT DISTINCT i.role_code
-        FROM read_parquet('{GRANT_MAP}') m
-        JOIN read_parquet('{INV_RAW}') i ON m.unique_id = i.unique_id
-        WHERE m.cluster_id = ? AND i.role_code IN ({roles_sql})
-        ORDER BY 1
-    """, [cluster_id]).fetchall()
-    return [r[0] for r in rows]
+    # ---- linker ---------------------------------------------------------------------------------
+    def _links(self, cid: str) -> tuple[list[LinkedRecord], list[str]]:
+        acc = self.accepted[self.accepted.cluster_id == cid].copy()
+        info = {}
+        if len(acc):
+            ids = ",".join(str(int(a)) for a in acc.author_idx)
+            info = {int(r[0]): (r[1], r[2]) for r in self.con.execute(
+                f"SELECT author_idx, full_name, orcid FROM read_parquet('{PREP}') WHERE author_idx IN ({ids})").fetchall()}
+        out = []
+        for r in acc.sort_values("stage", key=lambda s: s.map(STAGE_ORDER)).itertuples():
+            aid = int(r.author_idx)
+            name, orcid = info.get(aid, (None, None))
+            if r.stage == "orcid":
+                o = self.orcid_links[(self.orcid_links.cluster_id == cid) & (self.orcid_links.author_idx == aid)].iloc[0]
+                name, orcid = name or o.author_name, orcid or o.orcid
+                ev = f"shares the ACIF's ORCID; names: {o.name_relation}; {o.works_share:.0%} of the ACIF's linked works" \
+                     + ("" if o.in_pool else "; outside the Australian-context pool")
+            elif r.stage == "name":
+                n = self.name_links[(self.name_links.cluster_id == cid) & (self.name_links.author_idx == aid)]
+                yrs = int(n.years_at_grant_university.iloc[0]) if len(n) else 0
+                ev = f"only name-compatible record with OpenAlex affiliation at a grant university in {yrs} grant years"
+            elif r.stage == "works":
+                e = self.works_ev[(self.works_ev.cluster_id == cid) & (self.works_ev.author_idx == aid)]
+                ev = (f"{int(e.coinv_works.iloc[0])} works with linked ARC co-investigators, "
+                      f"{int(e.uni_works.iloc[0])} works at a grant university in {int(e.uni_years.iloc[0])} grant years"
+                      if len(e) else r.status)
+            else:
+                s = self.scopus_links[(self.scopus_links.cluster_id == cid) & (self.scopus_links.author_idx == aid)]
+                ev = (f"holds {int(s.shared_dois.iloc[0])} of the {int(s.profile_dois_in_openalex.iloc[0])} OpenAlex DOIs of "
+                      f"Scopus profile {s.scopus_id.iloc[0]}" + (" (nickname)" if r.status.endswith("nickname") else "")
+                      if len(s) else r.status)
+            out.append(LinkedRecord(aid, name, orcid, r.stage, r.status,
+                                    None if pd.isna(r.works_count_global) else int(r.works_count_global), ev))
+        route = []
+        a = self.acifs.loc[cid]
+        if len(a.orcids):
+            refused = self.orcid_links[self.orcid_links.cluster_id == cid]
+            route.append(f"ORCID {a.orcids[0]}: " + ("no OpenAlex record carries it" if not len(refused)
+                                                     else "records carrying it not accepted (" + ", ".join(refused.status) + ")"))
+        if cid in self.name_dec.index:
+            route.append(f"name + institution: {self.name_dec.loc[cid, 'status']}")
+        if cid in self.works_dec.index:
+            route.append(f"works-first: {self.works_dec.loc[cid, 'status']}")
+        if cid in self.scopus_dec.index:
+            route.append(f"Scopus DOI bridge: {self.scopus_dec.loc[cid, 'status']}")
+        return out, route
 
+    # ---- works ----------------------------------------------------------------------------------
+    def _works(self, cid: str) -> tuple[list[Work], dict, dict]:
+        O = OEUVRE_DIR
+        q = f"""
+            SELECT s.work_idx, s.publication_year, s.type, s.title, src.display_name AS venue, s.doi,
+                   s.cited_by_count, s.authors_count, s.fields[1].name AS field, s.n_versions,
+                   k.decision, k.rule, k.decided_by, k.reason, k.on_scopus_profile, coalesce(g.in_core, false) AS in_core
+            FROM read_parquet('{O}/acif_works_single.parquet') s
+            JOIN read_parquet('{O}/acif_works_classified.parquet') k USING (cluster_id, work_idx)
+            LEFT JOIN read_parquet('{O}/acif_work_graph.parquet') g USING (cluster_id, work_idx)
+            LEFT JOIN read_parquet('{OPENALEX_DIR}/sources.parquet') src ON src.source_idx = s.source_id
+            WHERE s.cluster_id = ?"""
+        d = self.con.execute(q, [cid]).fetchdf()
+        rejected = Counter(d.loc[d.decision == "reject", "rule"])
+        keep = d[d.decision != "reject"]
+        works = [Work(int(r.work_idx), None if pd.isna(r.publication_year) else int(r.publication_year), r.type, r.title,
+                      r.venue if isinstance(r.venue, str) else None, r.doi, int(r.cited_by_count or 0),
+                      None if pd.isna(r.authors_count) else int(r.authors_count),
+                      r.field if isinstance(r.field, str) else None, r.decision, r.rule, r.decided_by,
+                      r.reason if isinstance(r.reason, str) else None, bool(r.in_core),
+                      None if pd.isna(r.on_scopus_profile) else bool(r.on_scopus_profile),
+                      int(r.n_versions) if pd.notna(r.n_versions) else 1)
+                 for r in keep.itertuples()]
+        cites: dict[int, dict[int, int]] = {}
+        if len(keep):
+            con = self.con
+            con.register("dz_w", keep[["work_idx"]].astype("int64"))
+            for w, y, n in con.execute(f"""SELECT c.work_idx, c.year, c.citations FROM read_parquet('{O}/acif_work_citations.parquet') c
+                                           JOIN dz_w USING (work_idx)""").fetchall():
+                cites.setdefault(int(w), {})[int(y)] = int(n)
+        return works, dict(rejected), cites
 
-def _fetch_award_contexts(cluster_id: str, con: duckdb.DuckDBPyConnection, first_pub_year: int | None) -> list[AwardContext]:
-    """Every grant this cluster holds any role on -- not scoped to ECR_ROLES (2026-08-18
-    correction: an ACIF is a whole person, not one award episode, so filtering the award list
-    to ECR-role grants only silently dropped real grants -- e.g. Andrew Burrow's DP0985878,
-    where his role is CI -- from his own record. An ECR-specific view should filter on
-    award_year/career_age_at_award instead of hiding role_code='CI' grants outright."""
-    rows = con.execute(f"""
-        SELECT DISTINCT g.grant_code, g.scheme_name, i.role_code,
-               CAST(g.funding_commence_year AS INTEGER) AS award_year
-        FROM read_parquet('{GRANT_MAP}') m
-        JOIN read_parquet('{INV_RAW}') i ON m.unique_id = i.unique_id
-        JOIN read_parquet('{GRANTS_FLAT}') g ON i.grant_code = g.grant_code
-        WHERE m.cluster_id = ?
-        ORDER BY award_year
-    """, [cluster_id]).fetchall()
-
-    out = []
-    for grant_code, scheme_name, role_code, award_year in rows:
-        others = con.execute(f"""
-            SELECT DISTINCT i.first_name, i.family_name, i.role_code
-            FROM read_parquet('{INV_RAW}') i
-            WHERE i.grant_code = ? AND i.unique_id NOT IN (
-                SELECT unique_id FROM read_parquet('{GRANT_MAP}') WHERE cluster_id = ?
-            )
-            ORDER BY 1, 2
-        """, [grant_code, cluster_id]).fetchall()
-        other_investigators = [f"{fn} {ln} ({rc})" for fn, ln, rc in others]
-        out.append(AwardContext(
-            grant_id=grant_code,
-            scheme=scheme_name,
-            role_code=role_code,
-            award_year=award_year,
-            career_age_at_award=(award_year - first_pub_year) if (first_pub_year and award_year) else None,
-            other_investigators=other_investigators,
-        ))
-    return out
-
-
-def _fetch_acif_fields_subfields(cluster_id: str, con: duckdb.DuckDBPyConnection) -> tuple[list[str], list[str]]:
-    """This ACIF's own declared FOR2020 codes (awards_cif.parquet), resolved to OAX field/
-    subfield sets -- what piling's channel_piles() checks each pile against. Empty ([], []) if
-    the ACIF isn't in awards_cif.parquet (e.g. excluded) or has no resolvable FOR codes."""
-    row = con.execute(
-        f"SELECT for2020_codes FROM read_parquet('{AWARDS_CIF}') WHERE cluster_id = ?", [cluster_id]
-    ).fetchone()
-    if not row or row[0] is None:
-        return [], []
-    codes = [dict(c) for c in row[0]]
-    return sorted(for2020_all_fields(codes)), sorted(for2020_all_subfields(codes))
-
-
-def _fetch_acif_orcids(cluster_id: str, con: duckdb.DuckDBPyConnection) -> list[str]:
-    """This ACIF's own ARC-recorded ORCID(s) (awards_cif.parquet's orcids) -- what piling's
-    orcid_match is checked against."""
-    row = con.execute(
-        f"SELECT orcids FROM read_parquet('{AWARDS_CIF}') WHERE cluster_id = ?", [cluster_id]
-    ).fetchone()
-    if not row or row[0] is None:
-        return []
-    return list(row[0])
-
-
-def _fetch_acif_institutions(cluster_id: str, con: duckdb.DuckDBPyConnection) -> list[str]:
-    """This ACIF's own HEP institutions (awards_cif.parquet's hep_codes -- union across every
-    grant's eligible_orgs, not just the administering org), resolved to full names via
-    admin_orgs.csv where available -- "Name (CODE)", falling back to the bare code if a code
-    has no name mapping. What piling's hep_match is checked against."""
-    row = con.execute(
-        f"SELECT hep_codes FROM read_parquet('{AWARDS_CIF}') WHERE cluster_id = ?", [cluster_id]
-    ).fetchone()
-    if not row or row[0] is None:
-        return []
-    return [
-        f"{HEP_CODE_TO_NAME[code]} ({code})" if code in HEP_CODE_TO_NAME else code
-        for code in sorted(row[0])
-    ]
-
-
-def _fetch_piling_diagnostics(cluster_id: str, con: duckdb.DuckDBPyConnection) -> list[PileDiagnostic]:
-    """Per-pile corroboration diagnostics from oeuvre_piling_results.parquet (src/utils/
-    work_piling.py) -- excludes noise (pile_id=-1). Empty list if this ACIF hasn't been piled
-    yet (not the same as "piled and found nothing" -- piling coverage is still being
-    backfilled across the population), or has fewer than 2 candidate works (not evaluated)."""
-    piles = con.execute(f"""
-        SELECT pile_id, count(*) AS n_works,
-               any_value(orcid_match) AS orcid_match, any_value(hep_match) AS hep_match,
-               any_value(field_match) AS field_match, any_value(subfield_match) AS subfield_match,
-               any_value(confirmed) AS confirmed
-        FROM read_parquet('{PILING_RESULTS_GLOB}')
-        WHERE cluster_id = ? AND pile_id != -1
-        GROUP BY pile_id
-        ORDER BY n_works DESC
-    """, [cluster_id]).fetchdf()
-    if piles.empty:
-        return []
-
-    work_pile = con.execute(f"""
-        SELECT pile_id, work_idx FROM read_parquet('{PILING_RESULTS_GLOB}')
-        WHERE cluster_id = ? AND pile_id != -1
-    """, [cluster_id]).fetchdf()
-
-    surv = con.execute(f"""
-        SELECT work_idx, field_names, subfield_names, source_author_idxs, publication_year
-        FROM read_parquet('{STAGE3_SURVIVORS}')
-        WHERE cluster_id = ?
-    """, [cluster_id]).fetchdf().set_index("work_idx")
-
-    own_idxs: set[int] = set()
-    for lst in surv["source_author_idxs"]:
-        if lst is not None:
-            own_idxs.update(int(x) for x in lst)
-
-    work_list = [int(w) for w in work_pile["work_idx"].tolist()]
-    coa = pd.DataFrame(columns=["work_idx", "display_name"])
-    if work_list:
-        wsql = ",".join(str(w) for w in work_list)
-        excl_sql = ",".join(str(x) for x in own_idxs) or "-1"
-        coa = con.execute(f"""
-            SELECT au.work_idx, a.display_name
-            FROM read_parquet('{AUTH_GLOB}') au
-            JOIN read_parquet('{OPENALEX_DIR}/authors/*.parquet') a ON a.author_idx = au.author_idx
-            WHERE au.work_idx IN ({wsql}) AND au.author_idx NOT IN ({excl_sql})
-        """).fetchdf()
-
-    out = []
-    for row in piles.itertuples():
-        pw = work_pile[work_pile["pile_id"] == row.pile_id]["work_idx"].tolist()
-        pfields, psub, pyears = set(), set(), set()
-        for w in pw:
-            if w in surv.index:
-                fn, sn, yr = surv.loc[w, "field_names"], surv.loc[w, "subfield_names"], surv.loc[w, "publication_year"]
-                pfields.update(_safe_list(fn))
-                psub.update(_safe_list(sn))
-                if pd.notna(yr):
-                    pyears.add(int(yr))
-        coauthor_names = sorted(coa[coa["work_idx"].isin(pw)]["display_name"].dropna().unique().tolist())
-        out.append(PileDiagnostic(
-            pile_id=int(row.pile_id), n_works=int(row.n_works),
-            orcid_match=row.orcid_match, hep_match=row.hep_match,
-            field_match=row.field_match, subfield_match=row.subfield_match,
-            confirmed=row.confirmed,
-            pile_fields=sorted(pfields), pile_subfields=sorted(psub),
-            coauthor_names=coauthor_names, pub_years=sorted(pyears),
-        ))
-    return out
+    def build(self, cid: str) -> Dossier:
+        a = self.acifs.loc[cid]
+        names = list(a.full_names)
+        name = max(names, key=len) if names else cid
+        links, route = self._links(cid)
+        works, rejected, cites = self._works(cid)
+        codes = [dict(c) for c in (a.for2020_codes if a.for2020_codes is not None else [])]
+        return Dossier(
+            cluster_id=cid, name=name, name_variants=[n for n in names if n != name],
+            orcids=list(a.orcids), orcid_sources=list(a.orcid_sources),
+            for_codes=[f"{c['code']} {c['name']}" + (" (primary)" if c.get("is_primary") else "") for c in codes],
+            main_division=self._division(codes),
+            universities=[f"{self.hep_name.get(h, h)} ({h})" for h in sorted(a.hep_codes)],
+            excluded=bool(a.excluded), excluded_reason=a.excluded_reason if isinstance(a.excluded_reason, str) else None,
+            awards=self._awards(cid), links=links, link_route=route if not any(l.stage == "orcid" for l in links) else [],
+            works=works, rejected=rejected, citations=cites)
 
 
-def _fetch_own_author_idx(cluster_id: str, con: duckdb.DuckDBPyConnection) -> int | None:
-    """This ACIF's own resolved (winning) OpenAlex author_idx, from 04_resolve_links.py's own
-    output -- the string oax_id ("https://openalex.org/A...") converted to the native integer
-    key, same pattern as 01_fetch_oeuvres.py's build_author_map() and every other raw-OpenAlex
-    join in this codebase (see CLAUDE.md's OpenAlex Snapshot Migration note on why the string
-    form must never be used for a raw-table join)."""
-    row = con.execute(f"""
-        SELECT TRY_CAST(regexp_replace(oax_id, 'https://openalex.org/A', '') AS BIGINT)
-        FROM read_parquet('{RESOLVED}')
-        WHERE arc_id = ?
-    """, [cluster_id]).fetchone()
-    return row[0] if row else None
-
-
-def _fetch_works(cluster_id: str, con: duckdb.DuckDBPyConnection) -> tuple[list[Work], dict[str, int]]:
-    safe_id = cluster_id.replace("'", "''")  # arc_ids are pipeline-controlled, but guard anyway
-    person_oeuvres = f"(SELECT * FROM read_parquet('{OEUVRES}') WHERE arc_id = '{safe_id}' AND is_primary_author_id = TRUE)"
-
-    count_exclusions(con, person_oeuvres, out_table="_dossier_exclusions")
-    excluded = dict(con.execute("SELECT reason, n FROM _dossier_exclusions").fetchall())
-
-    create_deduped_works(con, person_oeuvres, out_table="_dossier_deduped_works")
-    rows = con.execute("""
-        SELECT work_idx, publication_year, cited_by_count, type, title, field_name, subfield_name, domain_name
-        FROM _dossier_deduped_works
-        ORDER BY publication_year
-    """).fetchall()
-
-    own_author_idx = _fetch_own_author_idx(cluster_id, con)
-    inst_by_work: dict[int, list[str]] = {}
-    coauth_by_work: dict[int, list[str]] = {}
-    if own_author_idx is not None and rows:
-        work_idxs = [r[0] for r in rows]
-        au = con.execute(f"""
-            SELECT work_idx, author_idx, author_name, institution_name
-            FROM read_parquet('{AUTH_GLOB}')
-            WHERE work_idx IN ({','.join(str(w) for w in work_idxs)})
-        """).fetchdf()
-        own = au[au["author_idx"] == own_author_idx]
-        for w, names in own.groupby("work_idx")["institution_name"]:
-            inst_by_work[w] = sorted({n for n in names if isinstance(n, str) and n})
-        other = au[au["author_idx"] != own_author_idx]
-        for w, names in other.groupby("work_idx")["author_name"]:
-            coauth_by_work[w] = sorted({n for n in names if isinstance(n, str) and n})
-
-    works = [
-        Work(
-            work_idx=r[0], publication_year=r[1], cited_by_count=r[2], type=r[3], title=r[4],
-            field_name=r[5], subfield_name=r[6], domain_name=r[7],
-            institution_names=inst_by_work.get(r[0], []),
-            coauthor_names=coauth_by_work.get(r[0], []),
-        )
-        for r in rows
-    ]
-    return works, excluded
-
-
-def _fetch_annual_series(cluster_id: str, con: duckdb.DuckDBPyConnection) -> tuple[list[YearRecord], int | None]:
-    _ensure_annual_metrics_fresh()
-    rows = con.execute(f"""
-        SELECT year, first_pub_year, n_pubs, n_citations_snapshot, h_index, n_works_cumul,
-               total_citations_cumul, top_field, n_highly_cited
-        FROM read_parquet('{ANNUAL_METRICS}')
-        WHERE arc_id = ?
-        ORDER BY year
-    """, [cluster_id]).fetchall()
-    if not rows:
-        return [], None
-    first_pub_year = rows[0][1]
-    series = [
-        YearRecord(
-            year=r[0], n_pubs=r[2], n_citations_snapshot=r[3], h_index=r[4],
-            n_works_cumul=r[5], total_citations_cumul=r[6], top_field=r[7], n_highly_cited=r[8],
-        )
-        for r in rows
-    ]
-    return series, first_pub_year
-
-
-def build_dossier(cohort_row: pd.Series, con: duckdb.DuckDBPyConnection) -> Dossier:
-    """cohort_row: one row from build_cohort()/add_for_division_panel()'s output frame
-    (must have cluster_id, name, oax_id, for_codes, for_division, panel)."""
-    cluster_id = cohort_row["cluster_id"]
-
-    person = con.execute(
-        f"SELECT full_names FROM read_parquet('{AWARDS_CIF}') WHERE cluster_id = ?", [cluster_id]
-    ).fetchone()
-    full_names = list(person[0]) if person else [cohort_row["name"]]
-    # Fixed 2026-09-07: was full_names[0] -- awards_cif.parquet's full_names is a sorted SET
-    # (alphabetical), not ordered by recency or completeness, so "[0]" meant "whichever name
-    # happens to sort first," not anything actually preferred. Using the longest recorded form
-    # instead is a deliberate, display-only choice (unlike family_name_main/full_name_key,
-    # where "longest wins" was the bug) -- a report reader is better served by the fullest
-    # name than an arbitrary pick, and nothing here feeds a matching/scoring decision. Still a
-    # real residual limitation: this can't distinguish "most complete" from "most current" (a
-    # name change wouldn't necessarily produce the longest string) without per-item grant-year
-    # data, which full_names alone doesn't carry.
-    preferred_name = max(full_names, key=len)
-    name_variants = [n for n in full_names if n != preferred_name]
-
-    annual_series, first_pub_year = _fetch_annual_series(cluster_id, con)
-    works, excluded_work_counts = _fetch_works(cluster_id, con)
-    ecr_roles = _fetch_ecr_roles(cluster_id, con)
-    acif_fields, acif_subfields = _fetch_acif_fields_subfields(cluster_id, con)
-    acif_institutions = _fetch_acif_institutions(cluster_id, con)
-    orcids = _fetch_acif_orcids(cluster_id, con)
-    piles = _fetch_piling_diagnostics(cluster_id, con)
-
-    # Prefer the accepted (confirmed) pile's own earliest year over oeuvres.parquet's unfiltered
-    # one, when a confirmed pile exists (2026-08-19 -- see Adam Hulme, first_pub_year=1960 from
-    # OpenAlex's own uncritiqued attribution vs. his real, piling-confirmed 2015 start).
-    confirmed_years = sorted({y for p in piles if p.confirmed for y in p.pub_years})
-    first_pub_year_source = "oeuvre"
-    if confirmed_years:
-        first_pub_year = confirmed_years[0]
-        first_pub_year_source = "confirmed_pile"
-
-    award_contexts = _fetch_award_contexts(cluster_id, con, first_pub_year)
-
-    return Dossier(
-        arc_id=cluster_id,
-        preferred_name=preferred_name,
-        name_variants=name_variants,
-        for_codes=list(cohort_row["for_codes"]),
-        for_division=cohort_row.get("for_division"),
-        panel=cohort_row.get("panel"),
-        oax_id=cohort_row["oax_id"],
-        orcids=orcids,
-        ecr_roles=ecr_roles,
-        acif_fields=acif_fields,
-        acif_subfields=acif_subfields,
-        acif_institutions=acif_institutions,
-        piles=piles,
-        works=works,
-        annual_series=annual_series,
-        first_pub_year=first_pub_year,
-        first_pub_year_source=first_pub_year_source,
-        excluded_work_counts=excluded_work_counts,
-        award_contexts=award_contexts,
-    )
+def find_acifs(text: str) -> list[str]:
+    """cluster_ids whose id or any recorded full name contains `text` (case-insensitive)."""
+    a = pd.read_parquet(ACIFS_ARC, columns=["cluster_id", "full_names"])
+    t = text.lower()
+    return [c for c, ns in zip(a.cluster_id, a.full_names) if t in c.lower() or any(t in n.lower() for n in ns)]

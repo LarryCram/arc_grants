@@ -20,9 +20,10 @@ Steps so far:
                           Gemini verdicts already saved by src/03a_gemini_judge.py, then the person's trusted
                           Scopus profile for 'fits core' accepts and works still unjudged (src/oeuvre/classify.py,
                           src/oeuvre/scopus_check.py; documents fetched by 00f)
-Next: person report.
+  6. acif_work_citations.parquet  citations each work received per year, from OpenAlex reference
+                          lists (src/oeuvre/citations.py); read by the dossier (analysis/utils/dossier_build.py)
 
-Usage: .venv/bin/python src/03_build_oeuvres.py [--from-step 5]   (5: reuse steps 1-4's files)
+Usage: .venv/bin/python src/03_build_oeuvres.py [--from-step 5|6]   (5: reuse steps 1-4's files; 6: only step 6)
 """
 
 import sys
@@ -37,6 +38,7 @@ import pandas as pd
 from config.settings import ACIFS_ARC, OEUVRE_DIR
 from src.oeuvre import classify as cls
 from src.oeuvre.acif_works import DOMINANT_SHARE, LINKS, accepted_links, build_acif_works, connect
+from src.oeuvre.citations import work_citations_by_year
 from src.oeuvre.gemini import load_verdicts
 from src.oeuvre.orcid_works import claimed_dois
 from src.oeuvre.scopus_check import trusted_profile_dois
@@ -325,13 +327,14 @@ def classify_section(con, req: pd.DataFrame, verdicts: dict) -> list[str]:
 def main():
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--from-step", type=int, default=1, choices=[1, 5])
+    ap.add_argument("--from-step", type=int, default=1, choices=[1, 5, 6])
     args = ap.parse_args()
     OEUVRE_DIR.mkdir(parents=True, exist_ok=True)
     con = connect()
-    if args.from_step == 5:
-        old = (OEUVRE_DIR / "report.md").read_text(encoding="utf-8").split("## Step 5")[0].rstrip("\n").split("\n")
-        text = "\n".join(old + [""] + step5(con))
+    if args.from_step in (5, 6):
+        cut = "## Step 5" if args.from_step == 5 else "## Step 6"
+        old = (OEUVRE_DIR / "report.md").read_text(encoding="utf-8").split(cut)[0].rstrip("\n").split("\n")
+        text = "\n".join(old + [""] + (step5(con) if args.from_step == 5 else []) + step6(con))
         (OEUVRE_DIR / "report.md").write_text(text, encoding="utf-8")
         print("\n".join(step5_lines_cache))
         return
@@ -347,7 +350,7 @@ def main():
                                acifs, coinv)
     text = "\n".join(["# Oeuvres", ""] + acif_works_section(con, OEUVRE_DIR / "acif_works.parquet", links, secs)
                      + filter_section(con, n_in, kept, dropped) + versions_section(con, counts)
-                     + graph_section(con, gcounts) + step5(con))
+                     + graph_section(con, gcounts) + step5(con) + step6(con))
     (OEUVRE_DIR / "report.md").write_text(text, encoding="utf-8")
     print(text)
 
@@ -365,6 +368,18 @@ def step5(con) -> list[str]:
                        scopus_dois=sdois, scopus_acifs=sacifs)
     lines = classify_section(con, req, verdicts)
     step5_lines_cache[:] = lines
+    return lines
+
+
+def step6(con) -> list[str]:
+    t = time.time()
+    out = OEUVRE_DIR / "acif_work_citations.parquet"
+    n = work_citations_by_year(con, OEUVRE_DIR / "acif_works_single.parquet", out)
+    one = con.execute(f"SELECT count(DISTINCT work_idx), sum(citations), min(year), max(year) FROM read_parquet('{out}')").fetchone()
+    lines = ["## Step 6: citations received per year", "",
+             f"- built in {time.time() - t:,.0f} s; rows (work, year) {n:,}; works cited {one[0]:,}; citations {int(one[1]):,}; "
+             f"citing years {one[2]}-{one[3]}", ""]
+    step5_lines_cache.extend(lines)
     return lines
 
 
