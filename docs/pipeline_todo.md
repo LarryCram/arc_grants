@@ -58,6 +58,22 @@ OpenAlex oeuvre step, where two ACIFs claiming one OpenAlex author is merge evid
    in stage 1: compound surnames, "Last, First", ALL CAPS, Cyrillic, initials-only); 3 evidence;
    4 calibration on ORCID-confirmed links; 5 decision + persisted `acifs_oax` stage, archive the
    old linker. Open: accept ORCID links only when names agree?
+5b. **Work expansion from Scopus profiles** (agreed approach 2026-10-09, not built). The Scopus
+   DOI bridge links only the one OpenAlex record holding most of the profile's DOIs; OpenAlex
+   often splits the person across further records (Lynda Beazley: "Lyn D. Beazley" 112 of 134
+   profile DOIs linked; "Beazley, Lyn" 10 and "Lynda D. Beazley" 6 left out). Linking those
+   records whole is NOT the approach: of 432 bridge-linked ACIFs, 123 have 186 further same-name
+   records with 2+ profile DOIs, holding 13,206 works of which only 1,928 are on the profile
+   (e.g. "John Philip Chalmers", 1,459 works, for Jennifer Chalmers; "Clive Roberts" for Craig).
+   Approach: take WORKS, not records -- from a further record, add only the works whose DOI is on
+   the profile that linked the person (Scopus has already put those papers under them); the main
+   record still comes in whole. The work itself (metadata, authorship, institutions, citations)
+   is OpenAlex's, found by DOI. Needs: the linker to record (ACIF, author_idx, work_idx)
+   inclusions, the oeuvre step to read them; a guard for a record/work claimed by two ACIFs.
+   Then: (a) the same profile works sitting on OpenAlex authorships with no author record at all
+   (Ian R. Mackay: 413 profile DOIs on unattributed authorships); (b) measure the same one-record
+   gap for the name and works-first stages (also one record each; the ORCID stage takes every
+   record carrying the ORCID).
 6. Uncertain groups (what 1--3 leave) -- no hand review planned; revisit with OpenAlex evidence.
 7. Optional: hand-check a sample of Scopus pass two's merged groups for namesake profiles.
 8. Stale shell scripts `run_pipeline.sh` / `run_piling.sh` (left as they are, by decision).
