@@ -68,9 +68,14 @@ src/03_build_oeuvres.py + src/oeuvre/ → the oeuvre extractor (2026-10-07), on 
                                   reference-work entries collapsed to one per book, then rules,
                                   then saved Gemini verdicts, then the person's trusted Scopus profile
                                   for 'fits core' accepts and unjudged works -- Scopus replaced paid
-                                  Gemini 2026-10-08) → processed/oeuvre/
+                                  Gemini 2026-10-08), then step 6, acif_work_citations.parquet
+                                  (citations each work received per year, from OpenAlex reference
+                                  lists, 2026-10-09) → processed/oeuvre/
 src/03a_gemini_judge.py         → sends step 5's Gemini requests within a budget (GEMINI_API_KEY in
                                   .env); answers saved once in processed/oeuvre/gemini_verdicts.jsonl
+analysis/23_dossier.py + analysis/utils/dossier*.py → per-person dossier (2026-10-09): profile, ARC
+                                  awards, link evidence, works, time-line chart; .md/.png/.html in
+                                  processed/dossiers/ (`--random N` for a sample)
 src/utils/acif_oax_linker.py    → the OLD ARC↔OpenAlex candidate finder (with sql/01-04; reads
                                   acifs_arc.parquet); to be archived when the new linker replaces it
 ```
@@ -3564,6 +3569,97 @@ Tests: `tests/test_acif_orcid_bulk.py` (4); 406 pass.
   Gururajan, Mark (Stuart) Howden, ...), 1 reject_link (Takashi Kubota: OpenAlex 'T. Kubota', a
   mixed record of several Kubotas). Stage 1 final: 17,860 accepted links, 16,001 ACIFs with an
   accepted ORCID link, no review cases left.
+
+## Oeuvre extractor; linker stage 2; Scopus replaces Gemini; DOI bridge; all-stage oeuvres; dossier rebuilt (2026-10-07..09)
+
+**Oeuvre extractor** (`src/03_build_oeuvres.py`, `src/oeuvre/`; steps in the architecture block). Step 5's
+doubtful works were first judged by Gemini (`src/03a_gemini_judge.py`, `gemini-flash-latest` on a paid key;
+all 4,943 component requests and 5,070 of 11,341 per-work requests answered, verdicts saved in
+`gemini_verdicts.jsonl` and still applied). User decision 2026-10-08 (cost): **Scopus replaces paid Gemini**
+for the rest. The decision was parked when work moved to the linker and was not written down, then wrongly
+offered back as "optional" -- recorded since in the plan file and a memory (record parked decisions).
+
+**Linker stage 2** (`src/oax/name_link.py`, `src/oax/works_link.py`), for kept ACIFs stage 1 did not link;
+calibrated on ORCID-linked ACIFs (true record known):
+- name + institution-in-time: main name shared (else a not-incompatible first given name), and 2+ OpenAlex
+  affiliation years at a single-institution grant university from 1 year before to 3 after commencement;
+  exactly one candidate passing -> accept. 3,876 linked; a single passing record is the ORCID-linked one 99.5%.
+- works-first, for ACIFs left open: the one record with the most works co-authored by linked ARC
+  co-investigators (2+, no tie) -> accept_coinvestigator (99.3%); else the only record with university works
+  in 2+ grant years -> accept_university (99.0%). 1,547 linked. Linking every record with a co-investigator
+  work was right for only 77% of records (namesakes reach co-investigators through mixed records).
+- Grant lifecycle (00a `grant_lifecycle()`): project dates, `declined`, `ended_early` (current funding 0
+  with announced > 0, or duration under half the funded years); windows close at an early end (Pryce's
+  relinquished DECRA). Carried into `acifs_arc` (declined_grants / ended_early_grants) and the records.
+- Hand ORCIDs (user evidence): Vaughan (William) Coffey 0000-0003-0520-2982, Thomas Oliver Pryce
+  0000-0002-7290-141X.
+
+**00f Scopus documents** (`src/00f_extract_scopus_documents.py`): one cached ScopusSearch AU-ID per profile,
+STANDARD view; a 429 pauses all workers with back-off (pybliometrics raises at once on 429, no rate headers
+with the insttoken); any other error retried once with 25-document pages -- profiles full of very-many-author
+papers (Nash, Urquijo, Mitchell, Cerin, McNamara: particle physics, genomics consortia; Cerin has works with
+2,780 authors) time out at 200 a page. Targets: all-trusted (12,184 profiles carrying the ACIF's ORCID) and
+unlinked (every 00d profile of unlinked ACIFs). Output cumulative; 1.65M documents.
+
+**Scopus rule in step 5** (`src/oeuvre/scopus_check.py`, `classify.py`): 'fits core' accepts and unjudged
+works are decided from the person's trusted profile (all versions' DOIs): on it -> accept; article/review with
+a DOI absent -> reject; else unsure (incl. no trusted profile). Reference rates (trusted profiles, since 2000,
+with DOI): core articles 83% on the profile, reviews 93%, chapters 43%, books 38%; 'fits core' articles 14%;
+unjudged 4.5%. Result: pending 43,099 -> 0; 'fits core' 123,540 -> accept 12,958 / reject 43,335 / unsure
+67,247. **Known weakness (open)**: absence is not evidence for thinly covered people -- Warren Burt (composer,
+9 profile DOIs): 20 "articles" absent from his profile are his CD and book reviews in Computer Music Journal,
+which Scopus does not index (checked by DOI). OpenAlex types them 'article' and is_paratext is False for all
+55 of his works (paratext dropped only 16,633 rows overall). To measure: venue-coverage or
+profile-completeness conditions.
+
+**Scopus DOI bridge** (`src/oax/scopus_link.py`), linker stage 2's third kind, for ACIFs still unlinked: the
+ACIF's one usable 00d profile (profiles with another ORCID or refused by hand removed); among OpenAlex authors on
+its works sharing a first initial and family name (blocking level), the one holding the most profile DOIs (2+
+and 20%+ of those in OpenAlex, no tie) is linked unless taken by an earlier stage (record_linked_elsewhere,
+reported), carrying another ORCID, or main-name-incompatible by stage 2's test. Calibration on 11,940 trusted
+profiles: 99.5%. A first version limited to stage 2's name-compatible candidates linked minor records when the
+main one was not a candidate (Maria Fiatarone Singh: 2 of 280 DOIs). **Nicknames (user, yes)**:
+`src/utils/names.py::given_names_related()` -- the `nicknames` package's English list or a clipped form of 3+
+letters (Lyn/Lynda confirmed by Wikipedia: Lynda Dent Beazley); no likely namesake passes (Senyuan/Shao-wu,
+Seamus/Stuart, Kelly/Kenneth). Result: 432 linked (374 + 58 by nickname); 31 still refused on name, about 10
+of them initials-only records ("S. N. Tovey") that look compatible -- not yet explained. The bridge links one
+record; OpenAlex fragments of the person (Beazley: "Beazley, Lyn" 10 DOIs, "Lynda D. Beazley" 6) are left
+out -- todo 5b (take works by profile DOI, not whole records: the 186 further records hold 13,206 works, only
+1,928 on the profiles).
+
+**All-stage oeuvres** (user, yes): 02 writes `accepted_links.parquet` (every stage's accepted links, with
+stage and works_count_global); `acif_works.py` and `work_graph.py` read it. 21,857 ACIFs with works (was
+16,002); ORCID-linked ACIFs essentially unchanged (~150 of 2.55M rows moved, via wider co-investigator
+anchors). Non-ORCID ACIFs have no trusted profile, so their non-core works are unsure (115,268).
+
+**Step 6 citations per year** (`src/oeuvre/citations.py`): from `compact/references` (citer_idx, cited_list)
+and the citer's publication year; 15.1M (work, year) rows, 86M citations, 9 s. Version of record only.
+
+**Dossier rebuilt** (`analysis/utils/dossier.py`, `dossier_build.py`, `analysis/23_dossier.py`): the old one
+read the archived pipeline. Now: profile; ARC awards (role, fellowship labelled by role, funding, admin org,
+declined / ended early, co-investigators); link table with per-stage evidence and, when not ORCID-linked, the
+linker route; works by decision/rule, type, field, venue, most cited, unsure with reasons; time-line (accepted
+and unsure works per year, citations received per year, cumulative h-index, award years starred, circled for
+fellowships; 2026 a part year). Writes .md, .png and a self-contained .html. Not carried over (no data):
+cohort percentiles, archetypes, co-author track record, topic entropy, novelty.
+
+**Status and merge counts** (`analysis/22_overall_status.py` -> `status_report.md`;
+`analysis/24_count_shared_record_merges.py` -> `shared_record_merges.md`):
+- 23,183 kept ACIFs; linked 21,858 (ORCID 16,003, name 3,876, works 1,547, Scopus 432); unlinked 1,325
+  (831 no usable profile). Without accepted works: 15.6% of ACIFs whose last grant was 2001-05 down to 1.1%
+  for 2021-26; by field, creative arts 20.7% (36.6% for last grant <= 2010), history/archaeology 11.1%,
+  philosophy 9.7%, sciences 3-4%.
+- 76 OpenAlex records are accepted for 2+ ACIFs (305 ACIFs; e.g. 25 "Paul Young" ACIFs resolve to the UQ
+  virologist Paul R. Young (9) and the Sydney pharmacist Paul Michael Young (14), plus a third with his own
+  ORCID). A merge by shared record would join 70 groups (279 ACIFs; refused: 5 interleaved universities --
+  Graeme Hugo, Kuczera, Zhao Yang Dong, probably one person each -- and 1 ORCID conflict); the name stage's
+  field test would flag 28 of the 70. Not applied (decision pending: largest consistent set with field and
+  career checks). A wrong merge adds wrong grants, which the work filter cannot see; a missed merge can be
+  found later.
+- Same-family-name ACIF pairs sharing accepted works through DIFFERENT records (607) are mostly relatives
+  co-authoring (Paton, Samoc, Shabala, Harmon-Jones, Vo brothers; 114 also share a grant); 565 share neither a
+  full given name nor an initial. Two Peter Schofields at UNSW share 4 consortium papers but have different
+  ORCIDs. Shared works across different records is not merge evidence.
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
