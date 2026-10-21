@@ -3811,6 +3811,14 @@ Manual linker review deferred until then. -- Resolved the same day, see "ARC-pha
 - *The 20 round-2 name-stage merges*: not adopted; the build-link cycle through 02b replaces a second name round.
 - *Wei Wang Information Systems records*: 3 joined by the shared record; the rest stay apart (missed merges).
 
+**Keywords vs topics (2026-10-22, user: "look at keywords")**: `analysis/27_keyword_test.py` ->
+`<oct26>/processed/keyword_test.md`. Per ACIF a profile from its core works (score x idf; keywords from
+`compact/work_keywords`, topics and subfields from `work_topics`); each work's cosine to it (core works
+left out of their own profile). Coverage 99.3% (keywords) / 99.5% (topics). AUCs outside the core:
+Scopus-profile label (49,098 articles/reviews) keywords 0.676, topics 0.698, subfields 0.674, the two
+combined 0.705; Gemini-verdict label (15,837 works) keywords 0.728, topics 0.801, subfields 0.778.
+Keywords are not better than topics for works consistency; not adopted (at most a tie-breaker).
+
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
 
