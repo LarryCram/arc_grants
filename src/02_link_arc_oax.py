@@ -97,7 +97,7 @@ def orcid_section(acifs, links, miss, rejected, shared) -> list[str]:
     for rel, n in links.loc[links.name_relation != "shared_key", "name_relation"].value_counts().items():
         L.append(f"- {rel}: {n:,}")
     for st in ("review_initial_only", "review_unrelated", "review_given_name", "reject_orcid_names",
-               "reject_unrelated", "accept_hand"):
+               "reject_unrelated", "accept_nickname", "accept_hand"):
         sub = links[links.status == st].sort_values("works_count_global", ascending=False)
         if len(sub):
             L += ["", f"### {st} ({len(sub):,})", ""]

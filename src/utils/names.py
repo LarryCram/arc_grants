@@ -614,18 +614,20 @@ _NICKNAMER = None
 MIN_CLIPPED = 3
 
 
-def given_names_related(a: str, b: str) -> bool:
+def given_names_related(a: str, b: str, min_clipped: int = MIN_CLIPPED) -> bool:
     """Whether two full given names (parser key given parts, lower case) can be one person's: equal,
     related in the `nicknames` package's English name list (Jim/James, Ken/Kenneth, Alec/Alexander),
     or one a clipped form of the other of MIN_CLIPPED+ letters (Lyn/Lynda, Bala/Balakanapathy).
-    Used only where other evidence already ties the two names to the same papers."""
+    Used only where other evidence already ties the two names to the same papers. `min_clipped`:
+    the shortest clipped form accepted (linker stage 1 uses 4: a 3-letter syllable of a compound
+    Chinese given name, Hui of Hui-Jing, is not a clipped Huijun)."""
     global _NICKNAMER
     if not a or not b or len(a) < 2 or len(b) < 2:
         return False
     if a == b:
         return True
     short, long_ = sorted((a, b), key=len)
-    if len(short) >= MIN_CLIPPED and long_.startswith(short):
+    if len(short) >= min_clipped and long_.startswith(short):
         return True
     if _NICKNAMER is None:
         from nicknames import NickNamer

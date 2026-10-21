@@ -33,9 +33,11 @@ Phase 1 – author_hep: group authorships_hep by author, aggregating institution
     carries three distinct works-count fields, not to be confused with each other: works_count
     (this file's own pre-existing field -- DISTINCT works in the HEP-context population, i.e.
     works with at least one HEP-affiliated co-author, counted for EVERY author on that work
-    regardless of their own affiliation -- see AUTHORSHIPS_HEP.md), works_count_global (2026-09-17,
-    the raw author entity's own total lifetime works_count, unfiltered/worldwide, same
-    straight-passthrough treatment as cited_by_count/h_index), and works_count_au (2026-09-17,
+    regardless of their own affiliation -- see AUTHORSHIPS_HEP.md), works_count_global (2026-09-17;
+    since 2026-10-21 the number of DISTINCT works on this author's rows in the snapshot's full
+    compact/authorships table, unfiltered/worldwide -- not the authors table's own works_count,
+    which in Oct26 is stale for merged records: Chen Chen's record says 3,357, its authorships 451),
+    and works_count_au (2026-09-17,
     DISTINCT works where THIS author's own authorship row -- not some co-author's -- carries
     country_code='AU'). works_count_global - works_count_au is a direct overseas-vs-Australian
     output signal for a candidate.
@@ -462,6 +464,14 @@ def main():
                 WHERE institution_idx IS NOT NULL
                 GROUP BY author_idx
               ),
+              -- works_count_global (2026-10-21): works on the author's own rows of the full
+              -- authorships table, for the authors in this file only.
+              global_works AS (
+                SELECT author_idx, count(DISTINCT work_idx) AS works_count_global
+                FROM read_parquet('{OPENALEX_COMPACT_DIR}/authorships/*.parquet')
+                WHERE author_idx IN (SELECT author_idx FROM sorted_fields)
+                GROUP BY author_idx
+              ),
               -- Contamination gate (see MACRO comments above): each alternative kept only if ANY
               -- of its own words matches display_name's trusted family token -- computed once
               -- here, not repeated per output column.
@@ -472,7 +482,6 @@ def main():
                   au.orcid,
                   au.cited_by_count,
                   au.h_index,
-                  au.works_count                                       AS works_count_global,
                   au.topics,
                   CASE
                     WHEN au.full_name IS NOT NULL
@@ -498,7 +507,7 @@ def main():
               replace(g.orcid, 'https://orcid.org/', '')            AS orcid,
               g.cited_by_count                                      AS cited_by_count,
               g.h_index                                              AS h_index,
-              g.works_count_global                                   AS works_count_global,
+              COALESCE(gw.works_count_global, 0)                    AS works_count_global,
               COALESCE(aw.works_count_au, 0)                        AS works_count_au,
               COALESCE(ia.inst_ids, [])                            AS inst_ids,
               list_transform(g.topics, x -> x.display_name)       AS topic_names,
@@ -508,6 +517,7 @@ def main():
             FROM sorted_fields sf
             LEFT JOIN inst_agg ia USING (author_idx)
             LEFT JOIN au_works aw USING (author_idx)
+            LEFT JOIN global_works gw USING (author_idx)
             JOIN gated g ON g.author_idx = sf.author_idx
         ) TO '{out_hep}' (FORMAT PARQUET)
     """)

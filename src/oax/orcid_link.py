@@ -33,6 +33,11 @@ sides (no name handling of its own) and status follows:
                          (compound), separator (space/hyphen/run together), given/family order
                          swapped, surname one letter different (4+ letters), non-Latin display
                          name, OpenAlex has initials only
+    accept_nickname      (2026-10-21, user) the same family name, and a full given name of each side is
+                         one person's: equal once hyphens and spaces are removed (Wei-Hong / Weihong),
+                         related in the `nicknames` package's list (Rick/Richard, Cathie/Catherine),
+                         or a clipped form of 4+ letters (Chathu/Chathurika) -- checked before
+                         reject_orcid_names, review_initial_only and review_given_name
     review_given_name    same surname, different first given name (nickname or another person)
     review_unrelated     unrelated names on a main record (>= MINOR_SHARE of the ACIF's works)
     reject_unrelated     unrelated names on a minor record (< MINOR_SHARE): another person's record
@@ -58,11 +63,12 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-from config.settings import ACIF_ARC_RECORDS as ACIF_RECORDS, ACIFS_ARC, OAX_AUTHORS, PROCESSED_DATA
-from src.utils.names import HumanNameParser
+from config.settings import ACIF_ARC_RECORDS as ACIF_RECORDS, ACIFS_ARC, OAX_AUTHORS, OPENALEX_COMPACT_DIR, PROCESSED_DATA
+from src.utils.names import HumanNameParser, given_names_related
 
 OVERRIDES = Path(__file__).resolve().parents[2] / "data_persisted" / "oax_link_overrides.csv"
 MINOR_SHARE = 0.2
+NICK_MIN_CLIPPED = 4
 ACTIONS = ("reject_link", "accept_link")
 
 AUTHORS_PREP = PROCESSED_DATA / "openalex_authors_prep.parquet"
@@ -208,6 +214,16 @@ def name_relation(arc_keys, oax_keys, oax_name) -> str:
     return "unrelated"
 
 
+def nickname_same_family(arc_keys, oax_keys) -> bool:
+    """accept_nickname's test (module docstring), on parser keys only."""
+    ag, af = _split(arc_keys)
+    og, of = _split(oax_keys if oax_keys is not None else [])
+    if not af & of:
+        return False
+    ag, og = {g for g in ag if len(g) > 1}, {g for g in og if len(g) > 1}
+    return any(_compact(a) == _compact(b) or given_names_related(a, b, NICK_MIN_CLIPPED) for a in ag for b in og)
+
+
 NAME_FORMS = {"compound_family", "separator", "order_swapped", "family_one_letter", "non_latin",
               "initials_only"}
 
@@ -244,11 +260,13 @@ def decide(links: pd.DataFrame, accepts=frozenset(), arc_main=None, oax_main=Non
                 return "accept_initials_only"
             if ofull & _full_keys(orcid_names.get(r.orcid, ())):
                 return "accept_orcid_names"
+            if nickname_same_family(r.full_name_keys, r.author_keys):
+                return "accept_nickname"
             return "reject_orcid_names" if r.works_share < MINOR_SHARE else "review_initial_only"
         if r.name_relation in NAME_FORMS:
             return "accept_name_form"
         if r.name_relation == "same_family":
-            return "review_given_name"
+            return "accept_nickname" if nickname_same_family(r.full_name_keys, r.author_keys) else "review_given_name"
         return "review_unrelated" if r.works_share >= MINOR_SHARE else "reject_unrelated"
     out["status"] = [status(r) for r in out.itertuples()]
     return out
@@ -286,15 +304,21 @@ def unmatched(acifs: pd.DataFrame, links: pd.DataFrame) -> pd.DataFrame:
 
 
 def outside_pool(orcids, alternatives: bool = False) -> pd.DataFrame:
-    """Authors in the full OpenAlex authors table carrying any of `orcids` (bare form)."""
+    """Authors in the full OpenAlex authors table carrying any of `orcids` (bare form). works_count
+    is the number of works on the author's rows of compact/authorships (2026-10-21: the authors
+    table's own works_count is stale for records OpenAlex merged away)."""
     con = duckdb.connect()
     con.register("want", pd.DataFrame({"orcid": sorted(set(orcids))}))
     alt = ", display_name_alternatives AS alternatives" if alternatives else ""
-    return con.execute(f"""
-        SELECT author_idx, replace(orcid, 'https://orcid.org/', '') AS orcid, display_name, works_count{alt}
+    con.execute(f"""
+        CREATE TEMP TABLE op AS
+        SELECT author_idx, replace(orcid, 'https://orcid.org/', '') AS orcid, display_name{alt}
         FROM read_parquet('{OAX_AUTHORS}/*.parquet')
-        WHERE replace(orcid, 'https://orcid.org/', '') IN (SELECT orcid FROM want)
-    """).fetchdf()
+        WHERE replace(orcid, 'https://orcid.org/', '') IN (SELECT orcid FROM want)""")
+    return con.execute(f"""
+        SELECT op.*, coalesce(w.n, 0) AS works_count FROM op LEFT JOIN (
+            SELECT author_idx, count(DISTINCT work_idx) AS n FROM read_parquet('{OPENALEX_COMPACT_DIR}/authorships/*.parquet')
+            WHERE author_idx IN (SELECT author_idx FROM op) GROUP BY 1) w USING (author_idx)""").fetchdf()
 
 
 def shared_orcids(acifs: pd.DataFrame) -> pd.DataFrame:

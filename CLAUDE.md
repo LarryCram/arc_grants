@@ -3750,6 +3750,22 @@ no accepted link) and reject_orcid_names 21 -> 84, many of them nicknames (Rick 
 
 **ARC phase not complete** (user asked): open -- merge by shared OpenAlex record, bulk-pass commonness
 rule, the 20 round-2 merges, Anne Jones, pass-two refusals, the Wei Wang Information Systems records.
+Manual linker review deferred until then.
+
+**Same day, user: nickname test in stage 1; works counts from authorships.**
+- `orcid_link.accept_nickname`: same family name and a full given name of each side equal without
+  hyphens/spaces, nickname-related (`nicknames` list) or a clipped form of 4+ letters
+  (`given_names_related(min_clipped=4)`: Hui of Hui-Jing must not pass as a clipped Huijun); checked
+  before reject_orcid_names / review_initial_only / review_given_name. 47 links (Rick Shine, Matt
+  Garratt, Bill Wade, Tony Moore, Wei-Hong Lai, ...). Left: review 24 links (given name 13, initials
+  only 7, unrelated 4), 9 ACIFs with no accepted link; reject_orcid_names 56 (Cathie Elder, Szymek
+  Drobniak, Philip/Phillip Baker -- spelling and non-English diminutives the test doesn't know).
+- `works_count_global` (author_hep / openalex_authors_prep, and out-of-pool authors in stage 1) is now
+  the count of works on the author's own rows of compact/authorships, not the authors table's
+  `works_count`: for 198,657 of 2,408,892 pool authors the authors table is >10 too high (one record
+  claims 2,384,531 works, its authorships 398).
+- Result: ORCID-linked 16,120, name 3,915, works-first 1,427, Scopus 351, unlinked 1,379; accepted
+  works 2,709,320 (Jul26 2,757,181). 430 tests pass.
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.

@@ -103,3 +103,22 @@ def test_decide_statuses():
                orcid_names={"O4": {"chris_power", "christopher_power"}, "O5": {"yang_xiang"}, "O6": {"takashi_kubota"}})
     assert list(d.status) == ["reject_unrelated", "review_unrelated", "accept_hand", "accept_name_key",
                               "accept_orcid_names", "reject_orcid_names", "review_initial_only", "accept_initials_only"]
+
+
+def test_accept_nickname_same_family():
+    from src.oax.orcid_link import decide, nickname_same_family
+    assert nickname_same_family(["richard_shine", "r_shine"], ["rick_shine", "r_shine"])
+    assert nickname_same_family(["weihong_lai"], ["wei-hong_lai", "wei_lai", "hong_lai"])     # separators
+    assert nickname_same_family(["chathurika_ranaweera"], ["chathu_ranaweera"])             # clipped, 6 letters
+    assert not nickname_same_family(["huijun_li", "h_li"], ["hui_li", "huijing_li", "h_li"])  # 3-letter syllable
+    assert not nickname_same_family(["richard_shine"], ["rick_shines"])                     # family differs
+    links = pd.DataFrame([
+        {"cluster_id": "C1", "orcid": "O1", "author_idx": 1, "full_name_keys": ["richard_shine", "r_shine"],
+         "author_keys": ["rick_shine", "r_shine"], "author_name": "Rick Shine", "works_share": 0.05},
+        {"cluster_id": "C2", "orcid": "O2", "author_idx": 2, "full_name_keys": ["william_wade"],
+         "author_keys": ["bill_wade"], "author_name": "Bill Wade", "works_share": 1.0},
+        {"cluster_id": "C3", "orcid": "O3", "author_idx": 3, "full_name_keys": ["huijun_li", "h_li"],
+         "author_keys": ["hui_li", "huijing_li", "h_li"], "author_name": "Li, Hui-Jing", "works_share": 0.1},
+    ])
+    d = decide(links)
+    assert list(d.status) == ["accept_nickname", "accept_nickname", "reject_orcid_names"]
