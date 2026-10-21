@@ -34,6 +34,8 @@ def test_rules_requests_and_verdicts(tmp_path):
     add(33, 1, 6, 3, True, 2010, "A")                               # 25-author chapter, only one of its book
     add(34, 34, 1, 0, False, 2010, "A"); add(35, 35, 1, 0, False, 2010, "A")   # another encyclopedia, none on ORCID
     add(40, 40, 1, 0, False, 2006, "A"); add(41, 41, 1, 0, False, 2006, "A")   # fits core, absent from Scopus
+    add(50, 1, 6, 3, True, 2012, "A"); add(51, 1, 6, 3, True, 2012, "A")  # Oct26 reference entries, 2 authors, no DOI
+    add(52, 1, 6, 3, True, 2012, "A")                               # a reference entry alone in its book
     for x in w:
         if x["work_idx"] in (19, 40, 41):
             x.update(doi=f"10.1/W{x['work_idx']}")
@@ -45,6 +47,10 @@ def test_rules_requests_and_verdicts(tmp_path):
             x.update(type="book-chapter", authors_count=60, doi=f"10.1016/b978-0-12-111111-1.000{x['work_idx']}-x")
         if x["work_idx"] == 33:
             x.update(type="book-chapter", authors_count=25, doi="10.1007/978-1-11-111111-1_1")
+        if x["work_idx"] in (50, 51):
+            x.update(type="reference-entry", source_id=77)
+        if x["work_idx"] == 52:
+            x.update(type="reference-entry", source_id=78)
     for x in w:
         x["versions"] = [{"doi": x["doi"]}] if x["doi"] else []
     pd.DataFrame(g).to_parquet(tmp_path / "g.parquet")
@@ -62,6 +68,8 @@ def test_rules_requests_and_verdicts(tmp_path):
     assert [r[i] for i in (30, 31, 32, 33)] == ["reference work: collapsed", "reference work: on ORCID list",
                                                  "reference work: collapsed", "core"]
     assert [r[i] for i in (34, 35)] == ["reference work: one per book", "reference work: collapsed"]
+    assert [r[i] for i in (50, 51, 52)] == ["reference work: one per book", "reference work: collapsed",
+                                             "reference work: one per book"]
     req = cls.requests_table(con).set_index("kind")
     assert list(req.loc["component", "work_idxs"]) == [14, 15, 16, 17, 18]
     assert list(req.loc["works", "work_idxs"]) == [20, 21]

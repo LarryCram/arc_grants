@@ -22,7 +22,7 @@ Inside the working data root:
 
 | Folder | Size | Note |
 |---|---|---|
-| `processed/` | 7.4 GB | all pipeline outputs, incl. `oeuvre/gemini_verdicts.jsonl` (paid Gemini answers -- **irreplaceable**), `scopus_extract/`, `orcid_bulk_extract/`, `oax_link/`, `authorships_hep.parquet` / `works_hep.parquet` (built by hand via `SQL.md`) |
+| `processed/` | 7.4 GB | all pipeline outputs, incl. `oeuvre/gemini_verdicts.jsonl` (paid Gemini answers -- **irreplaceable**), `scopus_extract/`, `orcid_bulk_extract/`, `oax_link/`, `authorships_hep.parquet` / `works_hep.parquet` (built by phase 0 of `00b_extract_oax.py`) |
 | `diskcache/` | 4.7 GB | ORCID record cache (`orcid_records_authenticated` etc.) -- hard to reacquire |
 | `raw/` | 243 MB | ARC source (`raw_json.csv`, `grant_summaries.csv`) |
 | `admin_orgs.csv`, `for_oax_concordance.csv`, `FOR_2008_2020.xlsx` | small | inputs read via `config/settings.py` |

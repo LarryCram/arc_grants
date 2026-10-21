@@ -18,6 +18,13 @@ before making this change, not assumed cheap: 4.2s wall-clock for both tables co
 against this script's own ~15-minute Phase 1/2 cost and clearly cheaper overall than repeatedly
 recomputing a scoped version on every iteration of active downstream development.
 
+Phase 0 – the HEP-context intermediates (2026-10-21; moved here from SQL.md, where the same three
+    queries were run by hand with hardcoded snapshot paths): every work with at least one
+    authorship at an ARC HEP institution (admin_orgs.csv institution_id with a hep_code), then
+    every authorship (with an institution) of those works, and their topics joined to work
+    metadata. Rebuilt when missing or older than the snapshot's compact/authorships files.
+    → works_intermediate_hep.parquet, authorships_hep.parquet, works_hep.parquet
+
 Phase 1 – author_hep: group authorships_hep by author, aggregating institution
     IDs (from HEP authorships), field distribution with fractions (from HEP
     works), and name/ORCID/cited_by_count/h_index/topic data (from authors entity;
@@ -55,7 +62,7 @@ import duckdb
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from config.settings import OAX_AUTHORS, PROCESSED_DATA
+from config.settings import ADMIN_ORGS_CSV, DUCKDB_TMP_DIR, OAX_AUTHORS, OPENALEX_COMPACT_DIR, PROCESSED_DATA
 from src.utils.names import max_by_len, parse_given, HumanNameParser
 from src.utils.name_diacritic_variants import DIACRITIC_CHARS
 
@@ -278,6 +285,52 @@ def oax_name_arrays(display_name: str, alts: list[str]) -> dict:
     }
 
 
+def build_hep_intermediates(con, force: bool = False, compact=OPENALEX_COMPACT_DIR, admin_orgs=ADMIN_ORGS_CSV,
+                            out_dir=PROC) -> bool:
+    """Phase 0 (module docstring): the three HEP-context intermediates, as SQL.md built them by
+    hand. Skipped when all three exist and are newer than the snapshot's authorships files.
+    Returns True if it rebuilt."""
+    works_int = out_dir / "works_intermediate_hep.parquet"
+    auth_hep = out_dir / "authorships_hep.parquet"
+    works_hep = out_dir / "works_hep.parquet"
+    snap = max(p.stat().st_mtime for p in Path(compact, "authorships").glob("*.parquet"))
+    outs = (works_int, auth_hep, works_hep)
+    if not force and all(p.exists() and p.stat().st_mtime >= snap for p in outs):
+        print("[0/4] HEP intermediates fresh -- skipping rebuild.")
+        return False
+    print(f"[0/4] Building HEP intermediates from {compact} ...")
+    con.execute(f"""
+        COPY (
+            WITH hep AS (
+                SELECT DISTINCT institution_id[23:]::BIGINT AS institution_idx
+                FROM read_csv_auto('{admin_orgs}')
+                WHERE institution_id IS NOT NULL AND hep_code IS NOT NULL
+            )
+            SELECT DISTINCT work_idx
+            FROM read_parquet('{compact}/authorships/*.parquet') au JOIN hep USING (institution_idx)
+        ) TO '{works_int}' (FORMAT PARQUET)""")
+    con.execute(f"""
+        COPY (
+            SELECT *
+            FROM read_parquet('{works_int}') wi
+            JOIN read_parquet('{compact}/authorships/*.parquet') au USING (work_idx)
+            WHERE institution_idx IS NOT NULL
+        ) TO '{auth_hep}' (FORMAT PARQUET)""")
+    con.execute(f"""
+        COPY (
+            WITH topics AS (
+                SELECT * FROM read_parquet('{works_int}') wi
+                JOIN read_parquet('{compact}/work_topics/*.parquet') wt USING (work_idx)
+            )
+            SELECT t.*, "type", source_id, authors_count, institutions_distinct_count, cited_by_count
+            FROM topics t JOIN read_parquet('{compact}/works/*.parquet') w USING (work_idx)
+        ) TO '{works_hep}' (FORMAT PARQUET)""")
+    for p in outs:
+        n = con.execute(f"SELECT count(*) FROM read_parquet('{p}')").fetchone()[0]
+        print(f"  {p.name}: {n:,} rows")
+    return True
+
+
 def ensure_fresh(force: bool = False) -> bool:
     """Rebuild only if openalex_authors_prep.parquet is missing or older than
     authorships_hep.parquet/works_hep.parquet. Returns True if it rebuilt."""
@@ -294,6 +347,8 @@ def ensure_fresh(force: bool = False) -> bool:
 
 def main():
     con = duckdb.connect()
+    con.execute(f"SET temp_directory='{DUCKDB_TMP_DIR}'")
+    build_hep_intermediates(con, force="--force-hep" in sys.argv)
 
     auth_hep  = PROC / "authorships_hep.parquet"
     works_hep = PROC / "works_hep.parquet"

@@ -18,7 +18,12 @@ Kept rows go to acif_works_kept.parquet (all columns); dropped rows to work_drop
 
 from __future__ import annotations
 
-KEEP_TYPES = ("article", "preprint", "book", "book-chapter", "review", "report", "dissertation")
+# conference-paper and reference-entry added 2026-10-21 (user) for the Oct26 snapshot, which types
+# works that Jul26 called article / book-chapter as conference-paper (proceedings) and reference-entry
+# (encyclopedia entries; collapsed to one per book in step 5). Still dropped: conference-abstract,
+# book-review, paratext, editorial, erratum, letter, ... (new Oct26 types among them).
+KEEP_TYPES = ("article", "preprint", "book", "book-chapter", "review", "report", "dissertation",
+              "conference-paper", "reference-entry")
 REASONS = ("paratext", "retracted", "type", "no_inst_no_doi")
 
 DROP_REASON_SQL = f"""

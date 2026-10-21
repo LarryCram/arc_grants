@@ -9,7 +9,7 @@
 - the code is currently missing matches unnecessarily
 - use duckdb and parquet
 - persist expensive sql queries for reuse
-- SQL to do some of this is copied into SQL.md. the parquets already exist
+- The SQL that builds these is phase 0 of src/00b_extract_oax.py (build_hep_intermediates(), moved from SQL.md 2026-10-21; old file in ZARCHIVE/SQL_20261021.md)
 
 1. filter OAX authorship entity to pull out works_intermediate_hep - works with at least one author at a hep.
 2. join works_intermediate to work + topics entities for publication_year, source_id, topics

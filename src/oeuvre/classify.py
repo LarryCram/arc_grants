@@ -9,6 +9,9 @@ reference work (an encyclopedia) the whole book's contributor list, so a person 
 holds hundreds. A book chapter is such an entry when it has REF_AUTHORS+ authors, or REF_AUTHORS_MULTI+
 authors and the ACIF holds REF_SAME_BOOK+ such chapters of the same book (the book is the ISBN in the
 DOI). Below 20 authors chapters are claimed on people's ORCID lists as often as small ones (2026-10-08).
+From the Oct26 snapshot OpenAlex types such entries 'reference-entry' (2026-10-21, user: collapse
+them): every reference-entry is an entry whatever its author count; its book is the ISBN in the DOI,
+else its source.
   accept  'reference work: on ORCID list'  the entry's DOI is on the person's own ORCID record
   accept  'reference work: one per book'   otherwise one entry per (ACIF, book) stands for the
                                             contribution (lowest work_idx; its title is not
@@ -150,13 +153,16 @@ def _rules(con, works_path, graph_path) -> None:
         FROM big b JOIN core_stats s USING (cluster_id) LEFT JOIN cos USING (cluster_id, component) GROUP BY 1, 2""")
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE ref AS
-        WITH ch AS (SELECT cluster_id, work_idx, authors_count,
-                           replace(regexp_extract(doi, '(97[89][0-9-]{{10,14}})', 1), '-', '') AS isbn,
-                           EXISTS (SELECT 1 FROM orcid_dois o WHERE o.cluster_id = cw.cluster_id
+        WITH ch AS (SELECT cluster_id, work_idx, authors_count, type,
+                           coalesce(nullif(replace(regexp_extract(doi, '(97[89][0-9-]{{10,14}})', 1), '-', ''), ''),
+                                    CASE WHEN type = 'reference-entry' THEN 's' || source_id END, '') AS isbn,
+                           doi IS NOT NULL AND EXISTS (SELECT 1 FROM orcid_dois o WHERE o.cluster_id = cw.cluster_id
                                    AND o.doi = lower(cw.doi)) AS on_orcid
-                    FROM cw WHERE type = 'book-chapter' AND doi IS NOT NULL AND authors_count >= {REF_AUTHORS_MULTI}),
+                    FROM cw WHERE type = 'reference-entry'
+                       OR (type = 'book-chapter' AND doi IS NOT NULL AND authors_count >= {REF_AUTHORS_MULTI})),
              ch2 AS (SELECT *, count(*) OVER (PARTITION BY cluster_id, isbn) AS same_book FROM ch WHERE isbn <> ''),
-             r AS (SELECT * FROM ch2 WHERE authors_count >= {REF_AUTHORS} OR same_book >= {REF_SAME_BOOK})
+             r AS (SELECT * FROM ch2 WHERE type = 'reference-entry' OR authors_count >= {REF_AUTHORS}
+                                        OR same_book >= {REF_SAME_BOOK})
         SELECT cluster_id, work_idx,
                CASE WHEN on_orcid THEN 'reference work: on ORCID list'
                     WHEN NOT bool_or(on_orcid) OVER (PARTITION BY cluster_id, isbn)

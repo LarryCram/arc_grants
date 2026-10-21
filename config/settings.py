@@ -55,6 +55,9 @@ TOP_CUT = 0.7   # min proportion of group works_count for dominant OAX split-rec
 # level down under OPENALEX_COMPACT_DIR)
 OAX_AUTHORS          = OPENALEX_DIR / "authors"
 OPENALEX_COMPACT_DIR = OPENALEX_DIR / "compact"
+# Oct26 snapshot on (2026-10-21): one row per (work_idx, keyword, score); keywords.parquet (keyed
+# by the `keyword` slug) describes each keyword. Not present in Jul26.
+WORK_KEYWORDS        = OPENALEX_COMPACT_DIR / "work_keywords"
 
 # OpenAlex API (required since March 2026)
 OPENALEX_EMAIL   = os.getenv("OPENALEX_EMAIL", "")

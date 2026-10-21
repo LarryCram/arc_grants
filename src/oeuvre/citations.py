@@ -1,7 +1,9 @@
 """
 Step 6 of the oeuvre extractor (2026-10-09, user: a dossier time-line of works per year and cites per
 year): citations each work received in each year, from OpenAlex's reference lists
-(compact/references: citer_idx, cited_list) and the citing work's publication year.
+(compact/references) and the citing work's publication year. compact/references is one row per
+citing work with a `cited_list` up to the Jul26 snapshot, and one row per citation (`citer_idx,
+cited_idx`) from Oct26 (2026-10-21); both layouts are read.
 
 Output acif_work_citations.parquet: one row per (work_idx, year) with `citations`, for every distinct
 work in acif_works_single.parquet (whatever its step-5 decision; a person's yearly citations are the
@@ -21,9 +23,11 @@ WORKS = OPENALEX_COMPACT_DIR / "works"
 def work_citations_by_year(con, single_path, out_path, references=REFERENCES, works=WORKS) -> int:
     """Write (work_idx, year, citations) for the works in `single_path`; returns rows written."""
     con.execute(f"CREATE OR REPLACE TEMP TABLE wc_want AS SELECT DISTINCT work_idx FROM read_parquet('{single_path}')")
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{references}/*.parquet')").fetchall()}
+    cited = "cited_idx" if "cited_idx" in cols else "unnest(cited_list)"
     con.execute(f"""CREATE OR REPLACE TEMP TABLE wc_pairs AS
         SELECT r.citer_idx, r.c AS work_idx
-        FROM (SELECT citer_idx, unnest(cited_list) AS c FROM read_parquet('{references}/*.parquet')) r
+        FROM (SELECT citer_idx, {cited} AS c FROM read_parquet('{references}/*.parquet')) r
         JOIN wc_want w ON w.work_idx = r.c""")
     con.execute(f"""COPY (
         SELECT p.work_idx, w.publication_year AS year, count(DISTINCT p.citer_idx) AS citations

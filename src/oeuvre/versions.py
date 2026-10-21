@@ -14,7 +14,8 @@ the years between versions: large gaps are mostly reprints and repository copies
 Editions (user, 2026-10-07: updated editions are different works; the narrow definition): within
 a version group, published copies (not a preprint, not in a repository, with a DOI) of one type
 whose years differ are different editions when they are in the same source (Cochrane-style
-updates) or both book chapters (revised handbook and living-reference chapters). Each edition
+updates) or both book chapters or both reference entries (revised handbook and living-reference
+chapters). Each edition
 year starts an edition; every row of the group joins the latest edition year at or before its own
 year (an earlier row, e.g. a preprint, joins the first edition). A conference paper and its journal
 version, or an article reprinted in a book, stay one work.
@@ -26,7 +27,8 @@ the most cited can be the version of record.
 One row per work (an edition counts as a work): the version of record's row (its work_idx, DOI,
 source, type, authorships, fields), chosen by, in order: not in a repository (OpenAlex source type
 'repository') and not without a source; not a less-cited duplicate record; type (TYPE_RANK:
-article > review > book-chapter > book > report > dissertation > preprint); the most recent year;
+article > review > conference-paper > book-chapter > reference-entry > book > report > dissertation >
+preprint); the most recent year;
 most cited; lowest work_idx. Then:
   publication_year           the EARLIEST year of any version (when the work was done)
   vor_publication_year       the version of record's own year
@@ -48,8 +50,8 @@ from src.oeuvre import title_norm
 SOURCES = OPENALEX_DIR / "sources.parquet"
 MIN_TITLE_LEN = 20
 MAX_TITLE_WORKS = 6
-TYPE_RANK = {"article": 1, "review": 2, "book-chapter": 3, "book": 4, "report": 5, "dissertation": 6,
-             "preprint": 7}
+TYPE_RANK = {"article": 1, "review": 2, "conference-paper": 3, "book-chapter": 4, "reference-entry": 5,
+             "book": 6, "report": 7, "dissertation": 8, "preprint": 9}  # Oct26 types placed 2026-10-21
 
 
 class _UnionFind:
@@ -130,7 +132,8 @@ def reduce_versions(con, in_path, out_path, sources=SOURCES) -> dict:
         CREATE OR REPLACE TEMP TABLE edition_years AS
         SELECT DISTINCT cluster_id, grp, unnest([a.y, b.y]) AS ey
         FROM places a JOIN places b USING (cluster_id, grp)
-        WHERE a.type = b.type AND a.y < b.y AND (a.source_id = b.source_id OR a.type = 'book-chapter')""")
+        WHERE a.type = b.type AND a.y < b.y
+          AND (a.source_id = b.source_id OR a.type IN ('book-chapter', 'reference-entry'))""")
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE vr AS
         WITH ed AS (

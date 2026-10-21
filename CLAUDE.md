@@ -103,9 +103,14 @@ resting tools, not updated; some import archived modules and will not run as the
   from a fresh clone) — consolidated 2026-08-07 so nothing irreplaceable can silently fall
   outside version control again. `config/` itself now holds only code (`settings.py`,
   `scope.py`, `scoring.py`).
-- Data root: `/home/lc/k/WORKING_ARC_PROJECT/`
-- Processed data: `/home/lc/k/WORKING_ARC_PROJECT/processed/`
-- OpenAlex data: set via `OPENALEX_DIR` env var in `.env` → `/home/lc/k/openalex_jul26/parquet_converted/`
+- **Since 2026-10-21 the working run is on the Oct26 OpenAlex snapshot**: data root
+  `/home/lc/k/WORKING_ARC_PROJECT_oct26/` (diskcache symlinked to the old folder's), `OPENALEX_DIR`
+  `/home/lc/m/openalex_oct26/parquet_converted/`. The Jul26 run stays frozen in
+  `/home/lc/k/WORKING_ARC_PROJECT/` for comparison; `.env` keeps the Jul26 values as comments.
+  See the dated entry "OpenAlex Oct26 snapshot" below.
+- Data root (Jul26): `/home/lc/k/WORKING_ARC_PROJECT/`
+- Processed data (Jul26): `/home/lc/k/WORKING_ARC_PROJECT/processed/`
+- OpenAlex data (Jul26): set via `OPENALEX_DIR` env var in `.env` → `/home/lc/m/openalex_jul26/parquet_converted/`
   (migrated from the old Feb26 snapshot 2026-08-08 — see "OpenAlex Snapshot Migration" below; moved
   from `/home/lc/m/...` to `/home/lc/k/...` 2026-08-14 when the drives were consolidated — `k` and
   `m` are symlinks under `/home/lc/` to `/media/k-drive`/`/media/m-drive`).
@@ -3691,6 +3696,60 @@ UNSW; not merged -- needs manual_merges rows if confirmed). Build: kept ACIFs 23
 21,862 (ORCID 16,003, name 3,877, works 1,550, Scopus 432); accepted works 2,757,181.
 
 New-computer instructions: `docs/new_computer_setup.md`.
+
+## OpenAlex Oct26 snapshot: new working folder, rerun, comparison (2026-10-21)
+
+**Snapshot** (`/home/lc/m/openalex_oct26/parquet_converted/`, same layout as Jul26): authors 119.1M ->
+101.1M (OpenAlex merged ~18M records), works 317.8M -> 327.0M; ids unchanged (author_idx = the A-number).
+New: `compact/work_keywords` (work_idx, keyword, score; 1.84B rows, 299.7M works) and a richer
+`keywords.parquet` keyed by the `keyword` slug (`config.settings.WORK_KEYWORDS`); authors gain
+`observed_orcids`; sources gain `is_preprint_repository`; `compact/references` is now one row per
+citation (`citer_idx, cited_idx`), so `src/oeuvre/citations.py` reads both layouts. **Gotcha**: the
+authors table keeps merged-away records -- 6.1M authors have no authorships, and `works_count` is
+stale (Chen Chen's record: 3,357 in the authors table, 451 in authorships). xpac: Oct26 xpac works now
+carry author ids (348k ACIF x work rows for our people; mostly datasets/other/weak articles, a quarter
+duplicate compact titles) -- kept out, as before; not the cause of any change below.
+
+**Working folder** `/home/lc/k/WORKING_ARC_PROJECT_oct26/` (user: compare old and new): raw/,
+admin_orgs.csv, for_oax_concordance.csv, FOR_2008_2020.xlsx, scopus_extract/ and
+oeuvre/gemini_verdicts.jsonl copied; diskcache symlinked (user). `.env` points there (Jul26 values
+commented; a full copy of the old .env, with keys, at `WORKING_ARC_PROJECT/env_backup_jul26.env`).
+
+**00b phase 0** (user: "mv SQL.md"): the hand-run `SQL.md` queries that built
+works_intermediate_hep / authorships_hep / works_hep are now `00b_extract_oax.py::build_hep_intermediates()`
+(paths from settings; rebuilt when older than the snapshot's authorships; `--force-hep`).
+`SQL.md`/`SQL.pdf` -> `ZARCHIVE/SQL_20261021.*`. Oct26: 2,810,758 HEP-context works, 26,993,744
+authorships, 2,408,892 authors in author_hep.
+
+**Rerun** 00a, 00c, 00d (from cache), 00e, 00b, 01, 02, 03. ARC side byte-identical; 01: 23,294 ACIFs,
+0 records moved (3 more bulk ORCIDs). `oax_link_overrides.csv`: 11 rows removed (user) -- OpenAlex had
+fixed each case: 5 accept rows' small records merged into the ORCID holder's main record (Kotousov,
+Tony Moore, D.D. Do, Åsa Ferrier, Bonnie Pang), 4 accept rows' records emptied of authorships (Searles,
+Debbie Scott, Yuan Wang, Pressey -- works moved to the ORCID holder), 2 reject rows obsolete (Elise
+Stephenson's record gone and her works no longer carry the ORCID; Phai Vu Dinh's record now carries his
+own ORCID).
+
+**Work types** (user: include conference-paper, collapse reference-entry): Oct26 retypes works --
+of Jul26-accepted works, article -> conference-paper 138k, book-chapter -> conference-paper 20k,
+article -> conference-abstract 19k, -> book-review 12k, book-chapter -> reference-entry 8.5k.
+`work_filter.KEEP_TYPES` gains conference-paper and reference-entry (conference-abstract, book-review,
+paratext etc. still dropped; book-review now catches Warren Burt's CD/book reviews); versions.TYPE_RANK
+article > review > conference-paper > book-chapter > reference-entry > ...; every reference-entry goes
+through classify's reference-work rule (one per book -- ISBN in the DOI, else the source -- unless on
+the person's ORCID list). Test added.
+
+**Comparison** (`analysis/26_compare_snapshots.py` -> `<oct26>/processed/snapshot_comparison.md`):
+linked by ORCID 16,003 -> 16,104, name 3,877 -> 3,917, works-first 1,550 -> 1,426, Scopus 432 -> 356,
+unlinked 1,330 -> 1,389; 19,303 ACIFs keep exactly the same records. Accepted works 2,757,181 ->
+2,708,656 (-1.8%). Big losses on unchanged records are OpenAlex de-lumping: Chen Chen (ORCID-linked,
+Monash/UQ medical physiology) 2,880 -> 370 -- of her Jul26-accepted works, 2,339 now sit on authorships
+with no author record (1,957 with a Chinese affiliation, 10 Australian); the 302 still on her record are
+229 Australian. User: David Hume (588 -> 11 accepted, 984 rejected) is probably contaminated by works
+about the philosopher -- not checked yet. Linker review queue under Oct26: 43 review cases (25 ACIFs with
+no accepted link) and reject_orcid_names 21 -> 84, many of them nicknames (Rick Shine, Cathie Elder).
+
+**ARC phase not complete** (user asked): open -- merge by shared OpenAlex record, bulk-pass commonness
+rule, the 20 round-2 merges, Anne Jones, pass-two refusals, the Wei Wang Information Systems records.
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
