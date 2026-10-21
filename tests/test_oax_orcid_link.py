@@ -122,3 +122,14 @@ def test_accept_nickname_same_family():
     ])
     d = decide(links)
     assert list(d.status) == ["accept_nickname", "accept_nickname", "reject_orcid_names"]
+
+
+def test_hand_record_authors_from_pool(tmp_path):
+    from src.oax.orcid_link import hand_record_authors
+    pool = pd.DataFrame([{"author_idx": 77, "orcid": None, "full_name": "Dean Patterson", "full_name_keys": ["dean_patterson"],
+                          "works_count": 10, "works_count_au": 8, "works_count_global": 10}])
+    pool.to_parquet(tmp_path / "prep.parquet")
+    ov = pd.DataFrame([{"action": "accept_record", "orcid": "O9", "author_idx": 77, "notes": ""},
+                       {"action": "reject_link", "orcid": "O1", "author_idx": 5, "notes": ""}])
+    out = hand_record_authors(ov, tmp_path / "prep.parquet")
+    assert list(out.author_idx) == [77] and list(out.orcid) == ["O9"] and bool(out.in_pool.iloc[0])

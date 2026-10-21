@@ -3831,6 +3831,12 @@ another person's profile). Recorded as a new `accept_bridge` action in `oax_link
 ORCID + record; `accept_scopus_hand`; a row the bridge doesn't use stops the run). Unlinked 1,380 ->
 1,314. What remains is mostly structural: old single-grant HASS ACIFs with no or no placeable OpenAlex
 record (route H 610, F 251, E 224). The user's NLA Trove token is in `.env` as `trove_token` (todo).
+The 4 left were then resolved by hand (user: "can we do anything"): a new `accept_record` action
+(ACIF ORCID + a record that carries no or another ORCID, added to stage 1 as accept_hand) for Dean
+Patterson (UQ coastal engineering; his ORCID lists "Dean") and Tom Cochrane (QUT open access and
+copyright; only 2 of his works have an author record -- the rest sit on unattributed authorships, as in
+todo 5b(a)); `accept_bridge` for Peter Taylor and Qianhui Zhang (mixed records); `reject_link` for
+"Sherry Zhang", a USC vision scientist carrying Qianhui Zhang's ORCID. Unlinked 1,310.
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.

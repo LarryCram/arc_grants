@@ -56,7 +56,7 @@ from src.oax.name_link import (MIN_YEARS, WINDOW_AFTER, WINDOW_BEFORE, acif_main
 from src.oax import scopus_link as sl
 from src.oax.name_link import AUTHORS_PREP
 from src.oax import works_link as wl
-from src.oax.orcid_link import (MINOR_SHARE, apply_overrides, decide, load_acifs, load_authors,
+from src.oax.orcid_link import (MINOR_SHARE, apply_overrides, decide, hand_record_authors, load_acifs, load_authors,
                                 load_name_evidence, load_outside_authors, load_overrides, orcid_links,
                                 shared_orcids, unmatched)
 
@@ -288,8 +288,9 @@ def main():
     authors = pd.concat([pool, load_outside_authors(orcids - set(pool.orcid))], ignore_index=True)
     rejects = load_overrides()
     authors, refused = apply_overrides(authors, rejects)
-    accepts = set(zip(rejects.loc[rejects.action == "accept_link", "orcid"],
-                      rejects.loc[rejects.action == "accept_link", "author_idx"]))
+    authors = pd.concat([authors, hand_record_authors(rejects)], ignore_index=True)
+    accepts = set(zip(rejects.loc[rejects.action.isin(["accept_link", "accept_record"]), "orcid"],
+                      rejects.loc[rejects.action.isin(["accept_link", "accept_record"]), "author_idx"]))
     links = orcid_links(acifs, authors)
     links = decide(links, accepts, *load_name_evidence(links))
     miss = unmatched(acifs, links)

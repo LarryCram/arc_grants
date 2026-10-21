@@ -49,7 +49,10 @@ notes`. reject_link: that OpenAlex author is not the person holding that ORCID -
 out and reported. accept_link: a review case is the person. A row that matches no candidate link
 stops the run. accept_bridge (2026-10-22): for the Scopus DOI bridge (src/oax/scopus_link.py) -- the
 ACIF holding `orcid` takes the record `oax_author` although the record carries another ORCID (one
-person with two ORCID accounts, or a co-author's ORCID on the record); checked there.
+person with two ORCID accounts, or a co-author's ORCID on the record); checked there. accept_record
+(2026-10-22): the ACIF holding `orcid` takes the record `oax_author`, which carries no ORCID or another
+one and which no linker route reaches (Dean Patterson, Tom Cochrane); added to stage 1 as a link with
+status accept_hand (hand_record_authors()).
 
 Name keys are not used to link; `shares_name_key` / `shares_full_name_key` only report whether
 the two sides' parser keys agree (a check on the link, and input to step 2's design).
@@ -71,7 +74,7 @@ from src.utils.names import HumanNameParser, given_names_related
 OVERRIDES = Path(__file__).resolve().parents[2] / "data_persisted" / "oax_link_overrides.csv"
 MINOR_SHARE = 0.2
 NICK_MIN_CLIPPED = 4
-ACTIONS = ("reject_link", "accept_link", "accept_bridge")
+ACTIONS = ("reject_link", "accept_link", "accept_bridge", "accept_record")
 
 AUTHORS_PREP = PROCESSED_DATA / "openalex_authors_prep.parquet"
 ACIF_COLUMNS = ["cluster_id", "orcids", "orcid_sources", "full_names", "full_name_keys",
@@ -123,11 +126,43 @@ def load_overrides(path=OVERRIDES) -> pd.DataFrame:
                          for r in rows], columns=["action", "orcid", "author_idx", "notes"])
 
 
+def hand_record_authors(overrides: pd.DataFrame, path=AUTHORS_PREP) -> pd.DataFrame:
+    """The accept_record rows' records as author rows carrying the row's (the ACIF's) ORCID, so
+    orcid_links() pairs them with the ACIF; from the HEP-context pool, else the full authors table
+    (names parsed here, as in load_outside_authors()). A row whose record exists nowhere stops the run."""
+    rows = overrides[overrides.action == "accept_record"] if "action" in overrides else overrides.iloc[0:0]
+    if not len(rows):
+        return pd.DataFrame(columns=AUTHOR_COLUMNS + ["in_pool"])
+    con = duckdb.connect()
+    con.register("want", rows[["orcid", "author_idx"]])
+    pool = con.execute(f"""SELECT {', '.join(c for c in AUTHOR_COLUMNS if c != 'orcid')}, w.orcid, TRUE AS in_pool
+        FROM read_parquet('{path}') p JOIN want w USING (author_idx)""").fetchdf()
+    rest = rows[~rows.author_idx.isin(set(pool.author_idx))]
+    out = [pool]
+    if len(rest):
+        con.register("rest", rest[["orcid", "author_idx"]])
+        raw = con.execute(f"""SELECT a.author_idx, r.orcid, a.display_name, a.display_name_alternatives AS alternatives
+            FROM read_parquet('{OAX_AUTHORS}/*.parquet') a JOIN rest r USING (author_idx)""").fetchdf()
+        if len(raw) < len(rest):
+            raise SystemExit(f"oax_link_overrides.csv accept_record rows name records not in OpenAlex: "
+                             f"{sorted(set(rest.author_idx) - set(raw.author_idx))}")
+        parser = HumanNameParser()
+        keys = [sorted({k for n in [r.display_name, *(list(r.alternatives) if r.alternatives is not None else [])]
+                        if isinstance(n, str) and n for k in parser.parse(n).full_name_keys}) for r in raw.itertuples()]
+        con.register("ids", raw[["author_idx"]])
+        wc = dict(con.execute(f"""SELECT author_idx, count(DISTINCT work_idx) FROM read_parquet('{OPENALEX_COMPACT_DIR}/authorships/*.parquet')
+                                   WHERE author_idx IN (SELECT author_idx FROM ids) GROUP BY 1""").fetchall())
+        out.append(pd.DataFrame({"author_idx": raw.author_idx, "orcid": raw.orcid, "full_name": raw.display_name,
+                                 "full_name_keys": keys, "works_count": pd.NA, "works_count_au": pd.NA,
+                                 "works_count_global": [wc.get(i, 0) for i in raw.author_idx], "in_pool": False}))
+    return pd.concat(out, ignore_index=True)
+
+
 def apply_overrides(authors: pd.DataFrame, overrides: pd.DataFrame):
     """(authors without the reject_link (orcid, author) pairs, the rejected rows). Any hand row
     that matches no author carrying that ORCID stops the run."""
     key = set(zip(authors.orcid, authors.author_idx.astype("int64")))
-    ov = overrides[overrides.action != "accept_bridge"] if "action" in overrides else overrides   # the Scopus bridge checks those
+    ov = overrides[~overrides.action.isin(["accept_bridge", "accept_record"])] if "action" in overrides else overrides
     missing = [(o, a) for o, a in zip(ov.orcid, ov.author_idx) if (o, a) not in key]
     if missing:
         raise SystemExit(f"oax_link_overrides.csv rows match no candidate link: {missing}")
