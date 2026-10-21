@@ -10,6 +10,17 @@ resolved on 2026-10-21 (CLAUDE.md, "ARC-phase decisions"). The build now runs as
 keyword test for works consistency, David Hume (probably works about the philosopher), work expansion
 from Scopus profiles (5b).
 
+**New source, not built (2026-10-22, user):** the user has an API key for the National Library of
+Australia (Trove), where most books are indexed. A name search returns many false positives, but could
+supply books and other works for the HASS ACIFs that OpenAlex misses (creative arts 21% unlinked,
+history 12%, philosophy 10%), and book publication years matter for the user's study. To design before
+building: (a) the key goes in `.env` (not in chat or code); (b) prefer Trove's people/authority records
+(NLA name authorities, which may carry dates and other identifiers) over free-text creator search, then
+the works attached to the authority; (c) evidence tests on name-search hits as for other name sources:
+NameParser keys, publication year within the career window (first grant - 20 .. last grant + 10),
+subject vs the ACIF's FOR fields, Australian publisher or a grant-university author note; (d) scope:
+first the unlinked HASS ACIFs, then books missing from linked HASS oeuvres.
+
 ## Current state and open items (2026-10-06, later) — read this first
 
 Everything below this section predates the 2026-09-30 archive of the old pipeline. Items that

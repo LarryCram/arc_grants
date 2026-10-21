@@ -47,7 +47,9 @@ Accepted links are those whose status starts with "accept".
 Hand decisions: data_persisted/oax_link_overrides.csv, rows `action, orcid, oax_author (A-number),
 notes`. reject_link: that OpenAlex author is not the person holding that ORCID -- the link is left
 out and reported. accept_link: a review case is the person. A row that matches no candidate link
-stops the run.
+stops the run. accept_bridge (2026-10-22): for the Scopus DOI bridge (src/oax/scopus_link.py) -- the
+ACIF holding `orcid` takes the record `oax_author` although the record carries another ORCID (one
+person with two ORCID accounts, or a co-author's ORCID on the record); checked there.
 
 Name keys are not used to link; `shares_name_key` / `shares_full_name_key` only report whether
 the two sides' parser keys agree (a check on the link, and input to step 2's design).
@@ -69,7 +71,7 @@ from src.utils.names import HumanNameParser, given_names_related
 OVERRIDES = Path(__file__).resolve().parents[2] / "data_persisted" / "oax_link_overrides.csv"
 MINOR_SHARE = 0.2
 NICK_MIN_CLIPPED = 4
-ACTIONS = ("reject_link", "accept_link")
+ACTIONS = ("reject_link", "accept_link", "accept_bridge")
 
 AUTHORS_PREP = PROCESSED_DATA / "openalex_authors_prep.parquet"
 ACIF_COLUMNS = ["cluster_id", "orcids", "orcid_sources", "full_names", "full_name_keys",
@@ -125,7 +127,8 @@ def apply_overrides(authors: pd.DataFrame, overrides: pd.DataFrame):
     """(authors without the reject_link (orcid, author) pairs, the rejected rows). Any hand row
     that matches no author carrying that ORCID stops the run."""
     key = set(zip(authors.orcid, authors.author_idx.astype("int64")))
-    missing = [(o, a) for o, a in zip(overrides.orcid, overrides.author_idx) if (o, a) not in key]
+    ov = overrides[overrides.action != "accept_bridge"] if "action" in overrides else overrides   # the Scopus bridge checks those
+    missing = [(o, a) for o, a in zip(ov.orcid, ov.author_idx) if (o, a) not in key]
     if missing:
         raise SystemExit(f"oax_link_overrides.csv rows match no candidate link: {missing}")
     rejects = overrides[overrides.action == "reject_link"] if "action" in overrides else overrides

@@ -349,7 +349,13 @@ def main():
     akeys = dict(zip(acifs.cluster_id, acifs.full_name_keys))
     nick = {(c, int(a_)) for c, a_ in zip(tops.cluster_id, tops.author_idx)
             if sl.nickname_related(akeys.get(c), rkeys.get(int(a_)))}
-    sdec, slinks = sl.decide(s_ids, sprof, fetched, sev, orc1, taken, tiers, nick)
+    bridge_hand = set(zip(rejects.loc[rejects.action == "accept_bridge", "orcid"],
+                          rejects.loc[rejects.action == "accept_bridge", "author_idx"].astype("int64")))
+    sdec, slinks = sl.decide(s_ids, sprof, fetched, sev, orc1, taken, tiers, nick, bridge_hand)
+    used = {(orc1.get(c), int(a_)) for c, a_ in zip(slinks.loc[slinks.status == "accept_scopus_hand", "cluster_id"],
+                                                    slinks.loc[slinks.status == "accept_scopus_hand", "author_idx"])}
+    if bridge_hand - used:
+        raise SystemExit(f"oax_link_overrides.csv accept_bridge rows match no bridge decision: {sorted(bridge_hand - used)}")
     scal = None
     if args.calibrate:
         kprof = sl.searched_profiles(known.cluster_id)

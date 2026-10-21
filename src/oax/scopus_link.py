@@ -31,7 +31,9 @@ was fetched, nothing taken: a record is taken for 11,909, and it is the ORCID-li
 (99.5%). (A first version limited to stage 2's name-compatible candidates linked minor records when
 the main one was not a candidate -- 55 of 436 links held < 30% of the profile's DOIs.)
 
-Decision per ACIF: accept_scopus, accept_scopus_nickname, record_linked_elsewhere, record_other_orcid, record_name_differs,
+Decision per ACIF: accept_scopus, accept_scopus_nickname, accept_scopus_hand (a record carrying another ORCID,
+accepted by hand: accept_bridge rows of oax_link_overrides.csv), record_linked_elsewhere, record_other_orcid,
+record_name_differs,
 several_records (a tie),
 weak_shared_record, no_candidate (no same-name author on the profile's works), several_profiles,
 no_profile (no usable profile, or its documents not fetched).
@@ -147,12 +149,15 @@ def nickname_related(acif_keys, record_keys) -> bool:
 
 
 def decide(acif_ids, profiles: pd.DataFrame, fetched: set, ev: pd.DataFrame, acif_orcid: dict,
-           taken: dict, tiers: dict | None = None, nicknames: set | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+           taken: dict, tiers: dict | None = None, nicknames: set | None = None,
+           hand: set | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """(decisions, links). profiles: usable profiles; fetched: scopus_ids whose documents were fetched;
     acif_orcid: cluster_id -> the ACIF's ORCID; taken: author_idx -> the ACIF an earlier stage linked it to;
     tiers: (cluster_id, author_idx) -> name tier of the top records (src/oax/name_link.py::name_tier);
-    nicknames: (cluster_id, author_idx) top records whose given name is a nickname of the ACIF's."""
-    tiers, nicknames = tiers or {}, nicknames or set()
+    nicknames: (cluster_id, author_idx) top records whose given name is a nickname of the ACIF's;
+    hand: (ACIF ORCID, author_idx) pairs accepted by hand although the record carries another ORCID
+    (accept_bridge rows of oax_link_overrides.csv -> accept_scopus_hand)."""
+    tiers, nicknames, hand = tiers or {}, nicknames or set(), hand or set()
     np_ = profiles.groupby("cluster_id").scopus_id.apply(list).to_dict()
     by = {c: d for c, d in ev.groupby("cluster_id")}
     dec, links = [], []
@@ -181,12 +186,13 @@ def decide(acif_ids, profiles: pd.DataFrame, fetched: set, ev: pd.DataFrame, aci
         own = acif_orcid.get(cid)
         if other is not None:
             status = "record_linked_elsewhere"
-        elif isinstance(r.author_orcid, str) and own and r.author_orcid != own:
+        elif isinstance(r.author_orcid, str) and own and r.author_orcid != own and (own, aid) not in hand:
             status = "record_other_orcid"
         elif pd.isna(tiers.get((cid, aid))) and (cid, aid) not in nicknames:
             status = "record_name_differs"
         else:
-            status = "accept_scopus" if not pd.isna(tiers.get((cid, aid))) else "accept_scopus_nickname"
+            status = ("accept_scopus_hand" if (own, aid) in hand else
+                      "accept_scopus" if not pd.isna(tiers.get((cid, aid))) else "accept_scopus_nickname")
             links.append((cid, aid, r.author_name, sid, int(r.shared_dois), int(r.profile_dois_in_openalex), status))
         dec.append((cid, status, sid, aid, other, 1))
     return (pd.DataFrame(dec, columns=["cluster_id", "status", "scopus_id", "author_idx", "linked_to_acif", "n_profiles"]),

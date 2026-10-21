@@ -3819,6 +3819,19 @@ Scopus-profile label (49,098 articles/reviews) keywords 0.676, topics 0.698, sub
 combined 0.705; Gemini-verdict label (15,837 works) keywords 0.728, topics 0.801, subfields 0.778.
 Keywords are not better than topics for works consistency; not adopted (at most a tie-breaker).
 
+**Unlinked ACIFs and what is left (2026-10-22)**: `analysis/28_unlinked_composition.py` ->
+`<oct26>/processed/unlinked_composition.md` (route left per ACIF; by year, field, ORCID, decision).
+(1) `00f --targets unlinked` fetched all 1,453 profiles of unlinked ACIFs (99 s, no throttling): the
+bridge linked 17 more. (2) The bridge's `record_other_orcid` refusals (the ACIF's ORCID is on no OpenAlex
+record; the record found carries another ORCID no ACIF holds): review list `analysis/29_other_orcid_review.py`
+-> `other_orcid_review.md`; 53 cases judged from profile sources, record fields and institutions -- 49
+the same person (second ORCID account, or a co-author's ORCID on the record; mixed records left to the
+oeuvre filter), 4 left (Qianhui Zhang: profile mixed; Peter Taylor; Thomas Cochrane; David Patterson:
+another person's profile). Recorded as a new `accept_bridge` action in `oax_link_overrides.csv` (ACIF
+ORCID + record; `accept_scopus_hand`; a row the bridge doesn't use stops the run). Unlinked 1,380 ->
+1,314. What remains is mostly structural: old single-grant HASS ACIFs with no or no placeable OpenAlex
+record (route H 610, F 251, E 224). The user's NLA Trove token is in `.env` as `trove_token` (todo).
+
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
 
