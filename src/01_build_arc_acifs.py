@@ -34,7 +34,8 @@ def render(report, acifs_df) -> str:
          f"| Scopus pass two | {report['n_scopus_pass_two']:,} |",
          f"| hand stage | {report['n_hand']:,} |",
          f"| ORCID bulk pass | {report['n_orcid_bulk']:,} |",
-         f"| name stage | {report['n_names']:,} |", "",
+         f"| name stage | {report['n_names']:,} |",
+         f"| shared OpenAlex record (02b's merge sets) | {report.get('n_oax', report['n_names']):,} |", "",
          f"Set aside as Indigenous-focused research (excluded=True): {report['n_excluded_indigenous']:,}; "
          f"kept: {len(kept):,}.", "",
          "Groups left unmerged, by stage and reason:", ""]
@@ -47,6 +48,11 @@ def render(report, acifs_df) -> str:
     L.append("- ORCID bulk pass decisions (ACIFs without an ORCID): " + ", ".join(
         f"{k} {v:,}" for k, v in report["orcid_bulk_decisions"].decision.value_counts().items()))
     L.append("- name stage: " + ", ".join(f"{k} {v:,}" for k, v in sorted(report["names"]["status_counts"].items())))
+    o = report.get("oax", {})
+    if o:
+        L.append(f"- shared OpenAlex record: sets {o['sets']:,}, merged {o['merged_sets']:,}, already one ACIF "
+                 f"{o['already_one']:,}, refused {len(o['refused']):,}"
+                 + "".join(f"; {r['reason']}: {', '.join(r['names'])}" for r in o["refused"]))
     L += ["", "Kept ACIFs:", "",
           f"- with an ORCID: {int((kept.orcids.map(len) > 0).sum()):,} "
           f"(ORCID sources: " + ", ".join(f"{k} {v:,}" for k, v in sorted(

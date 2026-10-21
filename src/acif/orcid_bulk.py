@@ -36,7 +36,7 @@ import pandas as pd
 from config.settings import ORCID_BULK_EXTRACT_DIR, SCOPUS_EXTRACT_DIR
 from src.acif.build import DATA_PERSISTED, UnionFind, _item_orcids, load_refused_orcids, merge_by_key
 from src.acif.models import AwardsCIF
-from src.acif.scopus import _single_orcid, drop_unlinked_scopus_orcids
+from src.acif.scopus import merge_pass_orcids
 
 
 @dataclass
@@ -110,15 +110,12 @@ def _with_bulk_orcid(acif: AwardsCIF, orcid: str) -> AwardsCIF:
                      orcids=list(acif.orcids), orcid_status=acif.orcid_status)
 
 
-def orcid_bulk_pass(acifs: list[AwardsCIF], uf: UnionFind, ext: OrcidBulkExtract):
-    """Returns (acifs, decisions, mismatches)."""
+def orcid_bulk_pass(acifs: list[AwardsCIF], uf: UnionFind, ext: OrcidBulkExtract, inputs=None):
+    """Returns (acifs, decisions, mismatches). Merging as in Scopus pass one
+    (scopus.merge_pass_orcids): a part joining a firm (ARC/hand) ORCID must pass the name stage's
+    checks (2026-10-21)."""
     decisions = orcid_bulk_decisions(acifs, ext)
     acc = decisions[decisions.decision == "accepted"]
     accepted = dict(zip(acc.cluster_id, acc.bulk_orcid))
     acifs = [_with_bulk_orcid(a, accepted[a.cluster_id]) if a.cluster_id in accepted else a for a in acifs]
-    merged, mismatches = merge_by_key(acifs, uf, _single_orcid)
-    merged, dropped = drop_unlinked_scopus_orcids(merged, mismatches, ext.main_keys, field="bulk_orcid")
-    if dropped:
-        decisions.loc[decisions.cluster_id.isin(dropped), "decision"] = "dropped_names_do_not_link"
-        merged, mismatches = merge_by_key(merged, uf, _single_orcid)
-    return merged, decisions, mismatches
+    return merge_pass_orcids(acifs, uf, decisions, "bulk_orcid", ext.main_keys, inputs)

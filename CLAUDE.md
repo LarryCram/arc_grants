@@ -31,7 +31,8 @@ src/acif/                       → the cyclic ACIF build (models, build, featur
                                   → hand stage (manual_orcids, manual_merges, keep-apart pairs)
                                   → ORCID bulk pass (src/acif/orcid_bulk.py)
                                   → name stage (clean name groups, then partial merges in
-                                  flagged groups; src/acif/name_merge.py) → Indigenous set-aside
+                                  flagged groups; src/acif/name_merge.py) → shared OpenAlex record
+                                  (02b's merge sets, src/acif/oax_merge.py, 2026-10-21) → Indigenous set-aside
 src/01_build_arc_acifs.py       → the ARC-stage list of people: acifs_arc.parquet (one row per
                                   ACIF; declined_grants / ended_early_grants from 00a's grant
                                   lifecycle flags, 2026-10-08), acif_arc_records.parquet (record → ACIF,
@@ -49,6 +50,13 @@ src/02_link_arc_oax.py + src/oax/ → the NEW ARC↔OpenAlex linker, built one s
                                   ACIF's one Scopus profile; the same-name record holding most of its
                                   DOIs, unless taken, other-ORCID or name-incompatible)
                                   → processed/oax_link/ (`--calibrate` scores stage 2 on ORCID-linked ACIFs)
+src/02b_shared_record_merges.py + src/oax/shared_records.py → merge evidence from the linker
+                                  (2026-10-21): ACIFs sharing an accepted OpenAlex record, merged when
+                                  pairwise compatible (shared FOR2020 group or co-investigator, no ORCID
+                                  conflict, no career flag) as the unique largest set; name and
+                                  same-grant tests; sets carried forward while the linker supports them
+                                  → oax_link/shared_record_merges.parquet, read by the next 01. Cycle:
+                                  01 → 02 → 02b until 02b adds no merge
 src/03_build_oeuvres.py + src/oeuvre/ → the oeuvre extractor (2026-10-07), on the linker's accepted
                                   links (accepted_links.parquet; all stages since 2026-10-09): so far step 1, acif_works.parquet (one row per ACIF x work:
                                   authorships through the ACIF's linked authors, work metadata,
@@ -3750,7 +3758,7 @@ no accepted link) and reject_orcid_names 21 -> 84, many of them nicknames (Rick 
 
 **ARC phase not complete** (user asked): open -- merge by shared OpenAlex record, bulk-pass commonness
 rule, the 20 round-2 merges, Anne Jones, pass-two refusals, the Wei Wang Information Systems records.
-Manual linker review deferred until then.
+Manual linker review deferred until then. -- Resolved the same day, see "ARC-phase decisions" below.
 
 **Same day, user: nickname test in stage 1; works counts from authorships.**
 - `orcid_link.accept_nickname`: same family name and a full given name of each side equal without
@@ -3766,6 +3774,42 @@ Manual linker review deferred until then.
   claims 2,384,531 works, its authorships 398).
 - Result: ORCID-linked 16,120, name 3,915, works-first 1,427, Scopus 351, unlinked 1,379; accepted
   works 2,709,320 (Jul26 2,757,181). 430 tests pass.
+
+**ARC-phase decisions, categorised and resolved (user: "try to categorise and resolve them yourself").**
+- *Anne Jones* (LP0776270): the Scopus pass-one ORCID is Lisa A Jones (University of Worcester); the hand
+  ORCID is Anne Jones (James Cook University), the physiotherapy-education grant's investigator ->
+  `reject_scopus` row; the hand ORCID now applies.
+- *Scopus pass-two refusals* (13 "profile claimed by another name"): every group but Xiaolin Wang is merged
+  by the name stage anyway (one ACIF each); Xiaolin Wang's UOW records are joined by hand merges. Nothing to do.
+- *Bulk-pass / back-propagation risk*: testing every Scopus-pass-one and bulk-pass ORCID merge with the
+  name stage's checks would split many real people (277 flagged groups, mostly broad careers: Andrew Pitman,
+  Julie Cairney, Colin Fidge) -- each part was matched on its own name and employer. The risky class is a
+  part holding the ORCID only through the pass joining a part holding it from ARC or a hand file: 4 such
+  joins were flagged, 3 wrong (Richard Morris 2003 accounting vs a 2024 biophysicist; David Wood Monash
+  pure mathematics vs a UQ microbiology grant; Paul Thomas UNSW image processing vs a UNSW digital-media
+  artist), 1 right (Yang Song). Rule (`name_merge.unconfirmed_joins`, used by
+  `scopus.merge_pass_orcids` in both passes): such a part must pass the name stage's checks against the
+  firm parts, else it loses the pass ORCID (`dropped_unconfirmed_join`, 3 in the bulk pass). Yang Song's
+  FT and LP records get his ORCID by hand (`manual_orcids.csv`; evidence: the 2026-08-23 review).
+- *Merge by shared OpenAlex record* (82 records shared by 2+ ACIFs): `src/02b_shared_record_merges.py`.
+  Records whose name lists several people join nothing; an ACIF whose main given names don't fit the
+  record's name forms is left out; ACIFs sharing a grant are left out (Mark/Thomas Gabbott, George/Malcolm
+  Smith: OpenAlex lists the co-investigator's name among the record's alternatives; `no` rows in
+  arc_name_overrides.csv agree); two ACIFs are compatible when they share a FOR2020 group or a
+  co-investigator and raise no ORCID or career check (the shared record overrides interleaved
+  universities: Graeme Hugo, Kuczera, Zhao Yang Dong); the unique largest compatible set merges. A first
+  leave-odd-out version and the name stage's lift rescue were dropped after review: they let James Smith
+  (Curtin civil engineering + UQ gender studies) and David Harris (econometrics + psychology) through.
+  First pass: 52 sets from 201 ACIFs (Paul Michael Young 15, Alan Cooper, Jiyuan Tu, Xiaofang Zhou, the
+  three Wei Wang Information Systems records, ...). Applied by the build's last merge stage
+  (`src/acif/oax_merge.py`, under the ORCID veto, refusals and keep-apart pairs); 02b carries a set forward
+  while the merged ACIF still links to its record -- without that the cycle oscillated (10, 39, 11, 50 sets
+  per round).
+  Cycle from a clean start: round 1 52 sets, round 2 10 new, round 3 1, round 4 none (fixed point); kept
+  ACIFs 23,192 -> 23,034; linked by ORCID 16,118, name 3,817, works-first 1,365, Scopus 351, unlinked 1,380
+  (snapshot_comparison.md counts only ACIF ids present in both snapshots). 434 tests pass.
+- *The 20 round-2 name-stage merges*: not adopted; the build-link cycle through 02b replaces a second name round.
+- *Wei Wang Information Systems records*: 3 joined by the shared record; the rest stay apart (missed merges).
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.

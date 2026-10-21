@@ -475,3 +475,29 @@ class TestManualOrcidCorrectionsPreventsWrongMerge:
         survivors, mismatches = merge_by_orcid(acifs, UnionFind())
         assert len(survivors) == 2  # NOT merged, unlike the uncorrected case
         assert mismatches == []  # no orcid shared between them anymore -- nothing to flag either
+
+
+class TestOaxMergeStage:
+    """src/acif/oax_merge.py: 02b's merge sets join the current ACIFs holding their records."""
+
+    def test_sets_join_under_vetoes(self, tmp_path):
+        import pandas as pd
+        from src.acif.oax_merge import oax_merge_stage
+        O1, O2 = "0000-0000-0000-0001", "0000-0000-0000-0002"
+        acifs = [_acif(u, [_item(u, orcid=o)]) for u, o in
+                 [("DP01_JohnSmith", O1), ("DP02_JohnSmith", None), ("DP03_JohnSmith", O1),
+                  ("DP04_JohnSmith", O2), ("DP05_JohnSmith", None), ("DP06_JohnSmith", None), ("DP07_JohnSmith", None)]]
+        p = tmp_path / "sets.parquet"
+        pd.DataFrame([{"unique_ids": ["DP01_JohnSmith", "DP02_JohnSmith", "DP03_JohnSmith"], "names": ["John Smith"]},
+                      {"unique_ids": ["DP04_JohnSmith", "DP05_JohnSmith", "DP01_JohnSmith"], "names": ["John Smith"]},
+                      {"unique_ids": ["DP06_JohnSmith", "DP07_JohnSmith"], "names": ["John Smith"]}]).to_parquet(p)
+        out, rep = oax_merge_stage(acifs, UnionFind(), p, distinct=[("DP06_JohnSmith", "DP07_JohnSmith")])
+        sizes = sorted(len(a.items) for a in out)
+        assert sizes == [1, 1, 1, 1, 3]                     # set 1 merged; set 2 vetoed (O1 vs O2); set 3 kept apart
+        assert [r["reason"] for r in rep["refused"]] == ["orcid_veto", "kept_apart"]
+
+    def test_no_file_no_change(self, tmp_path):
+        from src.acif.oax_merge import oax_merge_stage
+        acifs = [_acif("DP01_JohnSmith", [_item("DP01_JohnSmith")])]
+        out, rep = oax_merge_stage(acifs, UnionFind(), tmp_path / "missing.parquet")
+        assert out == acifs and rep["sets"] == 0

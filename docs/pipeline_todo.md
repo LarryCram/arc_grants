@@ -1,5 +1,15 @@
 # Full TODO list — ARC Grants → OpenAlex pipeline
 
+## 2026-10-21 update — read this first
+
+The working run is on the Oct26 OpenAlex snapshot (`/home/lc/k/WORKING_ARC_PROJECT_oct26/`; CLAUDE.md
+entry "OpenAlex Oct26 snapshot"). The ARC-phase decisions listed below as open (Anne Jones, pass-two
+refusals, the bulk-pass risk, merge by shared OpenAlex record, round-2 merges, the Wei Wang records) were
+resolved on 2026-10-21 (CLAUDE.md, "ARC-phase decisions"). The build now runs as a cycle:
+`01 -> 02 -> 02b` until 02b adds no merge, then `03`. Open: the linker's 24 review links (9 ACIFs), the
+keyword test for works consistency, David Hume (probably works about the philosopher), work expansion
+from Scopus profiles (5b).
+
 ## Current state and open items (2026-10-06, later) — read this first
 
 Everything below this section predates the 2026-09-30 archive of the old pipeline. Items that

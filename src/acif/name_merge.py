@@ -230,6 +230,34 @@ def group_checks(keys, parts, inp: NameMergeInputs, seen_for=None, seen_uni=None
     return row
 
 
+# ── ORCID joins onto a firm ORCID (used by Scopus pass one and the ORCID bulk pass) ────────
+
+def unconfirmed_joins(group, orcid: str, field: str, inp: NameMergeInputs, coinv_of) -> list[str]:
+    """cluster_ids of the parts of an ORCID merge group that hold `orcid` only through `field` (a
+    pass's ORCID: scopus_orcid, bulk_orcid) and raise one of the name stage's checks (rare_for or a
+    career flag; not several_main_names) against the parts holding it firmly (ARC or hand), taken
+    together. 2026-10-21: ARC carries a person's current ORCID on all their grants, so a grant it left
+    without one that a pass joins to that ORCID by name and employer is often a namesake -- of 4 such
+    joins flagged by these checks, 3 were wrong (Richard Morris: 2003 accounting grant vs a biophysicist
+    abroad until 2018; David Wood: Monash pure mathematician vs a UQ microbiology grant; Paul Thomas:
+    UNSW image processing vs a UNSW digital-media artist) and 1 right (Yang Song). Joins between parts
+    that all hold the ORCID through the pass are not tested: each was matched on its own."""
+    firm = [a for a in group if any(it.orcid == orcid or it.hand_orcid == orcid for it in a.items)]
+    if not firm:
+        return []
+    ff = part_facts(AwardsCIF(cluster_id="__firm__", items=[it for a in firm for it in a.items], cycle_stages=[1]),
+                    inp, coinv_of)
+    out = []
+    for a in group:
+        if a in firm or not any(getattr(it, field) == orcid for it in a.items):
+            continue
+        f = part_facts(a, inp, coinv_of)
+        flags = group_checks(sorted(ff["main_keys"] | f["main_keys"]), [ff, f], inp)["flags"]
+        if [x for x in flags if x != "several_main_names"]:
+            out.append(a.cluster_id)
+    return out
+
+
 # ── partial merges in flagged groups ─────────────────────────────────────────
 
 def maximal_cliques(nodes, adj) -> list[set]:

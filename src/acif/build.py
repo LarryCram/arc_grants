@@ -559,13 +559,15 @@ def set_aside_indigenous_research(acifs: list[AwardsCIF]) -> int:
 
 
 def build_acifs(scopus: bool = True, hand: bool = True, orcid_bulk: bool = True, names: bool = True,
-                ) -> tuple[list[AwardsCIF], UnionFind, dict]:
+                oax: bool = True) -> tuple[list[AwardsCIF], UnionFind, dict]:
     """The build so far: stage zero -> ARC ORCID merge -> (scopus=True) Scopus pass one (ORCIDs
     found through Scopus) -> Scopus pass two (shared Scopus profile); see src/acif/scopus.py ->
     (hand=True) the hand-confirmed ORCIDs and merges from data_persisted (src/acif/hand.py) ->
     (orcid_bulk=True) ORCIDs from the ORCID bulk file by name and ARC-university employer
-    (src/acif/orcid_bulk.py) -> (names=True) the clean name groups (src/acif/name_merge.py); then Indigenous-focused ACIFs are
-    flagged excluded (set_aside_indigenous_research()).
+    (src/acif/orcid_bulk.py) -> (names=True) the clean name groups (src/acif/name_merge.py) -> (oax=True)
+    the merge sets chosen from the linker's shared OpenAlex records (src/acif/oax_merge.py; nothing
+    before the first linking); then Indigenous-focused ACIFs are flagged excluded
+    (set_aside_indigenous_research()).
     Each record carries its hand refusals (load_refused_orcids()) from the start; after the last
     stage no record may hold or be joined to an ORCID it refuses (raises otherwise).
     One UnionFind runs through every stage. Returns (acifs, uf, report): report holds each
@@ -593,6 +595,10 @@ def build_acifs(scopus: bool = True, hand: bool = True, orcid_bulk: bool = True,
         from src.acif.name_merge import name_merge
         acifs, name_report = name_merge(acifs, uf)
         report.update(n_names=len(acifs), names=name_report)
+    if oax:
+        from src.acif.oax_merge import oax_merge_stage
+        acifs, oax_report = oax_merge_stage(acifs, uf)
+        report.update(n_oax=len(acifs), oax=oax_report)
     hits = [h for a in acifs for h in refusal_hits([a])]
     if hits:
         raise ValueError(f"records holding or joined to an ORCID they refuse: {hits}")

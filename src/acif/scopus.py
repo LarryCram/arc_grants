@@ -192,20 +192,52 @@ def _single_orcid(acif: AwardsCIF) -> str | None:
     return next(iter(os)) if len(os) == 1 else None
 
 
-def scopus_pass_one(acifs: list[AwardsCIF], uf: UnionFind, ext: ScopusExtract):
+def scopus_pass_one(acifs: list[AwardsCIF], uf: UnionFind, ext: ScopusExtract, inputs=None):
     """Pass one: put each accepted Scopus ORCID on its ACIF's records, then merge by ORCID (ARC or
-    Scopus). Returns (acifs, decisions, mismatches)."""
+    Scopus) -- a part joining a firm (ARC/hand) ORCID must pass the name stage's checks
+    (name_merge.unconfirmed_joins). Returns (acifs, decisions, mismatches)."""
     decisions = scopus_orcid_decisions(acifs, ext)
     accepted = dict(zip(decisions.loc[decisions.decision == "accepted", "cluster_id"],
                         decisions.loc[decisions.decision == "accepted", "scopus_orcid"]))
     acifs = [_with_scopus_orcid(a, accepted[a.cluster_id]) if a.cluster_id in accepted else a for a in acifs]
-    merged, mismatches = merge_by_key(acifs, uf, _single_orcid)
-    merged, dropped = drop_unlinked_scopus_orcids(merged, mismatches, ext.name_keys)
-    if dropped:
+    return merge_pass_orcids(acifs, uf, decisions, "scopus_orcid", ext.name_keys, inputs)
+
+
+def drop_pass_orcid(acifs, ids, field):
+    """The ACIFs with `field` cleared on every record of the ACIFs in `ids`."""
+    out = []
+    for a in acifs:
+        if a.cluster_id in ids:
+            a = AwardsCIF(cluster_id=a.cluster_id, items=[replace(it, **{field: None}) for it in a.items],
+                          cycle_stages=list(a.cycle_stages), orcids=list(a.orcids), orcid_status=a.orcid_status)
+        out.append(a)
+    return out
+
+
+def merge_pass_orcids(acifs, uf, decisions, field, name_keys, inputs=None):
+    """Merge by ORCID after a pass put `field` on records: groups whose names don't link lose the
+    pass's ORCID as in drop_unlinked_scopus_orcids(); parts failing name_merge.unconfirmed_joins()
+    against a firm (ARC/hand) holder of the ORCID lose it too (decision 'dropped_unconfirmed_join');
+    then merge again. Returns (acifs, decisions, mismatches)."""
+    from src.acif.name_merge import coinvestigators, load_name_merge_inputs, unconfirmed_joins
+    inp = inputs if inputs is not None else load_name_merge_inputs()
+    for _ in range(4):
+        coinv = coinvestigators(acifs)
+        bad: dict[str, None] = {}
+
+        def check(keys, group):
+            ids = unconfirmed_joins(group, keys[0], field, inp, coinv)
+            bad.update(dict.fromkeys(ids))
+            return "unconfirmed_join" if ids else None
+        merged, mismatches = merge_by_key(acifs, uf, _single_orcid, check=check)
+        merged, dropped = drop_unlinked_scopus_orcids(merged, mismatches, name_keys, field=field)
         decisions.loc[decisions.cluster_id.isin(dropped), "decision"] = "dropped_names_do_not_link"
-        # the refused groups held their remaining parts apart too: merge again without the dropped ORCIDs
-        merged, mismatches = merge_by_key(merged, uf, _single_orcid)
-    return merged, decisions, mismatches
+        merged = drop_pass_orcid(merged, set(bad), field)
+        decisions.loc[decisions.cluster_id.isin(set(bad)), "decision"] = "dropped_unconfirmed_join"
+        if not dropped and not bad:
+            return merged, decisions, mismatches
+        acifs = merged
+    raise RuntimeError("merge_pass_orcids did not settle")
 
 
 def drop_unlinked_scopus_orcids(acifs: list[AwardsCIF], mismatches: list[dict], name_keys=None,
