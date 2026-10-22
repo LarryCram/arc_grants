@@ -3883,6 +3883,16 @@ fields against the ARC grant fields test whether the whole record is someone els
 - Considered and dropped: one same-name record with matching fields and no ORCID (183 + 42 ACIFs) -- the only
   evidence would be the name and a coarse field; a job at any ARC university -- too loose for common names.
   Tests: `tests/test_oax_orcid_hint_link.py` (4); 439 pass.
+- Review the same day (user: resolve them yourself): stage-1 review links 14 -> 1 left (Raman Sharma: ORCID on
+  'Kumar, Raman', unclear) -- 9 reject_link (OpenAlex put the ORCID on another person's record: Gregory L.
+  White for Graham White, Charles Lovatt Evans for Carolyn Evans, Charles M. King for Cecile King, Dan Farine,
+  W. F. Laurance, Steven J. Pas, ...), 4 accept_link (Kotousov, J. Jude Kline, Yeagan Doran, Tejinder Kaur);
+  ORCID-hint pass_other_orcid 19 -> 12 accept_record rows (one person, two ORCID accounts, or another person's
+  ORCID on the person's record: Finch, Alison Lewis, Ross Jones, Hitchcock, Woodward, Polkinghorne, Yixiao Zhou,
+  Susan Hill, Rebecca Spence, Xin Gai, Spagnolo, David Walker) and 7 left as different people; several_pass 19 ->
+  7 manual_orcids rows where one candidate is clearly the person (Kathryn Marsh, Ian Oliver, Matthew Groves, Alex
+  Steel, Lisa Jackson Pulver, Jenny Fleming, Kate Smith), 12 left. Cycle rerun: unlinked **1,102**; accepted works
+  2,673,338. (The `nicknames` package lists Peter as a nickname of Patrick -- seen, not acted on.)
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
