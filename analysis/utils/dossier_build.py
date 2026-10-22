@@ -31,7 +31,7 @@ from src.utils.for_resolve import Resolver
 
 PREP = PROCESSED_DATA / "openalex_authors_prep.parquet"
 GRANTS_FLAT = PROCESSED_DATA / "grants_flat.parquet"
-STAGE_ORDER = {"orcid": 0, "name": 1, "works": 2, "scopus": 3}
+STAGE_ORDER = {"orcid": 0, "name": 1, "works": 2, "scopus": 3, "orcid_hint": 4}
 
 
 class DossierBuilder:
@@ -115,6 +115,9 @@ class DossierBuilder:
                 ev = (f"{int(e.coinv_works.iloc[0])} works with linked ARC co-investigators, "
                       f"{int(e.uni_works.iloc[0])} works at a grant university in {int(e.uni_years.iloc[0])} grant years"
                       if len(e) else r.status)
+            elif r.stage == "orcid_hint":
+                ev = (f"same-name record carrying ORCID {orcid}, whose own names match the ACIF; most of its works "
+                      "are in the grant fields")
             else:
                 s = self.scopus_links[(self.scopus_links.cluster_id == cid) & (self.scopus_links.author_idx == aid)]
                 ev = (f"holds {int(s.shared_dois.iloc[0])} of the {int(s.profile_dois_in_openalex.iloc[0])} OpenAlex DOIs of "

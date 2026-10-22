@@ -1,5 +1,13 @@
 # Full TODO list — ARC Grants → OpenAlex pipeline
 
+## 2026-10-22 update
+
+ORCID hints are a fifth linker route (CLAUDE.md "ORCID hints"): 186 more ACIFs linked, unlinked 1,122. Open:
+(1) the 19 pass_other_orcid cases (the ACIF holds another ORCID; compare the two ORCID records, accept_record
+rows where one person has two accounts) and the 19 several_pass cases; (2) name variants the rule leaves out on
+purpose (Hyndman, Killcross, Rajaratnam, Swaminatha-Iyer): hand rows if confirmed; (3) 00g must be rerun
+after a 02 run that changes the unlinked set; (4) Trove for the HASS ACIFs with no OpenAlex record.
+
 ## 2026-10-21 update — read this first
 
 The working run is on the Oct26 OpenAlex snapshot (`/home/lc/k/WORKING_ARC_PROJECT_oct26/`; CLAUDE.md

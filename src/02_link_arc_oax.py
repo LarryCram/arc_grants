@@ -17,6 +17,9 @@ Stages so far:
   4. Scopus DOI bridge (src/oax/scopus_link.py), for ACIFs still unlinked: the one Scopus profile
      00d's search found for the ACIF (documents fetched by 00f --targets unlinked); the same-name
      record holding the most of its DOIs is linked.
+  5. ORCID hints (src/oax/orcid_hint_link.py, 2026-10-22), for ACIFs still unlinked: same-name records
+     carrying an ORCID whose own names (live ORCID record, 00g) match the ACIF and whose works fit the
+     ACIF's grant fields; linked when exactly one ORCID passes.
 
 Inputs: acifs_arc.parquet (src/01_build_arc_acifs.py), openalex_authors_prep.parquet (00b).
 Outputs (OAX_LINK_DIR = processed/oax_link/):
@@ -31,8 +34,10 @@ Outputs (OAX_LINK_DIR = processed/oax_link/):
     scopus_evidence.parquet   DOI bridge: every (ACIF, profile, candidate) with the profile's DOIs and shared DOIs
     scopus_decisions.parquet  DOI bridge: one row per ACIF still unlinked after works-first
     scopus_links.parquet      DOI bridge: accepted (ACIF, author) links
+    orcid_hint_evidence.parquet / _decisions / _links   ORCID hints: every candidate carrying an ORCID
+                              with its checks; one decision per ACIF; accepted links
     accepted_links.parquet    every accepted (ACIF, author) link of every stage: status, stage
-                              (orcid / name / works / scopus), works_count_global -- what the oeuvre
+                              (orcid / name / works / scopus / orcid_hint), works_count_global -- what the oeuvre
                               extractor reads (2026-10-09, user: oeuvres for all linked ACIFs)
     calibration_works_evidence.parquet   (--calibrate) works-first evidence on ORCID-linked ACIFs, with
                               `correct` = the record is the ACIF's accepted ORCID link
@@ -47,15 +52,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import diskcache
 import duckdb
 import pandas as pd
 
-from config.settings import ACIFS_ARC, DUCKDB_TMP_DIR, OAX_LINK_DIR, SCOPUS_EXTRACT_DIR
+from config.settings import ACIFS_ARC, DISKCACHE_DIR, DUCKDB_TMP_DIR, OAX_LINK_DIR, SCOPUS_EXTRACT_DIR
+from src.acif.build import load_refused_orcids
 from src.oax.name_link import (MIN_YEARS, WINDOW_AFTER, WINDOW_BEFORE, acif_main_keys, calibrate, name_links,
                                 name_tier, single_institution_windows)
 from src.oax import scopus_link as sl
 from src.oax.name_link import AUTHORS_PREP
 from src.oax import works_link as wl
+from src.oax import orcid_hint_link as hl
 from src.oax.orcid_link import (MINOR_SHARE, apply_overrides, decide, hand_record_authors, load_acifs, load_authors,
                                 load_name_evidence, load_outside_authors, load_overrides, orcid_links,
                                 shared_orcids, unmatched)
@@ -239,6 +247,43 @@ def scopus_section(acifs, sev, sdec, slinks, scal) -> list[str]:
     return L + [""]
 
 
+def orcid_hint_section(acifs, hev, hdec, hlinks, hcal) -> list[str]:
+    a = acifs.set_index("cluster_id")
+    d = hdec.join(a[["full_names", "last_year"]], on="cluster_id")
+    L = ["## Stage 2, ORCID hints", "",
+         "Rule (src/oax/orcid_hint_link.py): same-name OpenAlex records (names compatible incl. nicknames and "
+         "compound surnames; or records carrying an ORCID whose bulk-file names match the ACIF) that carry "
+         "an ORCID; a record passes when the ORCID's own names (live ORCID record, 00g) are compatible with the ACIF's "
+         f"and the record's, >= {hl.FIT_MIN:.0%} of the record's own works are in the ACIF's grant fields, and -- for "
+         f"names with more than {hl.COMMON} compatible records -- the ORCID lists an Australian employment or "
+         "education; the ACIF is linked when the passing records carry exactly one ORCID.", "",
+         f"- ACIFs still unlinked after the Scopus bridge: {len(hdec):,}; **linked: {int((hdec.status == 'accept_orcid_hint').sum()):,}** "
+         f"({len(hlinks):,} records)", "",
+         "| status | ACIFs | last grant < 2015 | >= 2015 |", "|---|---|---|---|"]
+    for st, sub in d.groupby("status"):
+        L.append(f"| {st} | {len(sub):,} | {int((sub.last_year < 2015).sum()):,} | {int((sub.last_year >= 2015).sum()):,} |")
+    L += ["", "Candidate checks (records carrying an ORCID):", "", "| check | records |", "|---|---|"]
+    L += [f"| {k} | {v:,} |" for k, v in hev.check.value_counts().items()]
+    L += ["", "ORCID record source: " + ", ".join(f"{k} {v:,}" for k, v in hev.drop_duplicates("oax_orcid").orcid_source.value_counts().items())]
+    if hcal:
+        L += ["", f"Calibration on {hcal['acifs']:,} ORCID-linked ACIFs (random sample), run as if they had no ORCID, records "
+              f"linked to other ACIFs left out: linked {hcal['linked']:,} ACIFs, of which the ORCID-linked record "
+              f"{hcal['correct']:,} ({hcal['correct'] / max(hcal['linked'], 1):.1%}); several pass {hcal['several']:,}, none pass {hcal['none']:,}."]
+    ev = hev.set_index(["cluster_id", "author_idx"])
+    L += ["", "Examples, accepted:", ""]
+    for r in hlinks.drop_duplicates("cluster_id").sample(min(25, hlinks.cluster_id.nunique()), random_state=7).itertuples():
+        e = ev.loc[(r.cluster_id, r.author_idx)]
+        L.append(f"- {r.cluster_id} ({', '.join(a.loc[r.cluster_id, 'full_names'])}): A{r.author_idx} {r.author_name} "
+                 f"[ORCID {r.orcid} '{e.orcid_name}', {e.works} works, fit {e.fit:.0%}, {e.top_fields}]")
+    sub = d[d.status == "pass_other_orcid"]
+    L += ["", f"A record passes but the ACIF holds another ORCID (hand review): {len(sub):,}", ""]
+    for r in sub.itertuples():
+        p = hev[(hev.cluster_id == r.cluster_id) & hev.passes].iloc[0]
+        L.append(f"- {r.cluster_id} ({', '.join(r.full_names)}; holds {p.acif_orcid}): A{p.author_idx} {p.oax_name} "
+                 f"[ORCID {p.oax_orcid} '{p.orcid_name}', fit {p.fit:.0%}]")
+    return L + [""]
+
+
 def name_section(acifs, pairs, dec) -> list[str]:
     a = acifs.set_index("cluster_id")
     d = dec.join(a[["full_names", "last_year", "full_name_keys"]], on="cluster_id")
@@ -365,11 +410,41 @@ def main():
         kprof = kprof[kprof.cluster_id.map(kprof.cluster_id.value_counts()) == 1]
         scal = sl.calibrate(sl.bridge_evidence(con, known, kprof, docs), acc_links[["cluster_id", "author_idx"]])
 
+    # ORCID hints, for ACIFs the Scopus bridge left unlinked (live ORCID records from 00g)
+    h_ids = sdec.loc[~sdec.status.str.startswith("accept"), "cluster_id"]
+    taken.update({int(a_): c for c, a_ in zip(slinks.cluster_id, slinks.author_idx)})
+    full = pd.read_parquet(ACIFS_ARC, columns=["cluster_id", "full_name_keys", "orcids", "unique_ids", "for2020_codes"])
+    hctx = hl.context(full, load_refused_orcids())
+    ocache = diskcache.Cache(str(DISKCACHE_DIR / "orcid_records_authenticated"))
+    hc = hl.candidates(con, acifs[acifs.cluster_id.isin(set(h_ids))], set(taken))
+    hfacts = hl.orcid_facts(con, set(hc.oax_orcid.dropna()), ocache)
+    hev = hl.evidence(hc, hfacts, hl.record_evidence(con, set(hc.loc[hc.oax_orcid.notna(), "author_idx"].astype("int64"))), *hctx)
+    hdec, hlinks = hl.decide(h_ids, hc, hev)
+    hcal = None
+    if args.calibrate:
+        acc_by: dict[int, set] = {}
+        for c, a_ in zip(acc_links.cluster_id, acc_links.author_idx):
+            acc_by.setdefault(int(a_), set()).add(c)
+        for a_, c in taken.items():
+            acc_by.setdefault(int(a_), set()).add(c)
+        known_h = known.sample(min(hl.CALIBRATION_SAMPLE, len(known)), random_state=7)
+        kc = hl.candidates(con, known_h, set())
+        kc = kc[[a_ not in acc_by or c in acc_by[a_] for c, a_ in zip(kc.cluster_id, kc.author_idx.astype("int64"))]].copy()
+        kc["n_candidates"] = kc.groupby("cluster_id").author_idx.transform("size")
+        kkeys, kfields, _own, kheld, krefused = hctx
+        kev = hl.evidence(kc, hl.orcid_facts(con, set(kc.oax_orcid.dropna()), ocache),
+                          hl.record_evidence(con, set(kc.loc[kc.oax_orcid.notna(), "author_idx"].astype("int64"))),
+                          kkeys, kfields, {}, kheld, krefused)
+        kd, kl = hl.decide(known_h.cluster_id, kc, kev)
+        hcal = hl.calibrate(kd, kl, acc_links[["cluster_id", "author_idx"]])
+        kev.to_parquet(OAX_LINK_DIR / "calibration_orcid_hint_evidence.parquet", index=False)
+
     acc = pd.concat([
         links.loc[links.status.str.startswith("accept"), ["cluster_id", "author_idx", "status"]].assign(stage="orcid"),
         dec.loc[dec.status == "accept", ["cluster_id", "author_idx"]].assign(status="accept_name_institution", stage="name"),
         wlinks[["cluster_id", "author_idx", "status"]].assign(stage="works"),
-        slinks[["cluster_id", "author_idx", "status"]].assign(stage="scopus")], ignore_index=True)
+        slinks[["cluster_id", "author_idx", "status"]].assign(stage="scopus"),
+        hlinks[["cluster_id", "author_idx", "status"]].assign(stage="orcid_hint")], ignore_index=True)
     acc = acc.astype({"author_idx": "int64"})
     wcg = pd.read_parquet(AUTHORS_PREP, columns=["author_idx", "works_count_global"])
     outside = links[["author_idx", "works_count_global"]].astype({"author_idx": "int64"})
@@ -380,6 +455,9 @@ def main():
     sev.to_parquet(OAX_LINK_DIR / "scopus_evidence.parquet", index=False)
     sdec.to_parquet(OAX_LINK_DIR / "scopus_decisions.parquet", index=False)
     slinks.to_parquet(OAX_LINK_DIR / "scopus_links.parquet", index=False)
+    hev.to_parquet(OAX_LINK_DIR / "orcid_hint_evidence.parquet", index=False)
+    hdec.to_parquet(OAX_LINK_DIR / "orcid_hint_decisions.parquet", index=False)
+    hlinks.to_parquet(OAX_LINK_DIR / "orcid_hint_links.parquet", index=False)
     ev.to_parquet(OAX_LINK_DIR / "works_evidence.parquet", index=False)
     wdec.to_parquet(OAX_LINK_DIR / "works_decisions.parquet", index=False)
     wlinks.to_parquet(OAX_LINK_DIR / "works_links.parquet", index=False)
@@ -389,7 +467,8 @@ def main():
     miss.to_parquet(OAX_LINK_DIR / "orcid_unmatched.parquet", index=False)
     text = "\n".join(["# ARC<->OpenAlex linking", ""] + orcid_section(acifs, links, miss, rejected, shared)
                      + name_section(acifs, pairs, dec) + cal_lines + works_section(acifs, ev, wdec, wlinks, wcal)
-                     + scopus_section(acifs, sev, sdec, slinks, scal))
+                     + scopus_section(acifs, sev, sdec, slinks, scal)
+                     + orcid_hint_section(acifs, hev, hdec, hlinks, hcal))
     (OAX_LINK_DIR / "report.md").write_text(text, encoding="utf-8")
     print(text)
 

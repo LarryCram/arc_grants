@@ -24,7 +24,9 @@ sides (no name handling of its own) and status follows:
                          given name (nothing to contradict)
     accept_orcid_names   they share only an initial or middle-name key, and the ORCID record's
                          own names include the OpenAlex name form (Chris Power, Kerr Graham:
-                         the person publishes under that name)
+                         the person publishes under that name); since 2026-10-22 also for links
+                         whose names are otherwise unrelated or differ in the given name (Debra
+                         Bernhardt's ORCID lists "Debra Searles", the OpenAlex record's name)
     reject_orcid_names   they share only an initial or middle-name key, the ORCID record's names
                          do not include the OpenAlex form, and the record is minor: another
                          person's record (co-author, relative)
@@ -303,8 +305,12 @@ def decide(links: pd.DataFrame, accepts=frozenset(), arc_main=None, oax_main=Non
             return "reject_orcid_names" if r.works_share < MINOR_SHARE else "review_initial_only"
         if r.name_relation in NAME_FORMS:
             return "accept_name_form"
+        if r.name_relation == "same_family" and nickname_same_family(r.full_name_keys, r.author_keys):
+            return "accept_nickname"
+        if _full_keys(r.author_keys) & _full_keys(orcid_names.get(r.orcid, ())):
+            return "accept_orcid_names"     # the ORCID record itself lists the OpenAlex form (Debra Bernhardt / Searles)
         if r.name_relation == "same_family":
-            return "accept_nickname" if nickname_same_family(r.full_name_keys, r.author_keys) else "review_given_name"
+            return "review_given_name"
         return "review_unrelated" if r.works_share >= MINOR_SHARE else "reject_unrelated"
     out["status"] = [status(r) for r in out.itertuples()]
     return out

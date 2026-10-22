@@ -49,7 +49,14 @@ src/02_link_arc_oax.py + src/oax/ → the NEW ARC↔OpenAlex linker, built one s
                                   then the Scopus DOI bridge (2026-10-09, src/oax/scopus_link.py: the
                                   ACIF's one Scopus profile; the same-name record holding most of its
                                   DOIs, unless taken, other-ORCID or name-incompatible)
+                                  then ORCID hints (2026-10-22, src/oax/orcid_hint_link.py: same-name
+                                  records carrying an ORCID whose live ORCID names match the ACIF and
+                                  whose works are >= 50% in the grant fields; ORCID-listed Australia
+                                  required above 3 same-name records; exactly one ORCID passes)
                                   → processed/oax_link/ (`--calibrate` scores stage 2 on ORCID-linked ACIFs)
+src/00g_extract_orcid_hints.py  → live ORCID /records for the hint candidates of ACIFs the last linker run
+                                  left unlinked (into the ORCID record cache, marked _fetched_live); run
+                                  after 02, then rerun 02 (as 00f --targets unlinked)
 src/02b_shared_record_merges.py + src/oax/shared_records.py → merge evidence from the linker
                                   (2026-10-21): ACIFs sharing an accepted OpenAlex record, merged when
                                   pairwise compatible (shared FOR2020 group or co-investigator, no ORCID
@@ -3837,6 +3844,45 @@ Patterson (UQ coastal engineering; his ORCID lists "Dean") and Tom Cochrane (QUT
 copyright; only 2 of his works have an author record -- the rest sit on unattributed authorships, as in
 todo 5b(a)); `accept_bridge` for Peter Taylor and Qianhui Zhang (mixed records); `reject_link` for
 "Sherry Zhang", a USC vision scientist carrying Qianhui Zhang's ORCID. Unlinked 1,310.
+
+## ORCID hints: a fifth linker route; stage 1 reads ORCID other-names (2026-10-22)
+
+Started from Charles Lineweaver (DP0208618), a productive astronomer the linker missed: one same-name
+OpenAlex record, carrying his ORCID; his 2002 grant names only Melbourne though he was elsewhere, so the
+university-in-time test failed. User: an OpenAlex record carrying an ORCID is a curated identity (most
+records carry none), so check it through the ORCID API; do not lean on ORCID job lists (often current-only:
+James Dalziel, now Vice-Chancellor of the Australian University of Theology, lists only that); the works'
+fields against the ARC grant fields test whether the whole record is someone else's.
+
+- `src/00g_extract_orcid_hints.py`: 16,349 candidate ORCIDs, all fetched live (about 10 a second, 4 parallel;
+  19 min for 10,437 not yet fetched). `analysis/31_single_candidate_orcid.py` and `32_oax_orcid_hints.py` are
+  the exploratory reports that led here (31: single-record ACIFs; 32: all candidates, `--sample N`).
+- `src/oax/orcid_hint_link.py` (stage 5 of `02`): candidates by compatible names (shared full-given key, or
+  related family -- equal, without separators, part of a compound -- and given name equal without separators
+  or in the `nicknames` list) or by an ORCID whose bulk-file names match the ACIF (Valeri Ougrinovski's ORCID is
+  on "Ugrinovskii, Valery A."). A record passes when its ORCID's own names match the ACIF's and the record's,
+  >= 50% of its own works have their top field among the ACIF's FOR fields, and (more than 3 same-name records)
+  the ORCID lists an Australian employment or education. Records sharing the passing ORCID are all linked.
+- Calibration on 1,500 ORCID-linked ACIFs run as if they had no ORCID: clipped given names and a looser
+  Australia test 97.1% right; no clipped names 97.5%; ORCID-listed Australia above 3 records **99.0%** (adopted;
+  errors were same-field common-name namesakes and clipped Chinese given names: Hong Ki An for Hongjie An).
+  Robert White shows why the field test is needed: Robert B. White (UWA biochemist) shares name, university and
+  years with the UWA English professor; the stage links Robert S. White (543 works, a record also holding a
+  geophysicist's papers -- for the oeuvre filter).
+- Stage 1 (`orcid_link.decide`): links whose names are unrelated or differ in the given name are accepted when
+  the ORCID record's own names include the OpenAlex form (`accept_orcid_names`; Debra Bernhardt's ORCID lists
+  "Debra Searles").
+- Hand: `manual_orcids.csv` LP0562485_james_dalziel 0000-0002-6869-0330 (LAMS founder; his co-investigators
+  on "Unlocking IP" are open-content lawyers; user's LinkedIn evidence).
+- Cycle 01 -> 02 -> 02b (fixed point in round 1) -> 03: linked by ORCID 16,124, name 3,817, works 1,366, Scopus
+  419, **ORCID hints 186** (191 records); unlinked 1,310 -> **1,122**. The 186 hint ACIFs have 13,972 accepted
+  works (2,346 unsure, 140 rejected). Left for review: pass_other_orcid 19 (the ACIF holds another ORCID:
+  Lisa Spagnolo, Xin Gai, ...), several_pass 19, and name variants the rule leaves out on purpose (Rob/Robin
+  Hyndman, Simon/Andrew Killcross, Shantha/Shanthakumar Wilson Rajaratnam, K. Swaminathan / Killugudi
+  Swaminatha-Iyer).
+- Considered and dropped: one same-name record with matching fields and no ORCID (183 + 42 ACIFs) -- the only
+  evidence would be the name and a coarse field; a job at any ARC university -- too loose for common names.
+  Tests: `tests/test_oax_orcid_hint_link.py` (4); 439 pass.
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.

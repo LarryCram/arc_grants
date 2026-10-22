@@ -85,7 +85,7 @@ def main():
          f"- with an ORCID (ARC, Scopus, hand, ORCID bulk): {int((kept.orcids.map(len) > 0).sum()):,}", ""]
     t = kept.groupby("link_stage").agg(acifs=("cluster_id", "size"), accept=("accept", "sum"), reject=("reject", "sum"),
                                        unsure=("unsure", "sum"))
-    t = t.reindex(["orcid", "name", "works", "scopus", "not linked"])
+    t = t.reindex(["orcid", "name", "works", "scopus", "orcid_hint", "not linked"])
     t.index.name = "linked by"
     L += table(t) + ["", "Not linked, by the last step's verdict (Scopus DOI bridge):", ""]
     L += [f"- {s}: {n:,}" for s, n in kept.loc[kept.link_stage == "not linked", "why_unlinked"].fillna("(not reached)").value_counts().items()]
