@@ -563,6 +563,13 @@ def grant_lifecycle(attrs: dict) -> dict:
       declined     grant-status is 'Declined' (an offer not taken up)
       ended_early  current funding 0 while the announced amount is > 0, or the project ran
                    (start to anticipated end) less than half its funded years
+      not_taken_up (2026-10-23, user) declined, or the project start date equals its anticipated end date,
+                   or current funding 0 while the announced amount is > 0. ARC's 'Declined' status
+                   appears only for 2022-25 offers (40 grants); earlier offers not taken up are 'Closed'
+                   with current funding 0 (581 in-scope grants, many with start = end). Partly paid grants
+                   (current > 0) are taken up: ARC limits on the grants one person may hold explain many.
+                   Announced funding 0 also counts (user: may signal an ARC ineligibility call; one in-scope
+                   grant, FF0241206 Tadeusz Molinski).
     end_year: the anticipated end date's year (None if absent)."""
     start = safe_str(attrs.get("project-start-date")) or None
     end = safe_str(attrs.get("anticipated-end-date")) or None
@@ -575,8 +582,11 @@ def grant_lifecycle(attrs: dict) -> dict:
     zero_now = cur is not None and ann is not None and float(cur) == 0 and float(ann) > 0
     short = dur is not None and ys is not None and float(ys) > 0 and dur < 0.5 * float(ys)
     end_year = int(end[:4]) if end and end[:4].isdigit() else None
+    declined = safe_str(attrs.get("grant-status")) == "Declined"
+    same_day = bool(start and end and start == end)
     return {"project_start_date": start, "anticipated_end_date": end, "end_year": end_year,
-            "declined": safe_str(attrs.get("grant-status")) == "Declined", "ended_early": bool(zero_now or short)}
+            "declined": declined, "ended_early": bool(zero_now or short),
+            "not_taken_up": bool(declined or same_day or zero_now or (ann is not None and float(ann) == 0))}
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -716,6 +726,7 @@ def main():
 
     p(f"\n  Declined grants:       {int(df_grants.declined.sum()):>8,}")
     p(f"  Ended early (current funding 0, or ran < half its funded years): {int(df_grants.ended_early.sum()):,}")
+    p(f"  Not taken up (declined, start = end, or current funding 0): {int(df_grants.not_taken_up.sum()):,}")
 
     p(f"\n  Grants per year (sample):")
     year_counts = df_grants.funding_commence_year.value_counts().sort_index()

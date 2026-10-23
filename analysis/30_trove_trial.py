@@ -48,9 +48,18 @@ def search(q: str) -> list[dict]:
         return json.loads(f.read_text())
     out, start = [], "*"
     while len(out) < MAX_RECORDS:
-        r = requests.get(API, params={"category": "book", "q": q, "encoding": "json", "n": 100,
-                                      "s": start, "reclevel": "full", "bulkHarvest": "true"},
-                         headers={"X-API-KEY": os.environ["trove_token"]}, timeout=60)
+        for attempt in range(5):        # Trove is slow and sometimes times out: retry with back-off
+            try:
+                r = requests.get(API, params={"category": "book", "q": q, "encoding": "json", "n": 100,
+                                              "s": start, "reclevel": "full", "bulkHarvest": "true"},
+                                 headers={"X-API-KEY": os.environ["trove_token"]}, timeout=90)
+                if r.status_code == 429 or r.status_code >= 500:
+                    raise requests.HTTPError(f"HTTP {r.status_code}")
+                break
+            except requests.RequestException:
+                if attempt == 4:
+                    raise
+                time.sleep(5 * 2 ** attempt)
         r.raise_for_status()
         rec = r.json()["category"][0]["records"]
         out += rec.get("work", [])

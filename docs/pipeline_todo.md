@@ -1,5 +1,34 @@
 # Full TODO list — ARC Grants → OpenAlex pipeline
 
+## 2026-10-23 update — read this first
+
+Done today (CLAUDE.md "2026-10-23"): grants not taken up out of scope; Scopus bridge initial-first form;
+linker stage 6 (rare family names); record-keyed hand links (`manual_links.csv`, link / unlink / reject);
+review of the old manual_resolutions.csv; web review of the 143 unlinked fellowships; grant-acknowledgement
+test and its 131 disagreements resolved. Open:
+1. **After the next run:** check the 105 cluster relabels from the scope change, inert hand rows in the
+   linker report, the Guo / Aarti Singh oeuvres (mixed records left to the works filter), the unlinked count.
+2. **Grant-acknowledgement linker stage** (not built; test `analysis/36_grant_ack_test.py`): ACIF -> grants ->
+   OpenAlex awards (funder F4320334704; funder_award_id = grant code) -> acknowledging works
+   (`compact/work_awards`) -> authors whose names fit. 99% right on ORCID-linked ACIFs at 2+ works; 121
+   unlinked ACIFs get one clear candidate; its main use is as a check (it exposed ~60 wrong links). Coverage
+   is poor for grants before 2009 (13%). Also an oeuvre anchor (acknowledging works = core), kept separate.
+3. **OpenAlex puts an ARC ORCID on another person's record** (Stephen Gould -> Stephen Jay Gould, Kelly Smith
+   -> a Rice physicist, James Orr -> a NY Fed economist): stage 1 trusts any record carrying the ORCID. A check
+   is needed (no works at any grant university, or no acknowledging works where the ACIF has many).
+4. **ORCID-hint and bulk-pass namesakes** on common names (Yan Yan, Sally Smith, Jing Lin; Zhe Ding, Dong Wang,
+   Paul Young, James Smith): tighten both stages; grant acknowledgements catch many.
+5. **Authorships with no author record** (parked): whole careers sit there (Douglas Vickers, Peter Toner, 237 of
+   Zaiping Guo's ~780 works). Design: seed works (Trove title, acknowledging work, linked-record work) then
+   same name form + institution + years + field; attach as ACIF x work rows, no new author ids.
+6. **Mixed ORCID-linked records** (Stuart A. Rice works on Scott Rice's record, Huan Liu on Hua Liu's): a
+   general byline-name rule was measured and rejected (1.8% of works, mostly genuine name forms); left to the
+   works filter.
+7. **Trove**: diagnostic and confirmatory, not a linker (a prolific namesake's books win: Chris Cooper,
+   Douglas Vickers); rule "2+ titles, >= 70%, unique" is 100% only with <= 3 same-name pool authors.
+8. Remaining manual review: 25 "keep both" rows of the manual_resolutions assessment
+   (`processed/manual_review_assessment.csv`) not yet added.
+
 ## 2026-10-22 update
 
 ORCID hints are a fifth linker route (CLAUDE.md "ORCID hints"): 186 more ACIFs linked, unlinked 1,122. Open:

@@ -22,7 +22,9 @@ the ACIF's by stage 2's test (record_name_differs: e.g. "Senyuan Zhang" for "Sha
 nicknames such as "Lyn D. Beazley" for "Lynda Beazley" -- reported only, unless (2026-10-09, user:
 yes to nicknames) a full given name of each is nickname-related (src/utils/names.py::
 given_names_related: the `nicknames` package's English list, or a clipped form of 3+ letters):
-accept_scopus_nickname). The share floor stops a minor record
+accept_scopus_nickname), or (2026-10-23) the record's first given name is a bare initial matching the ACIF's
+first initial ("Opat, G. I." for Geoffrey Opat, "R. John Watling" for Roger Watling, known by his middle name):
+accept_scopus_initial (initial_first()). The share floor stops a minor record
 being linked when the person's main record is out of reach (e.g. "Maria A. Fiatarone Singh", whose
 OpenAlex name parses to family "singh": 2 of 280 DOIs fell on a minor record).
 
@@ -31,7 +33,7 @@ was fetched, nothing taken: a record is taken for 11,909, and it is the ORCID-li
 (99.5%). (A first version limited to stage 2's name-compatible candidates linked minor records when
 the main one was not a candidate -- 55 of 436 links held < 30% of the profile's DOIs.)
 
-Decision per ACIF: accept_scopus, accept_scopus_nickname, accept_scopus_hand (a record carrying another ORCID,
+Decision per ACIF: accept_scopus, accept_scopus_nickname, accept_scopus_initial, accept_scopus_hand (a record carrying another ORCID,
 accepted by hand: accept_bridge rows of oax_link_overrides.csv), record_linked_elsewhere, record_other_orcid,
 record_name_differs,
 several_records (a tie),
@@ -148,16 +150,28 @@ def nickname_related(acif_keys, record_keys) -> bool:
     return any(given_names_related(a, b) for a in full_givens(acif_keys) for b in full_givens(record_keys))
 
 
+def initial_first(acif_main_keys, first_name, first_initial, family) -> bool:
+    """The record's parsed first given name is a bare initial (the parser's first_name, e.g. 'g.' in "Opat, G. I.",
+    'r.' in "R. John Watling") equal to the first letter of the given name of an ACIF main key with the same
+    family name. (2026-10-23, user: yes.) Stage 2's tier test misses both forms: the parser's main key for an
+    initials run is the joined initials ("gi_opat"), and a record known by its middle name has that name as its
+    main key ("john_watling" for ARC's Roger Watling)."""
+    if not isinstance(first_name, str) or len(first_name.strip(".")) != 1 or not isinstance(first_initial, str):
+        return False
+    return any(k.split("_", 1)[1] == family and k[0] == first_initial for k in (acif_main_keys or []) if "_" in k)
+
+
 def decide(acif_ids, profiles: pd.DataFrame, fetched: set, ev: pd.DataFrame, acif_orcid: dict,
            taken: dict, tiers: dict | None = None, nicknames: set | None = None,
-           hand: set | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+           hand: set | None = None, initials: set | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """(decisions, links). profiles: usable profiles; fetched: scopus_ids whose documents were fetched;
     acif_orcid: cluster_id -> the ACIF's ORCID; taken: author_idx -> the ACIF an earlier stage linked it to;
     tiers: (cluster_id, author_idx) -> name tier of the top records (src/oax/name_link.py::name_tier);
     nicknames: (cluster_id, author_idx) top records whose given name is a nickname of the ACIF's;
     hand: (ACIF ORCID, author_idx) pairs accepted by hand although the record carries another ORCID
-    (accept_bridge rows of oax_link_overrides.csv -> accept_scopus_hand)."""
-    tiers, nicknames, hand = tiers or {}, nicknames or set(), hand or set()
+    (accept_bridge rows of oax_link_overrides.csv -> accept_scopus_hand);
+    initials: (cluster_id, author_idx) top records passing initial_first() -> accept_scopus_initial."""
+    tiers, nicknames, hand, initials = tiers or {}, nicknames or set(), hand or set(), initials or set()
     np_ = profiles.groupby("cluster_id").scopus_id.apply(list).to_dict()
     by = {c: d for c, d in ev.groupby("cluster_id")}
     dec, links = [], []
@@ -188,11 +202,12 @@ def decide(acif_ids, profiles: pd.DataFrame, fetched: set, ev: pd.DataFrame, aci
             status = "record_linked_elsewhere"
         elif isinstance(r.author_orcid, str) and own and r.author_orcid != own and (own, aid) not in hand:
             status = "record_other_orcid"
-        elif pd.isna(tiers.get((cid, aid))) and (cid, aid) not in nicknames:
+        elif pd.isna(tiers.get((cid, aid))) and (cid, aid) not in nicknames and (cid, aid) not in initials:
             status = "record_name_differs"
         else:
             status = ("accept_scopus_hand" if (own, aid) in hand else
-                      "accept_scopus" if not pd.isna(tiers.get((cid, aid))) else "accept_scopus_nickname")
+                      "accept_scopus" if not pd.isna(tiers.get((cid, aid))) else
+                      "accept_scopus_nickname" if (cid, aid) in nicknames else "accept_scopus_initial")
             links.append((cid, aid, r.author_name, sid, int(r.shared_dois), int(r.profile_dois_in_openalex), status))
         dec.append((cid, status, sid, aid, other, 1))
     return (pd.DataFrame(dec, columns=["cluster_id", "status", "scopus_id", "author_idx", "linked_to_acif", "n_profiles"]),

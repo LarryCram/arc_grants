@@ -54,7 +54,9 @@ ACIF holding `orcid` takes the record `oax_author` although the record carries a
 person with two ORCID accounts, or a co-author's ORCID on the record); checked there. accept_record
 (2026-10-22): the ACIF holding `orcid` takes the record `oax_author`, which carries no ORCID or another
 one and which no linker route reaches (Dean Patterson, Tom Cochrane); added to stage 1 as a link with
-status accept_hand (hand_record_authors()).
+status accept_hand (hand_record_authors()). accept_acif_record (2026-10-22): for an ACIF holding NO ORCID --
+the `orcid` column holds its cluster_id -- the ACIF takes the record `oax_author` (Timothy Phillips, whose
+Tasmania works start after the grant window); added by 02 as a hand link before stage 2 (hand_acif_links()).
 
 Name keys are not used to link; `shares_name_key` / `shares_full_name_key` only report whether
 the two sides' parser keys agree (a check on the link, and input to step 2's design).
@@ -76,7 +78,7 @@ from src.utils.names import HumanNameParser, given_names_related
 OVERRIDES = Path(__file__).resolve().parents[2] / "data_persisted" / "oax_link_overrides.csv"
 MINOR_SHARE = 0.2
 NICK_MIN_CLIPPED = 4
-ACTIONS = ("reject_link", "accept_link", "accept_bridge", "accept_record")
+ACTIONS = ("reject_link", "accept_link", "accept_bridge", "accept_record", "accept_acif_record")
 
 AUTHORS_PREP = PROCESSED_DATA / "openalex_authors_prep.parquet"
 ACIF_COLUMNS = ["cluster_id", "orcids", "orcid_sources", "full_names", "full_name_keys",
@@ -160,11 +162,32 @@ def hand_record_authors(overrides: pd.DataFrame, path=AUTHORS_PREP) -> pd.DataFr
     return pd.concat(out, ignore_index=True)
 
 
+def hand_acif_links(overrides: pd.DataFrame, acif_ids, path=AUTHORS_PREP) -> pd.DataFrame:
+    """accept_acif_record rows (2026-10-22): the ACIF named in the `orcid` column (a cluster_id -- for ACIFs
+    holding no ORCID) takes the record `oax_author`; returned as (cluster_id, author_idx, status=accept_hand).
+    A row naming an ACIF that is not kept, or a record not in the HEP-context pool, stops the run."""
+    rows = overrides[overrides.action == "accept_acif_record"] if "action" in overrides else overrides.iloc[0:0]
+    out = pd.DataFrame({"cluster_id": rows.orcid.values, "author_idx": rows.author_idx.astype("int64").values,
+                        "status": "accept_hand"})
+    bad = sorted(set(out.cluster_id) - set(acif_ids))
+    if bad:
+        raise SystemExit(f"oax_link_overrides.csv accept_acif_record rows name no kept ACIF: {bad}")
+    if len(out):
+        con = duckdb.connect()
+        con.register("want", out[["author_idx"]])
+        have = {r[0] for r in con.execute(f"SELECT author_idx FROM read_parquet('{path}') WHERE author_idx IN "
+                                          "(SELECT author_idx FROM want)").fetchall()}
+        if set(out.author_idx) - have:
+            raise SystemExit(f"oax_link_overrides.csv accept_acif_record rows name records not in the pool: "
+                             f"{sorted(set(out.author_idx) - have)}")
+    return out
+
+
 def apply_overrides(authors: pd.DataFrame, overrides: pd.DataFrame):
     """(authors without the reject_link (orcid, author) pairs, the rejected rows). Any hand row
     that matches no author carrying that ORCID stops the run."""
     key = set(zip(authors.orcid, authors.author_idx.astype("int64")))
-    ov = overrides[~overrides.action.isin(["accept_bridge", "accept_record"])] if "action" in overrides else overrides
+    ov = overrides[~overrides.action.isin(["accept_bridge", "accept_record", "accept_acif_record"])] if "action" in overrides else overrides
     missing = [(o, a) for o, a in zip(ov.orcid, ov.author_idx) if (o, a) not in key]
     if missing:
         raise SystemExit(f"oax_link_overrides.csv rows match no candidate link: {missing}")

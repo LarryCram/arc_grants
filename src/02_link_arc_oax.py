@@ -64,7 +64,9 @@ from src.oax import scopus_link as sl
 from src.oax.name_link import AUTHORS_PREP
 from src.oax import works_link as wl
 from src.oax import orcid_hint_link as hl
-from src.oax.orcid_link import (MINOR_SHARE, apply_overrides, decide, hand_record_authors, load_acifs, load_authors,
+from src.oax import rare_name_link as rn
+from src.oax import manual_links as ml
+from src.oax.orcid_link import (MINOR_SHARE, apply_overrides, decide, hand_acif_links, hand_record_authors, load_acifs, load_authors,
                                 load_name_evidence, load_outside_authors, load_overrides, orcid_links,
                                 shared_orcids, unmatched)
 
@@ -219,7 +221,8 @@ def scopus_section(acifs, sev, sdec, slinks, scal) -> list[str]:
          f"name with the ACIF, the one holding the most of its DOIs is taken when it holds >= {sl.MIN_SHARED} and "
          f">= {sl.MIN_SHARE:.0%} of the profile's DOIs in OpenAlex, with no tie; it is linked unless an earlier stage "
          "linked it to another ACIF, it carries another ORCID, or its main name is incompatible with the ACIF's "
-         "(stage 2's test) and no full given name of the two is a nickname of the other (accept_scopus_nickname).", "",
+         "(stage 2's test) and no full given name of the two is a nickname of the other (accept_scopus_nickname) and the "
+         "record's first given name is not a bare initial matching the ACIF's first initial (accept_scopus_initial).", "",
          f"- ACIFs still unlinked after works-first: {len(sdec):,}; **linked: {int(sdec.status.str.startswith('accept').sum()):,}**", "",
          "| status | ACIFs | last grant < 2015 | >= 2015 |", "|---|---|---|---|"]
     for st, sub in d.groupby("status"):
@@ -236,6 +239,7 @@ def scopus_section(acifs, sev, sdec, slinks, scal) -> list[str]:
                  f"({r.shared_dois} of the profile's {r.profile_dois_in_openalex} OpenAlex DOIs)")
     nm = {**dict(zip(sev.author_idx, sev.author_name))}
     for st, title in (("accept_scopus_nickname", "Accepted on a nickname"),
+                      ("accept_scopus_initial", "Accepted on a first initial (initials-only record, or known by the middle name)"),
                       ("record_linked_elsewhere", "Record already linked to another ACIF (possibly the same person; reported only)"),
                       ("record_other_orcid", "Record carries another ORCID than the ACIF's"),
                       ("record_name_differs", "Record's main name incompatible with the ACIF's")):
@@ -244,6 +248,29 @@ def scopus_section(acifs, sev, sdec, slinks, scal) -> list[str]:
         for r in sub.itertuples():
             other = f" -> {r.linked_to_acif} ({', '.join(a.loc[r.linked_to_acif, 'full_names'])})" if isinstance(r.linked_to_acif, str) else ""
             L.append(f"- {r.cluster_id} ({', '.join(r.full_names)}): A{int(r.author_idx)} {nm.get(r.author_idx, '')}{other}")
+    return L + [""]
+
+
+def rare_name_section(acifs, rdec, rlinks, rcal) -> list[str]:
+    a = acifs.set_index("cluster_id")
+    d = rdec.join(a[["full_names", "last_year"]], on="cluster_id")
+    L = ["## Stage 6, rare family names", "",
+         f"Rule: the ACIF's family name is carried by at most {rn.RARE_MAX} pool authors; every OpenAlex author (in the "
+         "pool or not, with authorships) whose parsed name carries it with a compatible given name is a candidate; "
+         "exactly one candidate -> linked, unless linked to another ACIF, carrying another ORCID, or another kept "
+         "ACIF shares one of the ACIF's main name keys. No field check.", "",
+         f"- ACIFs still unlinked after ORCID hints: {len(rdec):,}; **linked: {int((rdec.status == 'accept_rare_name').sum()):,}**", "",
+         "| status | ACIFs | last grant < 2015 | >= 2015 |", "|---|---|---|---|"]
+    for st, sub in d.groupby("status"):
+        L.append(f"| {st} | {len(sub):,} | {int((sub.last_year < 2015).sum()):,} | {int((sub.last_year >= 2015).sum()):,} |")
+    if rcal is not None:
+        L += ["", "Calibration on ORCID-linked ACIFs run as if unlinked (picked record = one of the ACIF's ORCID-linked "
+              "records; another fragment of the same person counts as wrong):", "", "| pool authors with the family name | accepted | right |",
+              "|---|---|---|"] + [f"| {r.family_count} | {r.accepted:,} | {r.right:,} |" for r in rcal.itertuples()]
+    L += ["", "Linked:", ""]
+    for r in rlinks.merge(d[["cluster_id", "full_names"]], on="cluster_id").itertuples():
+        L.append(f"- {r.cluster_id} ({', '.join(r.full_names)}): A{r.author_idx} {r.author_name} ({r.works} works"
+                 f"{', outside the pool' if not r.in_pool else ''})")
     return L + [""]
 
 
@@ -345,8 +372,11 @@ def main():
                 .merge(rejects[rejects.action == "reject_link"], on=["orcid", "author_idx"]))
     shared = shared_orcids(acifs)
 
-    linked = set(links.loc[links.status.str.startswith("accept"), "cluster_id"])
-    todo = acifs[~acifs.cluster_id.isin(linked)].reset_index(drop=True)
+    hand = hand_acif_links(rejects, set(acifs.cluster_id))      # accept_acif_record rows (no-ORCID ACIFs)
+    mlinks, unlinked, minert, mrejected = ml.resolve(ml.load(), set(acifs.cluster_id))   # manual_links.csv (record-keyed)
+    hand = pd.concat([hand, mlinks], ignore_index=True).drop_duplicates(["cluster_id", "author_idx"])
+    linked = set(links.loc[links.status.str.startswith("accept"), "cluster_id"]) | set(hand.cluster_id)
+    todo = acifs[~acifs.cluster_id.isin(linked | unlinked)].reset_index(drop=True)
     con = duckdb.connect()
     con.execute(f"SET temp_directory='{DUCKDB_TMP_DIR}'")
     pairs, dec = name_links(con, todo, set(links.loc[links.status.str.startswith("accept"), "author_idx"].astype("int64")),
@@ -363,6 +393,7 @@ def main():
     open_ids = dec.loc[dec.status != "accept", "cluster_id"]
     coaw = pd.read_parquet(ACIFS_ARC, columns=["cluster_id", "coawardee_acif_ids"])
     linked_all = pd.concat([links.loc[links.status.str.startswith("accept"), ["cluster_id", "author_idx"]],
+                            hand[["cluster_id", "author_idx"]],
                             dec.loc[dec.status == "accept", ["cluster_id", "author_idx"]]]).astype({"author_idx": "int64"})
     coinv = wl.coinvestigator_authors(coaw, linked_all)
     ev = wl.works_evidence(con, pairs[pairs.cluster_id.isin(set(open_ids))], coinv[coinv.cluster_id.isin(set(open_ids))],
@@ -397,7 +428,11 @@ def main():
             if sl.nickname_related(akeys.get(c), rkeys.get(int(a_)))}
     bridge_hand = set(zip(rejects.loc[rejects.action == "accept_bridge", "orcid"],
                           rejects.loc[rejects.action == "accept_bridge", "author_idx"].astype("int64")))
-    sdec, slinks = sl.decide(s_ids, sprof, fetched, sev, orc1, taken, tiers, nick, bridge_hand)
+    rfirst = pd.read_parquet(AUTHORS_PREP, columns=["author_idx", "first_name", "first_initial", "family_name_main"]).set_index("author_idx")
+    amain = acif_main_keys(tops.cluster_id).groupby("cluster_id").k.apply(list).to_dict() if len(tops) else {}
+    inits = {(c, int(a_)) for c, a_ in zip(tops.cluster_id, tops.author_idx) if int(a_) in rfirst.index
+             and sl.initial_first(amain.get(c), *rfirst.loc[int(a_), ["first_name", "first_initial", "family_name_main"]])}
+    sdec, slinks = sl.decide(s_ids, sprof, fetched, sev, orc1, taken, tiers, nick, bridge_hand, inits)
     used = {(orc1.get(c), int(a_)) for c, a_ in zip(slinks.loc[slinks.status == "accept_scopus_hand", "cluster_id"],
                                                     slinks.loc[slinks.status == "accept_scopus_hand", "author_idx"])}
     if bridge_hand - used:
@@ -439,13 +474,36 @@ def main():
         hcal = hl.calibrate(kd, kl, acc_links[["cluster_id", "author_idx"]])
         kev.to_parquet(OAX_LINK_DIR / "calibration_orcid_hint_evidence.parquet", index=False)
 
+    # rare family names, for ACIFs the ORCID hints left unlinked (2026-10-23)
+    r_ids = hdec.loc[~hdec.status.str.startswith("accept"), "cluster_id"]
+    taken.update({int(a_): c for c, a_ in zip(hlinks.cluster_id, hlinks.author_idx)})
+    rmain = acif_main_keys(acifs.cluster_id)
+    rcounts = rn.family_counts(con)
+    rfams = rn.acif_families(rmain[rmain.cluster_id.isin(set(r_ids))])
+    rcands = rn.cached_candidates(con, {f for f in rfams.family if rcounts.get(f, 0) <= rn.RARE_MAX})
+    rkeys = dict(zip(acifs.cluster_id, acifs.full_name_keys))
+    rdec, rlinks = rn.decide(r_ids, rkeys, rmain, rcounts, rcands, taken, orc1, hctx[4])
+    rcal = None
+    if args.calibrate:
+        kmain = rmain[rmain.cluster_id.isin(set(known.cluster_id))]
+        kc = rn.cached_candidates(con, {f for f in rn.acif_families(kmain).family if rcounts.get(f, 0) <= rn.CALIBRATION_MAX})
+        kd, _kl = rn.decide(known.cluster_id, rkeys, rmain, rcounts, kc, {}, {}, {}, rare_max=rn.CALIBRATION_MAX)
+        rcal = rn.calibrate(kd, acc_links[["cluster_id", "author_idx"]])
+
     acc = pd.concat([
         links.loc[links.status.str.startswith("accept"), ["cluster_id", "author_idx", "status"]].assign(stage="orcid"),
+        hand.assign(stage="hand"),
         dec.loc[dec.status == "accept", ["cluster_id", "author_idx"]].assign(status="accept_name_institution", stage="name"),
         wlinks[["cluster_id", "author_idx", "status"]].assign(stage="works"),
         slinks[["cluster_id", "author_idx", "status"]].assign(stage="scopus"),
-        hlinks[["cluster_id", "author_idx", "status"]].assign(stage="orcid_hint")], ignore_index=True)
+        hlinks[["cluster_id", "author_idx", "status"]].assign(stage="orcid_hint"),
+        rlinks[["cluster_id", "author_idx", "status"]].assign(stage="rare_name")], ignore_index=True)
     acc = acc.astype({"author_idx": "int64"})
+    unlink_dropped = acc[acc.cluster_id.isin(unlinked)]        # manual_links.csv unlink rows win over every stage
+    acc = acc[~acc.cluster_id.isin(unlinked)]
+    rej_hit = [(c, int(a)) in mrejected for c, a in zip(acc.cluster_id, acc.author_idx)]
+    reject_dropped = acc[rej_hit]                               # and reject rows remove that one pair
+    acc = acc[[not h for h in rej_hit]]
     wcg = pd.read_parquet(AUTHORS_PREP, columns=["author_idx", "works_count_global"])
     outside = links[["author_idx", "works_count_global"]].astype({"author_idx": "int64"})
     wcg = pd.concat([wcg, outside]).drop_duplicates("author_idx")
@@ -458,6 +516,8 @@ def main():
     hev.to_parquet(OAX_LINK_DIR / "orcid_hint_evidence.parquet", index=False)
     hdec.to_parquet(OAX_LINK_DIR / "orcid_hint_decisions.parquet", index=False)
     hlinks.to_parquet(OAX_LINK_DIR / "orcid_hint_links.parquet", index=False)
+    rdec.to_parquet(OAX_LINK_DIR / "rare_name_decisions.parquet", index=False)
+    rlinks.to_parquet(OAX_LINK_DIR / "rare_name_links.parquet", index=False)
     ev.to_parquet(OAX_LINK_DIR / "works_evidence.parquet", index=False)
     wdec.to_parquet(OAX_LINK_DIR / "works_decisions.parquet", index=False)
     wlinks.to_parquet(OAX_LINK_DIR / "works_links.parquet", index=False)
@@ -468,7 +528,13 @@ def main():
     text = "\n".join(["# ARC<->OpenAlex linking", ""] + orcid_section(acifs, links, miss, rejected, shared)
                      + name_section(acifs, pairs, dec) + cal_lines + works_section(acifs, ev, wdec, wlinks, wcal)
                      + scopus_section(acifs, sev, sdec, slinks, scal)
-                     + orcid_hint_section(acifs, hev, hdec, hlinks, hcal))
+                     + orcid_hint_section(acifs, hev, hdec, hlinks, hcal)
+                     + rare_name_section(acifs, rdec, rlinks, rcal)
+                     + ["## Hand links from manual_links.csv", "",
+                        f"- link rows applied: {len(mlinks):,}; unlink rows applied: {len(unlinked):,} "
+                        f"(links they removed from other stages: {len(unlink_dropped):,}); reject rows: {len(mrejected):,} "
+                        f"(links removed: {len(reject_dropped):,}); rows inert because their "
+                        f"record is not in this build (e.g. its grant left scope): {len(minert):,}", ""])
     (OAX_LINK_DIR / "report.md").write_text(text, encoding="utf-8")
     print(text)
 

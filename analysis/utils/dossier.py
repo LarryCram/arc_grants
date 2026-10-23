@@ -37,6 +37,7 @@ class Award:
     primary_for: str | None
     declined: bool = False
     ended_early: bool = False
+    not_taken_up: bool = False
     coinvestigators: list[str] = field(default_factory=list)   # "Name (role)" of the other in-scope investigators
 
 
@@ -166,7 +167,7 @@ class Dossier:
             rows.append({"year": y, "works": n_acc[y], "unsure": n_uns[y], "citations": cites[y],
                          "h_index": self.h_index(y),
                          "events": [f"{self.label(a)}{'*' if a.is_fellowship else ''} {a.grant_code}"
-                                    + (" (declined)" if a.declined else " (ended early)" if a.ended_early else "")
+                                    + (" (declined)" if a.declined else " (not taken up)" if a.not_taken_up else " (ended early)" if a.ended_early else "")
                                     for a in ev]})
         return rows
 
@@ -192,7 +193,7 @@ class Dossier:
         L += ["## ARC awards", "", "| year | grant | scheme | role | fellowship | years | end | funding | administering org | primary FOR | note |",
               "|---|---|---|---|---|---|---|---|---|---|---|"]
         for a in self.awards:
-            note = "declined" if a.declined else "ended early" if a.ended_early else ""
+            note = "declined" if a.declined else "not taken up" if a.not_taken_up else "ended early" if a.ended_early else ""
             fund = f"${a.funding_announced:,.0f}" if a.funding_announced else ""
             L.append(f"| {a.year or ''} | {a.grant_code} | {a.scheme} | {a.role_code or ''} | {'yes' if a.is_fellowship else ''} | "
                      f"{a.years_funded or ''} | {a.end_year or ''} | {fund} | {a.admin_org or ''}"
@@ -275,7 +276,7 @@ class Dossier:
             y = top * 1.08
             if a.is_fellowship:
                 ax1.scatter([a.year], [y], s=260, facecolors="none", edgecolors="#222", zorder=5)
-            ax1.scatter([a.year], [y], marker="*", s=140, color="#e67e22" if not a.declined else "#999", zorder=6)
+            ax1.scatter([a.year], [y], marker="*", s=140, color="#e67e22" if not (a.declined or a.not_taken_up) else "#999", zorder=6)
             ax1.annotate(self.label(a), (a.year, y), textcoords="offset points", xytext=(0, 9), ha="center", fontsize=7)
         ax1.set_ylim(0, top * 1.3)
         h1, l1 = ax1.get_legend_handles_labels()

@@ -246,4 +246,12 @@ def test_grant_lifecycle_flags():
     assert not m.grant_lifecycle(normal)["ended_early"]
     assert m.grant_lifecycle(dict(normal, **{"grant-status": "Declined"}))["declined"]
     assert m.grant_lifecycle({"grant-status": "Active"}) == {"project_start_date": None, "anticipated_end_date": None,
-                                                           "end_year": None, "declined": False, "ended_early": False}
+                                                           "end_year": None, "declined": False, "ended_early": False,
+                                                           "not_taken_up": False}
+    assert f["not_taken_up"] and not m.grant_lifecycle(normal)["not_taken_up"]               # current 0 / paid
+    assert m.grant_lifecycle(dict(normal, **{"grant-status": "Declined"}))["not_taken_up"]
+    same_day = dict(normal, **{"anticipated-end-date": "2014-01-01"})                         # start = end
+    assert m.grant_lifecycle(same_day)["not_taken_up"]
+    partly = dict(normal, **{"funding-current": 120000})                                      # partly paid: taken up
+    assert not m.grant_lifecycle(partly)["not_taken_up"]
+    assert m.grant_lifecycle(dict(normal, **{"funding-at-announcement": 0, "funding-current": 0}))["not_taken_up"]

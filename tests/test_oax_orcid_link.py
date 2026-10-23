@@ -133,3 +133,18 @@ def test_hand_record_authors_from_pool(tmp_path):
                        {"action": "reject_link", "orcid": "O1", "author_idx": 5, "notes": ""}])
     out = hand_record_authors(ov, tmp_path / "prep.parquet")
     assert list(out.author_idx) == [77] and list(out.orcid) == ["O9"] and bool(out.in_pool.iloc[0])
+
+
+def test_hand_acif_links_checks_rows(tmp_path):
+    import pytest
+    from src.oax.orcid_link import hand_acif_links
+    prep = tmp_path / "prep.parquet"
+    pd.DataFrame({"author_idx": [5112930010]}).to_parquet(prep)
+    ov = pd.DataFrame([{"action": "accept_acif_record", "orcid": "DP1_tim", "author_idx": 5112930010, "notes": ""},
+                       {"action": "reject_link", "orcid": "O1", "author_idx": 1, "notes": ""}])
+    out = hand_acif_links(ov, {"DP1_tim"}, path=prep)
+    assert out.values.tolist() == [["DP1_tim", 5112930010, "accept_hand"]]
+    with pytest.raises(SystemExit):
+        hand_acif_links(ov, {"DP2_other"}, path=prep)
+    with pytest.raises(SystemExit):
+        hand_acif_links(ov.assign(author_idx=[999, 1]), {"DP1_tim"}, path=prep)

@@ -140,7 +140,14 @@ def load_items(con: duckdb.DuckDBPyConnection | None = None) -> list[AwardCIFIte
     silently drops the at-award institution whenever it differs from the current one (a fellow
     moved institutions mid-grant -- DE120101452 is admin_org=Sydney now, was ANU at
     announcement). admin_org itself stays "the current one," but admin_orgs retains both.
+
+    Grants not taken up are out of scope (2026-10-23, user: "move the not_taken_up out of scope"):
+    00a's grants_flat.not_taken_up (declined, start date = end date, or current funding 0 with
+    announced > 0). Their records never become items.
     """
+    import pyarrow.parquet as pq
+    if "not_taken_up" not in pq.read_schema(PROCESSED_DATA / "grants_flat.parquet").names:
+        raise SystemExit("grants_flat.parquet has no not_taken_up column: rerun src/00a_extract_arc.py first")
     own_con = con is None
     con = con or duckdb.connect()
     try:
@@ -165,6 +172,7 @@ def load_items(con: duckdb.DuckDBPyConnection | None = None) -> list[AwardCIFIte
                 ON g.admin_org = o.organisationName_alias
             WHERE i.role_code IN ({roles_sql})
               AND substring(i.grant_code, 1, 2) IN ({schemes_sql})
+              AND NOT coalesce(g.not_taken_up, FALSE)
             ORDER BY i.unique_id
         """).fetchall()
         col_names = [d[0] for d in con.description]

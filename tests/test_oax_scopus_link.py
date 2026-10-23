@@ -65,3 +65,15 @@ def test_nickname_accepted_namesake_refused():
     ev = _ev([("A", "1", 10, "Lyn D. Beazley", None, 9, 9, 8)])
     dec, links = sl.decide(["A"], prof, {"1"}, ev, {}, {}, {}, {("A", 10)})
     assert dec.status.tolist() == ["accept_scopus_nickname"] and links.author_idx.tolist() == [10]
+
+
+def test_initial_first():
+    assert sl.initial_first(["geoffrey_opat"], "g.", "g", "opat")                    # "Opat, G. I."
+    assert sl.initial_first(["roger_watling"], "r.", "r", "watling")                 # "R. John Watling"
+    assert not sl.initial_first(["stuart_taylor"], "seamus", "s", "taylor")          # a full first name
+    assert not sl.initial_first(["mary_shannon"], "f.", "f", "shannon")              # another initial
+    assert not sl.initial_first(["mary_shannon"], "m.", "m", "shannan")              # another family name
+    prof = pd.DataFrame({"cluster_id": ["A"], "scopus_id": ["1"]})
+    ev = _ev([("A", "1", 10, "R. John Watling", None, 9, 9, 8)])
+    dec, links = sl.decide(["A"], prof, {"1"}, ev, {}, {}, {}, set(), set(), {("A", 10)})
+    assert dec.status.tolist() == ["accept_scopus_initial"] and links.author_idx.tolist() == [10]

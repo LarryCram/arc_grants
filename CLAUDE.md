@@ -53,6 +53,10 @@ src/02_link_arc_oax.py + src/oax/ → the NEW ARC↔OpenAlex linker, built one s
                                   records carrying an ORCID whose live ORCID names match the ACIF and
                                   whose works are >= 50% in the grant fields; ORCID-listed Australia
                                   required above 3 same-name records; exactly one ORCID passes)
+                                  then rare family names (2026-10-23, src/oax/rare_name_link.py: family
+                                  name carried by <= 20 pool authors; exactly one compatible OpenAlex record,
+                                  pool or not; no field check); hand links from data_persisted/manual_links.csv
+                                  (src/oax/manual_links.py: record-keyed link / unlink / reject rows)
                                   → processed/oax_link/ (`--calibrate` scores stage 2 on ORCID-linked ACIFs)
 src/00g_extract_orcid_hints.py  → live ORCID /records for the hint candidates of ACIFs the last linker run
                                   left unlinked (into the ORCID record cache, marked _fetched_live); run
@@ -3893,6 +3897,41 @@ fields against the ARC grant fields test whether the whole record is someone els
   7 manual_orcids rows where one candidate is clearly the person (Kathryn Marsh, Ian Oliver, Matthew Groves, Alex
   Steel, Lisa Jackson Pulver, Jenny Fleming, Kate Smith), 12 left. Cycle rerun: unlinked **1,102**; accepted works
   2,673,338. (The `nicknames` package lists Peter as a nickname of Patrick -- seen, not acted on.)
+
+## 2026-10-23: grants not taken up out of scope; rare-name stage; record-keyed hand links; large hand review
+
+- **Grants not taken up are out of scope** (user). 00a's `grant_lifecycle()` sets `not_taken_up`: status
+  Declined, project start = end date, current funding 0 with announced > 0, or announced 0 (Molinski's FF;
+  user: may signal an ARC ineligibility call). Census (in scope, 30,310 grants): current 0 on 582 (1.9%; DP 1.0%,
+  LP 2.8%, DE 4.6%, FT 2.6%, FF 8.1%); ARC's 'Declined' status only appears for 2022-25 offers (40 grants, no
+  current funding or dates); before that an offer not taken up is 'Closed' with current 0. Partly paid grants
+  are taken up (ARC limits on grants held). `load_items()` drops records on these grants; acifs_arc gains
+  `not_taken_up_grants`, the records `not_taken_up`. 376 ACIFs had only such grants (326 linked: real people
+  whose only award was never taken up, e.g. overseas stars recruited for FF/FL/FT who stayed home: Maini,
+  Rachel Wong, Niemann, Naegerl, Dubrovinsky). 105 ACIFs get a new cluster_id. Three oax_link_overrides rows
+  for people leaving scope moved to `oax_link_overrides_out_of_scope.csv`.
+- **Scopus bridge** accepts a record whose parsed first name is a bare initial matching the ACIF's
+  (`initial_first()`: "Opat, G. I.", "R. John Watling", "M. Frances Shannon"): 12 more links. The parser's
+  main key for an initials run is the joined initials ("gi_opat"), which the old tier test read as a full name.
+- **Linker stage 6, rare family names** (`src/oax/rare_name_link.py`): user chose exactly one compatible
+  candidate and no field check (FOR fields misclassify these late cases: Gay Ochiltree, family studies vs
+  health). Calibration on ORCID-linked ACIFs: 99.2% up to 20 pool authors with the family name. 77 links
+  (Biankin, Sigafoos, Seible, Gherghetta...). Candidates are cached (`oax_link/rare_name_candidates.parquet`).
+- **Record-keyed hand links** `data_persisted/manual_links.csv` (link / unlink / reject; survives cluster
+  relabels; a row on a record out of scope is inert). Seeded from a review of the old pipeline's
+  `manual_resolutions.csv` against Oct26 (`analysis/34_*`, `35_*`: 232 agreed; 21 old automatic picks with a
+  different given name dropped), the web review of the 143 unlinked fellowships
+  (`processed/unlinked_fellows_web.md`, `unlinked_fellows_leftover.csv`), and the grant-acknowledgement test.
+- **Grant acknowledgements** (`analysis/36_grant_ack_test.py`, test only): ARC awards in OpenAlex carry the grant
+  code; 102,866 works acknowledge a kept ACIF's grant; the fitting author with most acknowledging works is the
+  ORCID-linked record 99% of the time (2+ works). Its value is the disagreements: 131 ACIFs, resolved by hand.
+  They showed OpenAlex putting an ARC ORCID on another person's record (Stephen Gould -> Stephen Jay Gould,
+  Kelly Smith -> a Rice physicist), wrong bulk-pass / Scopus ORCIDs (now in enrichment_blocklist.csv), ACIFs
+  holding two people (Carter, Robert Clark, Simon Biggs, Hancock, Michael Anderson, Barton, Paul Young, James
+  Smith: keep-apart rows and hand merges), and one person in two ACIFs (Heidi Zeeman nee Muenchberger).
+- Considered and rejected: a general byline-name rule in the works filter (fires on 1.8% of works, mostly
+  genuine name forms: middle-name users, joined given names, nicknames). Trove: diagnostic only.
+- Open: docs/pipeline_todo.md "2026-10-23 update".
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.

@@ -31,7 +31,7 @@ from src.utils.for_resolve import Resolver
 
 PREP = PROCESSED_DATA / "openalex_authors_prep.parquet"
 GRANTS_FLAT = PROCESSED_DATA / "grants_flat.parquet"
-STAGE_ORDER = {"orcid": 0, "name": 1, "works": 2, "scopus": 3, "orcid_hint": 4}
+STAGE_ORDER = {"orcid": 0, "hand": 1, "name": 2, "works": 3, "scopus": 4, "orcid_hint": 5, "rare_name": 6}
 
 
 class DossierBuilder:
@@ -86,6 +86,7 @@ class DossierBuilder:
                 primary_for=None if g is None else g.primary_for_name,
                 declined=bool(r.declined) if pd.notna(r.declined) else False,
                 ended_early=bool(r.ended_early) if pd.notna(r.ended_early) else False,
+                not_taken_up=bool(getattr(r, "not_taken_up", False)) if pd.notna(getattr(r, "not_taken_up", False)) else False,
                 coinvestigators=sorted(f"{o.full_name} ({o.role_code})" for o in others.itertuples())))
         return out
 
@@ -115,9 +116,13 @@ class DossierBuilder:
                 ev = (f"{int(e.coinv_works.iloc[0])} works with linked ARC co-investigators, "
                       f"{int(e.uni_works.iloc[0])} works at a grant university in {int(e.uni_years.iloc[0])} grant years"
                       if len(e) else r.status)
+            elif r.stage == "hand":
+                ev = "linked by hand (accept_acif_record row of oax_link_overrides.csv)"
             elif r.stage == "orcid_hint":
                 ev = (f"same-name record carrying ORCID {orcid}, whose own names match the ACIF; most of its works "
                       "are in the grant fields")
+            elif r.stage == "rare_name":
+                ev = "the only OpenAlex record with the ACIF's rare family name and a compatible given name"
             else:
                 s = self.scopus_links[(self.scopus_links.cluster_id == cid) & (self.scopus_links.author_idx == aid)]
                 ev = (f"holds {int(s.shared_dois.iloc[0])} of the {int(s.profile_dois_in_openalex.iloc[0])} OpenAlex DOIs of "
