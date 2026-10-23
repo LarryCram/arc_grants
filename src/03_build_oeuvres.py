@@ -35,7 +35,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pandas as pd
 
-from config.settings import ACIFS_ARC, OEUVRE_DIR
+from config.settings import ACIF_ARC_RECORDS, ACIF_LABEL_HISTORY, ACIFS_ARC, OEUVRE_DIR
+from src.acif.output import resolve_labels
 from src.oeuvre import classify as cls
 from src.oeuvre.acif_works import DOMINANT_SHARE, LINKS, accepted_links, build_acif_works, connect
 from src.oeuvre.citations import work_citations_by_year
@@ -361,12 +362,18 @@ step5_lines_cache: list[str] = []
 def step5(con) -> list[str]:
     acifs_full = pd.read_parquet(ACIFS_ARC)
     verdicts = load_verdicts(OEUVRE_DIR / "gemini_verdicts.jsonl")
+    # verdicts are saved under the ACIF label of the day; carry them to today's labels (2026-10-23)
+    rec = pd.read_parquet(ACIF_ARC_RECORDS, columns=["unique_id", "cluster_id"])
+    hist = pd.read_parquet(ACIF_LABEL_HISTORY) if ACIF_LABEL_HISTORY.exists() else rec.iloc[0:0]
+    verdicts, moved = cls.relabel_verdicts(verdicts, resolve_labels({v["cluster_id"] for v in verdicts.values()}, rec, hist))
     sdois, sacifs = trusted_profile_dois(acifs_full)
     req = cls.classify(con, OEUVRE_DIR / "acif_works_single.parquet", OEUVRE_DIR / "acif_work_graph.parquet",
                        acifs_full, verdicts, OEUVRE_DIR / "acif_works_classified.parquet",
                        OEUVRE_DIR / "gemini_requests.parquet", orcid_dois=claimed_dois(acifs_full),
                        scopus_dois=sdois, scopus_acifs=sacifs)
     lines = classify_section(con, req, verdicts)
+    lines += ["", f"Saved Gemini verdicts carried to new ACIF labels: {moved['relabelled']:,}; "
+              f"left out (label no longer one ACIF): {moved['dropped']:,}"]
     step5_lines_cache[:] = lines
     return lines
 

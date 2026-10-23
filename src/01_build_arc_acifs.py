@@ -17,9 +17,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from config.settings import ACIF_ARC_NAME_GROUPS, ACIF_ARC_RECORDS, ACIFS_ARC, PROCESSED_DATA
+import pandas as pd
+
+from config.settings import ACIF_ARC_NAME_GROUPS, ACIF_ARC_RECORDS, ACIF_LABEL_HISTORY, ACIFS_ARC, PROCESSED_DATA
 from src.acif.build import build_acifs
-from src.acif.output import acif_rows, record_rows
+from src.acif.output import acif_rows, record_rows, update_label_history
 
 REPORT = PROCESSED_DATA / "acif_arc_build_report.md"
 
@@ -73,6 +75,11 @@ def main():
     assert a.cluster_id.is_unique and r.unique_id.is_unique
     assert len(r) == report["n_seed"], "a record was lost"
     assert not (a.orcids.map(len) > 1).any(), "an ACIF holds two ORCIDs"
+    # the previous build's labels go into the history before its records file is overwritten
+    hist = pd.read_parquet(ACIF_LABEL_HISTORY) if ACIF_LABEL_HISTORY.exists() else None
+    if ACIF_ARC_RECORDS.exists():
+        hist = update_label_history(hist, pd.read_parquet(ACIF_ARC_RECORDS, columns=["cluster_id", "unique_id"]))
+    update_label_history(hist, r).to_parquet(ACIF_LABEL_HISTORY, index=False)
     a.to_parquet(ACIFS_ARC, index=False)
     r.to_parquet(ACIF_ARC_RECORDS, index=False)
     report["names"]["groups"].to_parquet(ACIF_ARC_NAME_GROUPS, index=False)

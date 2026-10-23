@@ -114,6 +114,11 @@ class AwardCIFItem:
     # to stop only the stage it was written for -- Wei Liu, David Price).
     refused_orcids: tuple[str, ...] = ()
 
+    # 2026-10-23: records this record must never share an ACIF with (manual_confirmed_distinct.csv pairs,
+    # build.attach_kept_apart()). Set before the first merge; every merge_by_key() stage honours it (the
+    # ORCID bulk pass had joined two kept-apart Gregory Hancocks and two Simon Biggses through a namesake's ORCID).
+    kept_apart: tuple[str, ...] = ()
+
     # --- new fields required by the cyclic-build plan (2026-09-19), not yet populated by
     # anything -- see the plan's "Full AwardCIFItem property list" section for each one's
     # rationale. ---

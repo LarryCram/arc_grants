@@ -6,8 +6,9 @@ Done today (CLAUDE.md "2026-10-23"): grants not taken up out of scope; Scopus br
 linker stage 6 (rare family names); record-keyed hand links (`manual_links.csv`, link / unlink / reject);
 review of the old manual_resolutions.csv; web review of the 143 unlinked fellowships; grant-acknowledgement
 test and its 131 disagreements resolved. Open:
-1. **After the next run:** check the 105 cluster relabels from the scope change, inert hand rows in the
-   linker report, the Guo / Aarti Singh oeuvres (mixed records left to the works filter), the unlinked count.
+1. ~~After the next run: check the relabels, inert hand rows, Guo / Aarti Singh, the unlinked count~~ -- done
+   2026-10-23 evening (no stale labels; unlinked 872; the only inert hand row is Bruno David, set aside as
+   Indigenous research). Bulk-pass namesakes broke two keep-apart pairs: fixed structurally (item 4 stays open).
 2. **Grant-acknowledgement linker stage** (not built; test `analysis/36_grant_ack_test.py`): ACIF -> grants ->
    OpenAlex awards (funder F4320334704; funder_award_id = grant code) -> acknowledging works
    (`compact/work_awards`) -> authors whose names fit. 99% right on ORCID-linked ACIFs at 2+ works; 121
@@ -28,6 +29,25 @@ test and its 131 disagreements resolved. Open:
    Douglas Vickers); rule "2+ titles, >= 70%, unique" is 100% only with <= 3 same-name pool authors.
 8. Remaining manual review: 25 "keep both" rows of the manual_resolutions assessment
    (`processed/manual_review_assessment.csv`) not yet added.
+9. **Author performance features after Sinatra et al. 2016** (`resources/Sinatra...pdf`, supplementary
+   `resources/sinatra.sm.pdf`): γ (N(t) ~ t^γ), c10, Q (eq. S28, uncertainty σp/√N), and the h-index forecast
+   from the first N0 papers (S41-S45). Purpose (user): ECR fellowships -- relate what the selectors could see at
+   award to what the awardee did later (a high γ or c/year that settles down says something about selection).
+   Decisions (user, 2026-10-23):
+   - award time = announcement year; STEM fields first; OpenAlex fields for normalisation initially;
+   - normalise by field and paper age over all OpenAlex (not only our oeuvres);
+   - c10 for papers 10+ years old; proxy for younger papers c/(age+1), normalised by the same-field,
+     same-year, same-age OpenAlex mean (+1 avoids division by zero in the publication year);
+   - works with c = 0 are dropped (from the log-based Q);
+   - start of academic age = min(publication_year) of the accepted works (provisional rule);
+   - a noisy early γ is acceptable once the start of academic age is fixed;
+   - every work is fractionated (c / authors_count) and the full count is kept too (both normalised by the
+     matching full or fractional OpenAlex field average: 00h writes `citations` and `citations_frac`);
+   - STEM = OpenAlex domains Physical, Life and Health Sciences (health and medicine included); the
+     normalisation itself is at OpenAlex field level.
+   Steps, one at a time: (1) OpenAlex citation baselines per field x publication year x age, and the check of
+   c/(age+1) against c10 on papers old enough -- DONE 2026-10-23 (00h, analysis/37; CLAUDE.md); (2) γ per ACIF; (3) population fit (μ, Σ) and Q; (4) ECR
+   fellowships at announcement: γ, c-proxy, Q then vs later; (5) dossier section.
 
 ## 2026-10-22 update
 

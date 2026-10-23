@@ -205,6 +205,24 @@ def _request_key(kind: str, cluster_id: str, items: list[int]) -> str:
     return f"{kind}|{cluster_id}|{h}|{PROMPT_VERSION}"
 
 
+def relabel_verdicts(verdicts: dict, mapping: dict) -> tuple[dict, Counter]:
+    """Saved verdicts under the current ACIF labels (2026-10-23): each verdict's cluster_id goes through
+    `mapping` (old label -> current cluster_id or None, from acif.output.resolve_labels) and its request key
+    is rebuilt with the new label. A verdict whose label maps to no single current ACIF is left out."""
+    out, n = {}, Counter()
+    for v in verdicts.values():
+        new = mapping.get(v["cluster_id"])
+        if new is None:
+            n["dropped"] += 1
+            continue
+        if new != v["cluster_id"]:
+            kind, _old, h, ver = v["request_key"].split("|", 3)
+            v = {**v, "cluster_id": new, "request_key": f"{kind}|{new}|{h}|{ver}"}
+            n["relabelled"] += 1
+        out[v["request_key"]] = v
+    return out, n
+
+
 def requests_table(con) -> pd.DataFrame:
     """One row per Gemini request: request_key, kind, cluster_id, component, work_idxs."""
     r = con.execute(f"""

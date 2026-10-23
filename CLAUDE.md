@@ -58,6 +58,9 @@ src/02_link_arc_oax.py + src/oax/ → the NEW ARC↔OpenAlex linker, built one s
                                   pool or not; no field check); hand links from data_persisted/manual_links.csv
                                   (src/oax/manual_links.py: record-keyed link / unlink / reject rows)
                                   → processed/oax_link/ (`--calibrate` scores stage 2 on ORCID-linked ACIFs)
+src/00h_extract_citation_baselines.py → processed/citation_baselines/ (2026-10-23): OpenAlex-wide citations
+                                  received at each paper age per field x publication year (full and fractional
+                                  counts) -- the normalisers for the Sinatra et al. 2016 author features
 src/00g_extract_orcid_hints.py  → live ORCID /records for the hint candidates of ACIFs the last linker run
                                   left unlinked (into the ORCID record cache, marked _fetched_live); run
                                   after 02, then rerun 02 (as 00f --targets unlinked)
@@ -3932,6 +3935,37 @@ fields against the ARC grant fields test whether the whole record is someone els
 - Considered and rejected: a general byline-name rule in the works filter (fires on 1.8% of works, mostly
   genuine name forms: middle-name users, joined given names, nicknames). Trove: diagnostic only.
 - Open: docs/pipeline_todo.md "2026-10-23 update".
+
+## 2026-10-23 (evening): no stale ACIF labels; keep-apart pairs in every merge; Sinatra step 1
+
+- **Stale labels** (user: "don't leave stale acif labels lying around"). The not-taken-up scope change relabelled
+  ACIFs, and 01 stopped because 00d's extract was keyed on old labels: the run script now runs 00a -> 00c -> 00d
+  -> 00e before the cycle. 00c's scope now also drops grants not taken up. Rows of the build-read hand files on
+  records now out of scope: rekeyed to another record of the same person (Bernard Carroll, Kelly Smith) or moved
+  to `<file>_out_of_scope.csv` (Banfield, Peng Wang, Pryce, Chien Wang / Bunda / Gallagher). Gemini verdicts are
+  keyed on the ACIF label: 01 now keeps `acif_label_history.parquet` (every label any build wrote, with its
+  records) and 03 carries a verdict to the current ACIF holding its old label's records (`classify.relabel_verdicts`,
+  `output.resolve_labels`); a label whose records now sit in 2+ ACIFs or left scope is dropped.
+- **Keep-apart pairs in every merge.** The ORCID bulk pass had given namesakes' ORCIDs to two kept-apart records
+  (Newcastle geomorphologist Greg R. Hancock -> the Sydney steel-structures Gregory Hancock; gerontologist Simon G.
+  Biggs -> the chemical engineer Simon Biggs) and the ORCID merge joined them. Records now carry their keep-apart
+  partners (`AwardCIFItem.kept_apart`, `build.attach_kept_apart`); `merge_by_key()` refuses such groups
+  (`kept_apart`) and `build_acifs()` raises if a finished ACIF holds a pair; 02b never proposes a pair (the cycle
+  had run all six rounds on the Hancock set). Two `enrichment_blocklist.csv` rows refuse the namesake ORCIDs.
+- **Bernard Carroll**: his avocado Linkage grant LP130100870 had split off when his 2003 DP0346679 left scope and
+  was linked by the name stage to the psychiatrist Bernard J. Carroll (Michigan/Duke) -> `manual_merges.csv` row
+  (UQ staff profile) and a `manual_links.csv` reject row.
+- **Sinatra et al. 2016 author features** (docs/pipeline_todo.md 2026-10-23 item 9; paper and supplementary in
+  resources/, not committed). Decisions (user): ECR fellowships first -- what selectors could see at announcement
+  vs later; γ, c10, Q (eq. S28, uncertainty σp/√N); normalise by OpenAlex field x year x age over all OpenAlex;
+  proxy c/(age+1) for papers younger than 10 years; drop c = 0 works from the log measures; academic age from
+  min(publication_year) (provisional); fractional counting (c / authors) on all works with the full count kept;
+  STEM = Physical, Life and Health Sciences. Step 1 done: `src/00h_extract_citation_baselines.py` (3.0B citations,
+  210 s; on-disk DuckDB with a 16 GB cap after an in-memory run beside the pipeline was OOM-killed) and
+  `analysis/37_citation_proxy_check.py`: normalised c_k vs c10 on 973,711 accepted papers -- Spearman 0.75 / 0.87
+  / 0.92 / 0.97 at k = 1/2/3/5; person-level <log c> r = 0.84 / 0.91 / 0.95 / 0.98 (16,649 ACIFs), the proxy
+  reading +0.08 to +0.14 high in log. Fractional / full citation totals range 0.27 (Immunology) to 0.83
+  (Arts and Humanities). Next: step 2 (γ).
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.

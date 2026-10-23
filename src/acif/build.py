@@ -106,6 +106,25 @@ def attach_refused_orcids(acifs: list[AwardsCIF], refused: dict[str, set[str]]) 
     return acifs
 
 
+def attach_kept_apart(acifs: list[AwardsCIF], pairs) -> list[AwardsCIF]:
+    """Put each record's keep-apart partners on it (AwardCIFItem.kept_apart) from (unique_id, unique_id)
+    pairs (src/acif/hand.py::load_hand_distinct())."""
+    apart: dict[str, set[str]] = defaultdict(set)
+    for x, y in pairs:
+        apart[x].add(y)
+        apart[y].add(x)
+    for a in acifs:
+        a.items = [replace(it, kept_apart=tuple(sorted(apart[it.unique_id])))
+                   if it.unique_id in apart else it for it in a.items]
+    return acifs
+
+
+def keep_apart_hits(acifs: list[AwardsCIF]) -> list[tuple[str, str]]:
+    """(unique_id, unique_id) for each keep-apart pair whose two records are both among `acifs`."""
+    ids = {it.unique_id for a in acifs for it in a.items}
+    return sorted({tuple(sorted((it.unique_id, o))) for a in acifs for it in a.items for o in it.kept_apart if o in ids})
+
+
 def refusal_hits(acifs: list[AwardsCIF], orcids: set[str] | None = None) -> list[tuple[str, str]]:
     """(unique_id, orcid) for each record among `acifs` that refuses an ORCID the ACIFs hold
     (`orcids`; default: every ORCID on their records)."""
@@ -456,7 +475,7 @@ def merge_by_key(
     orcids/orcid_status of each survivor are recomputed from its items.
 
     Returns (updated_acifs, mismatches): one entry per group left unmerged, with `reason`
-    ("names_do_not_link", "orcid_veto", "refused_orcid" or the check's reason), `orcid` (the group's first key),
+    ("names_do_not_link", "orcid_veto", "refused_orcid", "kept_apart" or the check's reason), `orcid` (the group's first key),
     `keys`, the sub-groups, names and ORCIDs needed to review it."""
     mismatches: list[dict] = []
     to_merge: list[tuple[str, str]] = []
@@ -487,6 +506,8 @@ def merge_by_key(
         reason = "orcid_veto" if len(held) > 1 else None
         if reason is None and refusal_hits(group, held):
             reason = "refused_orcid"
+        if reason is None and keep_apart_hits(group):
+            reason = "kept_apart"
         if reason is None and check is not None:
             reason = check(keys, group)
         if reason:
@@ -576,12 +597,14 @@ def build_acifs(scopus: bool = True, hand: bool = True, orcid_bulk: bool = True,
     the merge sets chosen from the linker's shared OpenAlex records (src/acif/oax_merge.py; nothing
     before the first linking); then Indigenous-focused ACIFs are flagged excluded
     (set_aside_indigenous_research()).
-    Each record carries its hand refusals (load_refused_orcids()) from the start; after the last
-    stage no record may hold or be joined to an ORCID it refuses (raises otherwise).
+    Each record carries its hand refusals (load_refused_orcids()) and keep-apart partners
+    (attach_kept_apart()) from the start; after the last stage no record may hold or be joined to an ORCID
+    it refuses, and no keep-apart pair may share an ACIF (raises otherwise).
     One UnionFind runs through every stage. Returns (acifs, uf, report): report holds each
     stage's ACIF count and unmerged groups, and pass one's per-ACIF decisions."""
     uf = UnionFind({})
-    seeds = attach_refused_orcids(build_stage_zero(), load_refused_orcids())
+    from src.acif.hand import load_hand_distinct
+    seeds = attach_kept_apart(attach_refused_orcids(build_stage_zero(), load_refused_orcids()), load_hand_distinct())
     acifs, m0 = merge_by_orcid(seeds, uf)
     report = {"n_seed": len(seeds), "n_arc_orcid": len(acifs), "arc_orcid_mismatches": m0}
     if scopus:
@@ -610,6 +633,9 @@ def build_acifs(scopus: bool = True, hand: bool = True, orcid_bulk: bool = True,
     hits = [h for a in acifs for h in refusal_hits([a])]
     if hits:
         raise ValueError(f"records holding or joined to an ORCID they refuse: {hits}")
+    apart = [h for a in acifs for h in keep_apart_hits([a])]
+    if apart:
+        raise ValueError(f"keep-apart pairs (manual_confirmed_distinct.csv) in one ACIF: {apart}")
     report["n_excluded_indigenous"] = set_aside_indigenous_research(acifs)
     return acifs, uf, report
 

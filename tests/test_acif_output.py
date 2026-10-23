@@ -1,5 +1,7 @@
 """Tests for src/acif/output.py and build.set_aside_indigenous_research() (hand-built fixtures)."""
 import sys
+
+import pandas as pd
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -68,3 +70,26 @@ def test_grant_lifecycle_flags_reach_acif_and_record_rows():
     assert rec.loc["DP2_jan_smith", "ended_early"] and not rec.loc["DP1_jan_smith", "ended_early"]
     assert rec.loc["DP2_jan_smith", "not_taken_up"] and not rec.loc["DP1_jan_smith", "not_taken_up"]
     assert rec.loc["DP2_jan_smith", "anticipated_end_date"] == "2015-06-30"
+
+
+def test_label_history_and_resolve_labels():
+    from src.acif.output import resolve_labels, update_label_history
+    h = update_label_history(None, pd.DataFrame({"cluster_id": ["A_x", "A_x", "C_z", "D_y", "D_y"],
+                                                 "unique_id": ["A_x", "B_x", "C_z", "D_y", "E_y"]}))
+    rec = pd.DataFrame({"unique_id": ["B_x", "C_z", "D_y", "E_y"], "cluster_id": ["B_x", "B_x", "D_y", "E_y2"]})
+    m = resolve_labels(["A_x", "C_z", "D_y", "Q"], rec, h)
+    # A_x lost its own record (out of scope); its other member now names the ACIF; C_z was merged in
+    assert m["A_x"] == "B_x" and m["C_z"] == "B_x"
+    assert m["D_y"] == "D_y"            # a current label stays
+    assert m["Q"] is None               # never seen
+
+
+def test_relabel_verdicts():
+    from src.oeuvre.classify import relabel_verdicts
+    v = {"component|A_x|abc|v3": {"cluster_id": "A_x", "request_key": "component|A_x|abc|v3"},
+         "works|Q|def|v3": {"cluster_id": "Q", "request_key": "works|Q|def|v3"},
+         "works|D_y|ghi|v3": {"cluster_id": "D_y", "request_key": "works|D_y|ghi|v3"}}
+    out, n = relabel_verdicts(v, {"A_x": "B_x", "Q": None, "D_y": "D_y"})
+    assert set(out) == {"component|B_x|abc|v3", "works|D_y|ghi|v3"}
+    assert out["component|B_x|abc|v3"]["cluster_id"] == "B_x"
+    assert n == {"relabelled": 1, "dropped": 1}

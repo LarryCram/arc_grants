@@ -30,6 +30,8 @@ from src.acif.build import (
     merge_by_orcid,
     render_orcid_mismatch_report,
     attach_refused_orcids,
+    attach_kept_apart,
+    keep_apart_hits,
     load_refused_orcids,
     refusal_hits,
     UnionFind,
@@ -501,3 +503,20 @@ class TestOaxMergeStage:
         acifs = [_acif("DP01_JohnSmith", [_item("DP01_JohnSmith")])]
         out, rep = oax_merge_stage(acifs, UnionFind(), tmp_path / "missing.parquet")
         assert out == acifs and rep["sets"] == 0
+
+
+class TestKeptApart:
+    """A keep-apart pair (manual_confirmed_distinct.csv) holds in every merge_by_key() stage (2026-10-23:
+    the ORCID bulk pass had joined two kept-apart Gregory Hancocks through a namesake's ORCID)."""
+    O1 = "0000-0000-0000-0001"
+
+    def test_shared_key_merge_refused(self):
+        a = _acif("DP01_JohnSmith", [_item("DP01_JohnSmith", orcid=self.O1)])
+        b = _acif("DP02_JohnSmith", [_item("DP02_JohnSmith", orcid=self.O1)])
+        acifs = attach_kept_apart([a, b], [("DP01_JohnSmith", "DP02_JohnSmith")])
+        assert keep_apart_hits(acifs) == [("DP01_JohnSmith", "DP02_JohnSmith")]
+        survivors, mismatches = merge_by_key(acifs, UnionFind(), lambda x: self.O1)
+        assert len(survivors) == 2 and mismatches[0]["reason"] == "kept_apart"
+        c = _acif("DP03_JohnSmith", [_item("DP03_JohnSmith", orcid=self.O1)])
+        survivors, _ = merge_by_key([acifs[0], c], UnionFind(), lambda x: self.O1)
+        assert len(survivors) == 1

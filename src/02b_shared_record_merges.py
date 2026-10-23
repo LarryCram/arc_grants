@@ -22,6 +22,7 @@ import duckdb
 import pandas as pd
 
 from config.settings import ACIF_ARC_RECORDS, ACIFS_ARC, OAX_AUTHORS, OAX_LINK_DIR, PROCESSED_DATA
+from src.acif.hand import load_hand_distinct
 from src.acif.name_merge import load_name_merge_inputs
 from src.oax.shared_records import decide
 from src.utils.names import HumanNameParser
@@ -96,6 +97,14 @@ def main():
             givens[r.cluster_id].add(k.split("_", 1)[0])
     facts = {c: {"orcids": set(a.loc[c, "orcids"]), "for": {f["name"] for f in a.loc[c, "for2020_codes"]},
                  "grants": grants[c], "coinv": set(a.loc[c, "coawardee_acif_ids"])} for c in a.index}
+    # keep-apart pairs (manual_confirmed_distinct.csv) are never proposed: the build would refuse the set
+    # and the 01 -> 02 -> 02b cycle would never reach a fixed point (Gregory Hancock, 2026-10-23)
+    where = dict(zip(rec.unique_id, rec.cluster_id))
+    for x, y in load_hand_distinct():
+        cx, cy = where.get(x), where.get(y)
+        if cx and cy and cx != cy:
+            facts[cx].setdefault("apart", set()).add(cy)
+            facts[cy].setdefault("apart", set()).add(cx)
 
     want = sorted(set(acc.author_idx))
     con = duckdb.connect()

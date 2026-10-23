@@ -128,3 +128,29 @@ def record_rows(acifs: list[AwardsCIF], life=None) -> pd.DataFrame:
         "not_taken_up": bool(lf(it.grant_code, "not_taken_up")),
     } for a in acifs for it in a.items]
     return pd.DataFrame(rows).sort_values("unique_id", ignore_index=True)
+
+
+def update_label_history(history: pd.DataFrame | None, records: pd.DataFrame) -> pd.DataFrame:
+    """Every (cluster_id, unique_id) pair any build has written (2026-10-23, user: "don't leave stale acif
+    labels lying around"). A cluster_id is one member's record id, so it changes when an ACIF gains an earlier
+    record or loses the one it was named after; saved work keyed on an old label (Gemini verdicts) is
+    translated through this history by resolve_labels()."""
+    new = records[["cluster_id", "unique_id"]]
+    out = new if history is None else pd.concat([history[["cluster_id", "unique_id"]], new])
+    return out.drop_duplicates().sort_values(["cluster_id", "unique_id"], ignore_index=True)
+
+
+def resolve_labels(labels, records: pd.DataFrame, history: pd.DataFrame) -> dict:
+    """Old ACIF label -> current cluster_id, or None. A current label stays; otherwise the label's members in
+    any earlier build that are still records now must all sit in one current ACIF."""
+    now = dict(zip(records.unique_id, records.cluster_id))
+    current = set(records.cluster_id)
+    members = history.groupby("cluster_id").unique_id.apply(set).to_dict()
+    out = {}
+    for lab in set(labels):
+        if lab in current:
+            out[lab] = lab
+            continue
+        hits = {now[u] for u in members.get(lab, set()) | {lab} if u in now}
+        out[lab] = hits.pop() if len(hits) == 1 else None
+    return out

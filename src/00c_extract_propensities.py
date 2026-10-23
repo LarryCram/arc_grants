@@ -105,10 +105,12 @@ def _load_in_scope_grant_codes() -> set[str]:
     scope reimplementation (2026-08-21) -- confirmed real here too, not just theoretical: 531 of
     1,665 award_rename_map candidate pairs had at least one side outside load_items()'s actual
     population before this fix, purely because the two scope definitions disagreed."""
-    df = pd.read_parquet(PROCESSED_DATA / "grants_flat.parquet", columns=["grant_code", "admin_org"])
+    df = pd.read_parquet(PROCESSED_DATA / "grants_flat.parquet", columns=["grant_code", "admin_org", "not_taken_up"])
     hep_admin_orgs, _, _ = _admin_orgs_canonical()
-    # grants_flat.parquet is in-scope only since 2026-09-30; the shared test is kept as a check
-    return {g for g, a in zip(df["grant_code"], df["admin_org"]) if grant_in_scope(g, a, hep_admin_orgs)}
+    # grants_flat.parquet is in-scope only since 2026-09-30; the shared test is kept as a check.
+    # Grants not taken up are out of scope (2026-10-23), as in load_items().
+    return {g for g, a, n in zip(df["grant_code"], df["admin_org"], df["not_taken_up"])
+            if grant_in_scope(g, a, hep_admin_orgs) and not n}
 
 
 def _load_institution_name_crosswalk() -> tuple[dict[str, str], set[str]]:

@@ -237,13 +237,13 @@ reject,DP0770424_yuebin_zhang,A5105839568,"grant acknowledgements test, automati
 reject,DP140100079_jian_fang,A5064705538,"grant acknowledgements test, automatic (2026-10-23)","Jian Fang: orcid_hint link A5064705538 Jian Fang (56, uni 0) has no works at the grant university; A5071977260 Jian Hua Fang (391 works, uni 51, ack 4) has them and acknowledging works"
 reject,DP150104006_jonathon_olley,A5082297682,"grant acknowledgements test, automatic (2026-10-23)","Jonathon Olley: orcid_hint link A5082297682 John W. Olley (36, uni 0) has no works at the grant university; A5109444910 Jon M. Olley (182 works, uni 91, ack 8) has them and acknowledging works"
 reject,FT140100826_xuan-ce_wang,A5049854737,"grant acknowledgements test, automatic (2026-10-23)","Xuan-Ce Wang: name link A5049854737 Xuan‐Ce Wang (11, uni 0) has no works at the grant university; A5084415616 Xuance Wang (156 works, uni 73, ack 18) has them and acknowledging works"
-link,DE120102954_kelly_smith,A5112274665,"grant-acknowledgement review, by hand (2026-10-23)",Kelly Smith: UQ/Melbourne heart development record (10 acknowledging works); her ARC ORCID sits in OpenAlex on a Rice University physicist's record
-reject,DE120102954_kelly_smith,A5066369560,"grant-acknowledgement review, by hand (2026-10-23)","K. A. Smith, Rice University atomic physics 1973-2001: OpenAlex put her ORCID on this record"
+link,DP170101217_kelly_smith,A5112274665,"grant-acknowledgement review, by hand (2026-10-23)",Kelly Smith: UQ/Melbourne heart development record (10 acknowledging works); her ARC ORCID sits in OpenAlex on a Rice University physicist's record
+reject,DP170101217_kelly_smith,A5066369560,"grant-acknowledgement review, by hand (2026-10-23)","K. A. Smith, Rice University atomic physics 1973-2001: OpenAlex put her ORCID on this record"
 link,DE220101102_zhen_jiang,A5108507353,"grant-acknowledgement review, by hand (2026-10-23)",Zhen (ZY) Jiang: Wollongong hydrogels
 reject,DE220101102_zhen_jiang,A5042810745,"grant-acknowledgement review, by hand (2026-10-23)","Zhen Jiang, West Chester computing: OpenAlex put the ARC ORCID on this record"
 link,DE250100656_james_orr,A5158188425,"grant-acknowledgement review, by hand (2026-10-23)","James A. Orr: UQ/Oxford ecology, fits the disturbance-synchrony DECRA"
 reject,DE250100656_james_orr,A5069066388,"grant-acknowledgement review, by hand (2026-10-23)","James Orr, NY Federal Reserve economist: OpenAlex put the ARC ORCID on this record"
-link,DP0346679_bernard_carroll,A5005588275,"grant-acknowledgement review, by hand (2026-10-23)","Bernard Carroll, UQ plant molecular biology (nodulation, RNAi); OpenAlex labels the record 'Brent S. Carroll'"
+link,DP0559710_bernard_carroll,A5005588275,"grant-acknowledgement review, by hand (2026-10-23)","Bernard Carroll, UQ plant molecular biology (nodulation, RNAi); OpenAlex labels the record 'Brent S. Carroll'"
 link,DP0557987_jeremy_brownlie,A5043882269,"grant-acknowledgement review, by hand (2026-10-23)",Jeremy Brownlie: Griffith/UQ Wolbachia
 reject,DP0557987_jeremy_brownlie,A5014142074,"grant-acknowledgement review, by hand (2026-10-23)","J. Brownlie, Royal Veterinary College: OpenAlex put the ARC ORCID on this record"
 link,DP0666833_alexander_brown,A5101443705,"grant-acknowledgement review, by hand (2026-10-23)","A. J. Brown, Griffith public integrity / constitutional reform (ORCID 0000-0003-2588-3826)"
@@ -277,3 +277,4 @@ link,DP190101734_amirali_ebrahimi ghadi,A5070542246,"grant-acknowledgement revie
 reject,DP140100718_james_smith,A5008529908,user 2026-10-23,"James A. B. Smith (men's health, Menzies/Flinders/CDU) is not the construction-management James Smith"
 reject,LP120100347_james_smith,A5008529908,user 2026-10-23,"James A. B. Smith (men's health, Menzies/Flinders/CDU) is not the construction-management James Smith"
 reject,DP0453258_james_smith,A5008529908,user 2026-10-23,"James A. B. Smith (men's health, Menzies/Flinders/CDU) is not the construction-management James Smith"
+reject,LP130100870_bernard_carroll,A5012154899,"hand review (user, 2026-10-23)","Bernard J. Carroll, psychiatrist (University of Michigan, Duke; Pacific Behavioral Research Foundation; ORCID 0000-0002-1976-8269): Medicine/Neuroscience/Psychology works, no UQ affiliation; the name stage linked him to the UQ plant biologist Bernard Carroll's avocado Linkage grant"

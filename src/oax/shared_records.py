@@ -112,6 +112,8 @@ def set_flags(group, facts, skip=("interleaved_universities",)) -> list[str]:
 
 def compatible(a, b, facts) -> bool:
     fa, fb = facts[a], facts[b]
+    if b in fa.get("apart", ()) or a in fb.get("apart", ()):   # a hand keep-apart pair (2026-10-23)
+        return False
     linked = bool(fa["for"] & fb["for"]) or b in fa["coinv"] or a in fb["coinv"]
     return linked and not set_flags([a, b], facts)
 

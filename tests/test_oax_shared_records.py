@@ -40,3 +40,15 @@ def test_decide_sets_ties_same_grant_and_names():
     assert [list(s) for s in sets.cluster_ids] == [["B1", "B2"]]
     r = dict(zip(left.cluster_id, left.reason))
     assert r["B3"] == "outside_the_merged_set" and r["A1"] == "no_compatible_set" and r["C1"] == "shares_a_grant"
+
+
+def test_keep_apart_pair_never_proposed():
+    facts = {"H1": _f({"Geography"}, [("DP1", 2004, frozenset())]),
+             "H2": _f({"Geography"}, [("DP2", 2005, frozenset())])}
+    links = pd.DataFrame([("H1", 9), ("H2", 9)], columns=["cluster_id", "author_idx"])
+    args = ({"H1": {"gregory"}, "H2": {"gregory"}}, {9: "Greg R. Hancock"}, {9: ["gregory_hancock"]})
+    sets, _ = decide(links, facts, *args)
+    assert len(sets) == 1
+    facts["H1"]["apart"], facts["H2"]["apart"] = {"H2"}, {"H1"}
+    sets, left = decide(links, facts, *args)
+    assert sets.empty and set(left.cluster_id) == {"H1", "H2"}
