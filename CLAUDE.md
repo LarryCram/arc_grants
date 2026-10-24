@@ -4025,10 +4025,13 @@ fields against the ARC grant fields test whether the whole record is someone els
   (`acif_works.py`, `extra=`) every work whose DOI is on the ACIF's own ORCID record and whose authorship with no
   author record has a printed name fitting the ACIF; left out: works already reached through a linked record, works
   with 2+ fitting unattributed authorships, authorships fitting 2+ ACIFs. No author_idx is minted: author_idx NULL,
-  link_status `orcid_doi_unattributed`. Dry run: 18,328 works for 3,532 ACIFs (36 unlinked). These works go through
-  the normal classification (decision pending: accept them outright?). Also fixed: `work_graph.py` registers
+  link_status `orcid_doi_unattributed`. Run: 18,332 works for 3,533 ACIFs (33 with no linked record); after the works
+  filter and version merging they classify accept 16,292 (3,173 ACIFs), reject 787, unsure 489 -- normal classification
+  (decision pending: accept them outright?). Unlinked ACIFs now with oeuvres: Tony Clarke 131 accepted, Stephen Cox 45,
+  Alwyn Williams 40, Nancy Wang 40. Also fixed: `work_graph.py` registers
   grant_inst as list<int64> (an inferred INT32 list failed on institution I4210142395).
-- Rerun (cycle converged in round 2): kept ACIFs 22,623; linked 21,749; unlinked 874 (was 923).
+- Rerun (cycle converged in round 2): kept ACIFs 22,623; linked 21,749; unlinked 874 (was 923); accepted works 2,664,738
+  (unsure 155,809, reject 104,541); no hand-file id missing from the build; Gemini verdicts: 30 carried to new labels, 70 dropped.
 - Considered, not built: an ORCID-DOI linker stage and a grant-acknowledgement linker stage (analysis/41 shows ~13
   and ~47 ACIFs each); `docs/pipeline_todo.md` 2026-10-24.
 
