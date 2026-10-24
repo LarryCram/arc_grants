@@ -139,3 +139,59 @@ def test_editions_and_duplicate_records(tmp_path):
     assert v.loc[10, "cited_by_count"] == 120 and v.loc[10, "publication_year"] == 2004   # dupe: most cited wins
     assert pd.isna(v.loc[21, "edition_year"]) and v.loc[21, "n_editions"] == 1 and v.loc[21, "publication_year"] == 2016
     assert n["split_groups"] == 1 and n["duplicate_places"] == 1
+
+
+def _orcid_record(orcid, dois):
+    return {"orcid-identifier": {"path": orcid}, "activities-summary": {"works": {"group": [
+        {"external-ids": {"external-id": [{"external-id-type": "doi", "external-id-value": d}]}} for d in dois]}}}
+
+
+def test_unattributed_authorships(tmp_path):
+    """Works on the ACIF's own ORCID record whose fitting authorship has no author record are added; works
+    reached through a linked record, works with two fitting unattributed authors, and authorships two ACIFs
+    claim are left out."""
+    from src.oeuvre.orcid_works import UNATTRIBUTED_STATUS, unattributed_authorships
+    for d in ("authorships", "works"):
+        (tmp_path / d).mkdir()
+    au = lambda w, a, n, i, c: {"work_idx": w, "author_idx": a, "author_name": n, "institution_idx": i,
+                                 "institution_name": None if i is None else f"U{i}", "ror": None, "country_code": c}
+    pd.DataFrame([
+        au(1, None, "A. R. Clarke", 7, "AU"), au(1, None, "A. R. Clarke", 8, "AU"),   # two institutions, one authorship
+        au(1, 30, "Jo Bloggs", 9, "AU"),                                              # a co-author with a record
+        au(2, 10, "Anthony Clarke", 7, "AU"), au(2, None, "Tony Clarke", 7, "AU"),    # already reached via record 10
+        au(3, None, "Anthony Clarke", 7, "AU"), au(3, None, "Andrew Clarke", 7, "AU"),  # two fitting unattributed
+        au(4, None, "Mary Smith", 7, "AU"),                                           # name does not fit
+        au(5, None, "J. Lee", 7, "AU"),                                               # claimed by two ACIFs
+    ]).to_parquet(tmp_path / "authorships" / "p.parquet")
+    pd.DataFrame([{"work_idx": w, "doi": f"10.1/W{w}"} for w in range(1, 6)]).to_parquet(tmp_path / "works" / "p.parquet")
+    acifs = pd.DataFrame([
+        {"cluster_id": "C1", "orcids": ["0000-0001"], "full_name_keys": ["anthony_clarke", "a_clarke", "andrew_clarke"]},
+        {"cluster_id": "C2", "orcids": ["0000-0002"], "full_name_keys": ["jane_lee", "j_lee"]},
+        {"cluster_id": "C3", "orcids": ["0000-0003"], "full_name_keys": ["james_lee", "j_lee"]},
+    ])
+    cache = {"0000-0001": _orcid_record("0000-0001", ["10.1/w1", "10.1/w2", "10.1/w3", "10.1/w4"]),
+             "0000-0002": _orcid_record("0000-0002", ["10.1/w5"]), "0000-0003": _orcid_record("0000-0003", ["10.1/w5"])}
+    links = pd.DataFrame([{"cluster_id": "C1", "author_idx": 10}])
+    x, counts = unattributed_authorships(connect(), acifs, links, cache=cache,
+                                         authorships=tmp_path / "authorships", works=tmp_path / "works")
+    assert sorted(set(zip(x.cluster_id, x.work_idx))) == [("C1", 1)]
+    assert len(x) == 2 and x.author_idx.isna().all() and set(x.link_status) == {UNATTRIBUTED_STATUS}
+    assert counts["works_added"] == 1 and counts["works_two_fitting_authorships"] == 1
+    assert counts["authorships_fitting_two_acifs"] == 1 and counts["works_already_reached"] == 1
+
+    # step 1 takes them in with author_idx NULL beside the linked record's works
+    (tmp_path / "topics").mkdir()
+    pd.DataFrame([{"work_idx": 1, "topic_idx": 1, "score": 1.0, "subfield_idx": 1, "subfield_name": "Ecology",
+                   "field_idx": 1, "field_name": "Agri", "domain_idx": 1, "domain_name": "D"}]).to_parquet(tmp_path / "topics" / "p.parquet")
+    wk = pd.read_parquet(tmp_path / "works" / "p.parquet")
+    wk.assign(title="t", authors_count=2, institutions_distinct_count=1, publication_year=2010, referenced_works_count=0,
+              cited_by_count=1, type="article", is_retracted=False, is_paratext=False, volume=None, issue=None,
+              first_page=None, last_page=None, source_id=5, host=None).to_parquet(tmp_path / "works" / "p.parquet")
+    out = tmp_path / "aw.parquet"
+    build_acif_works(pd.DataFrame([{"cluster_id": "C1", "author_idx": 10, "status": "accept_name_key"}]), out, connect(),
+                     authorships=tmp_path / "authorships", works=tmp_path / "works", topics=tmp_path / "topics", extra=x)
+    w = pd.read_parquet(out).set_index(["cluster_id", "work_idx"])
+    assert sorted(w.index) == [("C1", 1), ("C1", 2)]
+    a = w.loc[("C1", 1), "authorships"]
+    assert len(a) == 1 and a[0]["author_idx"] is None and a[0]["link_status"] == UNATTRIBUTED_STATUS
+    assert a[0]["printed_name"] == "A. R. Clarke" and len(a[0]["institutions"]) == 2

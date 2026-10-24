@@ -29,6 +29,7 @@ anchors or size decided. Works outside the core are not rejected here: they go t
 from __future__ import annotations
 
 import pandas as pd
+import pyarrow as pa
 
 from config.settings import ACIFS_ARC, OAX_LINK_DIR, OPENALEX_COMPACT_DIR, OPENALEX_DIR
 
@@ -55,7 +56,11 @@ def build_work_graph(con, works_path, out_path, acifs: pd.DataFrame, coinv: pd.D
                      authorships=OPENALEX_COMPACT_DIR / "authorships", sources=OPENALEX_DIR / "sources.parquet",
                      max_iter: int = 100) -> dict:
     """Write one row per (ACIF, work) with its component, links, anchors and core flag; returns counts."""
-    con.register("acif_in", acifs)
+    # grant_inst as list<int64> explicitly: inferred from the values, a list column can come out INT32 and
+    # fail on a larger OpenAlex institution id (I4210142395, 2026-10-24)
+    con.register("acif_in", pa.table({"cluster_id": acifs.cluster_id.astype(str), "first_year": acifs.first_year,
+                                      "last_year": acifs.last_year,
+                                      "grant_inst": pa.array([list(x) for x in acifs.grant_inst], type=pa.list_(pa.int64()))}))
     con.register("coinv_in", coinv)
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE gw AS

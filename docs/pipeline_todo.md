@@ -1,6 +1,22 @@
 # Full TODO list — ARC Grants → OpenAlex pipeline
 
-## 2026-10-23 update — read this first
+## 2026-10-24 update — read this first
+
+Done (CLAUDE.md "2026-10-24 (later)"): linkage challenge (analysis/39) and four batches of hand review; unlinked review
+(analysis/41) with 54 hand links; unattributed works in oeuvre step 1 (item 5 below of 2026-10-23, the ORCID-DOI part).
+Open:
+1. **Accept unattributed ORCID-listed works outright?** They now go through normal classification (user to decide).
+2. **ORCID-DOI linker stage**: an unlinked ACIF whose ORCID record's DOIs mostly sit on one free OpenAlex record (~13
+   ACIFs; refuse records taken by another ACIF or carrying another ORCID, as the Scopus bridge does). Calibrate on
+   ORCID-linked ACIFs first.
+3. **Grant-acknowledgement linker stage** (2026-10-23 item 2): ~47 unlinked ACIFs with one clear record (2+ works).
+4. Unattributed works for people with NO ORCID (~327 unlinked ACIFs with only name matches): need an anchor
+   (acknowledging work, co-investigator, grant university).
+5. Doubtful cases left: mixed records (Mark Moran, Carol Warren, Eduardo Nebot, Christopher Goodman, Sarah Piper,
+   Danielle Holmes, Dean Miller, Julia Stone, Maxwell Smith, Jennifer Robinson), Timothy Fisher, Peter Howard (2009 ACU
+   LP may be another person), Liz Atkins, Suman Mukhopadhyay.
+
+## 2026-10-23 update
 
 Done today (CLAUDE.md "2026-10-23"): grants not taken up out of scope; Scopus bridge initial-first form;
 linker stage 6 (rare family names); record-keyed hand links (`manual_links.csv`, link / unlink / reject);
@@ -48,6 +64,10 @@ test and its 131 disagreements resolved. Open:
    Steps, one at a time: (1) OpenAlex citation baselines per field x publication year x age, and the check of
    c/(age+1) against c10 on papers old enough -- DONE 2026-10-23 (00h, analysis/37; CLAUDE.md); (2) γ per ACIF; (3) population fit (μ, Σ) and Q; (4) ECR
    fellowships at announcement: γ, c-proxy, Q then vs later; (5) dossier section.
+
+10. **nameparser post-nominal words that are surnames** (CLAUDE.md 2026-10-24): examined, no harm to links found;
+   left as they are (user decision). Revisit only if printed bylines are ever parsed to decide works --
+   `analysis/39_challenge_links.py`'s works test already shows the false flags ("Y. W. Mai").
 
 ## 2026-10-22 update
 

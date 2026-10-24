@@ -41,13 +41,13 @@ from src.oeuvre import classify as cls
 from src.oeuvre.acif_works import DOMINANT_SHARE, LINKS, accepted_links, build_acif_works, connect
 from src.oeuvre.citations import work_citations_by_year
 from src.oeuvre.gemini import load_verdicts
-from src.oeuvre.orcid_works import claimed_dois
+from src.oeuvre.orcid_works import claimed_dois, unattributed_authorships
 from src.oeuvre.scopus_check import trusted_profile_dois
 from src.oeuvre.versions import MAX_TITLE_WORKS, reduce_versions
 from src.oeuvre.work_filter import KEEP_TYPES, filter_works
 from src.oeuvre.work_graph import HYPER_AUTHORS, VENUE_MAX_WORKS, acif_inputs, build_work_graph
 
-def acif_works_section(con, path, links: pd.DataFrame, seconds: float) -> list[str]:
+def acif_works_section(con, path, links: pd.DataFrame, seconds: float, ucounts: dict | None = None) -> list[str]:
     acc = accepted_links(links)
     con.execute(f"CREATE OR REPLACE TEMP VIEW aw AS SELECT * FROM read_parquet('{path}')")
     one = lambda q: con.execute(q).fetchone()
@@ -77,6 +77,12 @@ def acif_works_section(con, path, links: pd.DataFrame, seconds: float) -> list[s
          f"- built in {seconds:,.0f} s from {acc.cluster_id.nunique():,} ACIFs' {acc.author_idx.nunique():,} accepted "
          f"OpenAlex authors",
          f"- rows (ACIF, work): {n_rows:,}; ACIFs with works: {n_acif:,}; distinct works: {n_work:,}",
+         f"- unattributed works (author_idx NULL) added through the ACIF's own ORCID record's DOIs: "
+         f"{(ucounts or {}).get('works_added', 0):,} works for {(ucounts or {}).get('acifs_added', 0):,} ACIFs "
+         f"({(ucounts or {}).get('acifs_added_unlinked', 0):,} with no linked record); left out: works with 2+ "
+         f"fitting unattributed authorships {(ucounts or {}).get('works_two_fitting_authorships', 0):,}, authorships "
+         f"fitting 2+ ACIFs {(ucounts or {}).get('authorships_fitting_two_acifs', 0):,} "
+         f"(src/oeuvre/orcid_works.py)",
          f"- works reached through 2+ of the same ACIF's authors: {multi_author:,}; "
          f"works held by 2+ ACIFs: {shared:,}",
          "- works per ACIF: " + ", ".join(f"p{q}: {per_acif.quantile(q / 100):,.0f}" for q in (10, 50, 90, 99))
@@ -341,7 +347,9 @@ def main():
         return
     links = pd.read_parquet(LINKS)
     t = time.time()
-    n_in = build_acif_works(links, OEUVRE_DIR / "acif_works.parquet", con)
+    kept_acifs = pd.read_parquet(ACIFS_ARC, columns=["cluster_id", "orcids", "full_name_keys", "excluded"])
+    extra, ucounts = unattributed_authorships(con, kept_acifs[~kept_acifs.excluded], accepted_links(links))
+    n_in = build_acif_works(links, OEUVRE_DIR / "acif_works.parquet", con, extra=extra)
     secs = time.time() - t
     kept, dropped = filter_works(con, OEUVRE_DIR / "acif_works.parquet", OEUVRE_DIR / "acif_works_kept.parquet",
                                  OEUVRE_DIR / "work_drops.parquet")
@@ -349,7 +357,7 @@ def main():
     acifs, coinv = acif_inputs()
     gcounts = build_work_graph(con, OEUVRE_DIR / "acif_works_single.parquet", OEUVRE_DIR / "acif_work_graph.parquet",
                                acifs, coinv)
-    text = "\n".join(["# Oeuvres", ""] + acif_works_section(con, OEUVRE_DIR / "acif_works.parquet", links, secs)
+    text = "\n".join(["# Oeuvres", ""] + acif_works_section(con, OEUVRE_DIR / "acif_works.parquet", links, secs, ucounts)
                      + filter_section(con, n_in, kept, dropped) + versions_section(con, counts)
                      + graph_section(con, gcounts) + step5(con) + step6(con))
     (OEUVRE_DIR / "report.md").write_text(text, encoding="utf-8")

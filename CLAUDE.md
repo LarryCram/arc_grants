@@ -92,7 +92,9 @@ src/03_build_oeuvres.py + src/oeuvre/ → the oeuvre extractor (2026-10-07), on 
                                   for 'fits core' accepts and unjudged works -- Scopus replaced paid
                                   Gemini 2026-10-08), then step 6, acif_work_citations.parquet
                                   (citations each work received per year, from OpenAlex reference
-                                  lists, 2026-10-09) → processed/oeuvre/
+                                  lists, 2026-10-09); since 2026-10-24 step 1 also takes unattributed works
+                                  (authorships with no author record, on the person's own ORCID list;
+                                  src/oeuvre/orcid_works.py) → processed/oeuvre/
 src/03a_gemini_judge.py         → sends step 5's Gemini requests within a budget (GEMINI_API_KEY in
                                   .env); answers saved once in processed/oeuvre/gemini_verdicts.jsonl
 analysis/23_dossier.py + analysis/utils/dossier*.py → per-person dossier (2026-10-09): profile, ARC
@@ -3966,6 +3968,69 @@ fields against the ARC grant fields test whether the whole record is someone els
   / 0.92 / 0.97 at k = 1/2/3/5; person-level <log c> r = 0.84 / 0.91 / 0.95 / 0.98 (16,649 ACIFs), the proxy
   reading +0.08 to +0.14 high in log. Fractional / full citation totals range 0.27 (Immunology) to 0.83
   (Arts and Humanities). Next: step 2 (γ).
+
+## 2026-10-24: nameparser post-nominal words that are surnames -- examined, left as they are (decision)
+
+- **Problem.** nameparser's post-nominal list (623 words + the project's Australian award letters in
+  `src/utils/names.py`) is applied case-blind to the last word of a 3+ word name, so real surnames on the list
+  lose their place: "Y. W. Mai" -> family "w.", "Wei Jun Ma" -> family "jun", "Hong Ki Do", "Rajesh Kumar Rai".
+  Found through Yiu-Wing Mai's false flags in `analysis/39_challenge_links.py`. Also: an accented "Júnior" is
+  not recognised (the list is checked before accents are stripped).
+- **Audit** (`analysis/40_postnominal_audit.py` -> `processed/postnominal_audit.md/.csv`; all 101M OpenAlex
+  display names + HEP-context bylines): of 635 words, 86 are used only as family names (Ma, Do, Chi, Si, Mai,
+  Rai, Che, Cha, Caro, Abd, Obi, Cas, Pla, ...), 36 both ways (a name in title case, a post-nominal in capitals:
+  Ao/AO, Am/AM, Ac/AC, Ak/AK, Mbe/MBE, Mba/MBA, Md/MD), 22 are run-together initials ("Wang Jp"), 19 are used as
+  post-nominals (Jr, Junior, Sr, II-IV, PhD, FRS, OAM, MPH, ...), 469 not seen. Position tests can't tell a
+  carelessly cased degree from a name: "Phd" in title case (~550 display names) is never a surname.
+- **Effect on ARC: none that matters.** ARC names go to the parser as "Family, First", so a surname alone in its
+  field is always kept (Ma 45, Do 16, Mai 13, ... records). Of 62,779 in-scope records, 74 lose real post-nominals
+  correctly (AO, AM, FAA, AC, OAM, FTSE, OL -- all in capitals), 1 loses a name word (LP140101008 Ann Chi Yan
+  Wong: "Chi"), 1 loses "Junior" (LP190101083 Paulo Antonio de Souza Junior -- right: his bylines mostly omit it).
+  Both are linked correctly by ORCID; the missing `chi_wong` key changes nothing (`processed/arc_postnominal_words.csv`).
+- **Effect on OpenAlex:** 1,231 of 6,150 pool authors whose display name ends in Ma/Do/Chi/Si/Mai/Rai/Che/Pla/
+  Cas/Ams get another family name, but a record's keys are the union of all its name forms, and all 31 kept
+  ACIFs with these surnames are linked (36 of their 42 links by ORCID). No wrong or missed link found.
+- **Decision (user): leave the parser and the ARC names as they are.** A proposed fix (keep ~67 post-nominal
+  words; capitals-only for words that are also names; degrees and generational words in any case) is recorded
+  in the audit report if the question returns -- e.g. if byline parsing is ever used to decide works.
+
+## 2026-10-24 (later): linkage challenge, hand review, unlinked review, unattributed works
+
+- **Challenge** (`analysis/39_challenge_links.py` -> `processed/linkage_challenges.md` + one CSV per test): five read-only
+  tests (grants, ARC names, OpenAlex names, records, works). Grants test now lists free same-name records with Australian
+  works in the grant years (an earlier-career fragment the linker missed -- user: Yabsley's record is right, his early
+  papers sit elsewhere); a grant so explained ranks lower. ARC-names test no longer flags pairs tied by a hand merge, the
+  same ARC ORCID, both forms on one record (ARC itself joined them), or weak nickname/initials pairs in the nicknames list
+  or sharing a university or co-investigator: the 9 flagged pairs were all one person (van Schaik, Bland-Hawthorn,
+  Jayasuriya, Pham, Nurcombe, Frost, Guilhaus, Smith-Merry, Colin/Andrew Bell).
+- **Hand review of the challenge** (four batches; rows cite "linkage challenge review"): about 110 `manual_links.csv`
+  reject/link rows -- mostly OpenAlex records carrying the person's ORCID but holding another person's works (Ian McLean
+  -> a UCLA astronomer, Rafferty -> an astrophysicist, Stieglitz -> a Freiburg neural engineer, Paul Thomas -> a JET
+  physicist), wrong name/hint/bridge picks (John Stevenson -> a BGS geologist, Caroline Turner, John Roberts = J. Dale
+  Roberts), and earlier-career fragments added (Sally Cripps as Sally Ann Wood, Hoogenraad, Paterson, Danaher,
+  Vallmuur, Brooke); two old hand links replaced (Stuart Thomson, Colin Ramsay); Ryan Johnson rejected (mixed record,
+  user); 13 blocklist rows for wrong bulk/Scopus ORCIDs (Peter Bell, Selina Ward, Hong Zhang, Michael Lee, Wei Wen Wong,
+  Xiao Dong Chen, David Kennedy); hand ORCIDs (Peter R. F. Bell, Hong Zhang, Bill Harley, David L. Vaux, Jon Osborn, Wei
+  Wen Wong, Xiao Dong Chen); `reject_scopus` rows (O'Donnell, Vaux, Anthony Clarke LP0453910 -- nulling his wrong ARC
+  ORCID had let Scopus give him the QUT entomologist's); keep-apart pairs (Bradley Evans, Zoe Wang); hand merge (Michael
+  S. Y. Lee); `add` row joining "Jon Osborne"/"Jonathan Osborn" on LP0347167 (user: UTas staff page).
+- **Unlinked review** (`analysis/41_unlinked_opportunities.py` -> `processed/unlinked_opportunities.md`): unused evidence
+  per unlinked ACIF -- grant-acknowledging works, works on the person's ORCID record by DOI, unattributed Australian
+  authorships. 54 hand links: 24 to free records (Abdullah Al Mamun 310 of 404 ORCID DOIs on one record, Ewald Weber,
+  Penny Russell, Tony Rossi, Kate Sofronoff, Rob Saunders, ...) and 30 fragment ACIFs of people already linked (Giang
+  Nguyen 8, Michael Goddard 8, Philip Smith, Scott Brown, ...), which 02b then merged (12 sets).
+- **Unattributed works in the oeuvre** (user: "build the linking for unattributed works"): OpenAlex leaves 72M
+  authorships on no author record; whole careers sit there when OpenAlex put the person's ORCID on another record
+  (Tony Clarke QUT: 136 of 139 ORCID DOIs). `src/oeuvre/orcid_works.py::unattributed_authorships()` adds to step 1
+  (`acif_works.py`, `extra=`) every work whose DOI is on the ACIF's own ORCID record and whose authorship with no
+  author record has a printed name fitting the ACIF; left out: works already reached through a linked record, works
+  with 2+ fitting unattributed authorships, authorships fitting 2+ ACIFs. No author_idx is minted: author_idx NULL,
+  link_status `orcid_doi_unattributed`. Dry run: 18,328 works for 3,532 ACIFs (36 unlinked). These works go through
+  the normal classification (decision pending: accept them outright?). Also fixed: `work_graph.py` registers
+  grant_inst as list<int64> (an inferred INT32 list failed on institution I4210142395).
+- Rerun (cycle converged in round 2): kept ACIFs 22,623; linked 21,749; unlinked 874 (was 923).
+- Considered, not built: an ORCID-DOI linker stage and a grant-acknowledgement linker stage (analysis/41 shows ~13
+  and ~47 ACIFs each); `docs/pipeline_todo.md` 2026-10-24.
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.

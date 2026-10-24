@@ -24,6 +24,10 @@ Per row:
                 / dominant_subfield only when one holds MORE than DOMINANT_SHARE (a single top topic
                 is not used: a work usually has three nearly equal topics, median top share 0.34)
 OpenAlex's authorships table holds some exact duplicate rows; they are dropped.
+
+Unattributed works (2026-10-24): `extra` adds authorship rows with no author record (author_idx NULL) that
+src/oeuvre/orcid_works.unattributed_authorships() ties to an ACIF through its own ORCID record's DOIs; in
+`authorships` they carry author_idx NULL and link_status 'orcid_doi_unattributed'.
 """
 
 from __future__ import annotations
@@ -53,15 +57,24 @@ def accepted_links(links: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_acif_works(links: pd.DataFrame, out_path, con=None, authorships=AUTHORSHIPS, works=WORKS,
-                     topics=TOPICS) -> int:
-    """Write the ACIF works set for the accepted links in `links` to `out_path`; returns rows."""
+                     topics=TOPICS, extra: pd.DataFrame | None = None) -> int:
+    """Write the ACIF works set for the accepted links in `links` (plus the unattributed authorship rows in
+    `extra`, module docstring) to `out_path`; returns rows."""
     con = con or connect()
     con.register("links", accepted_links(links))
+    con.register("extra_au", extra if extra is not None and len(extra) else pd.DataFrame(
+        {"cluster_id": pd.Series(dtype=str), "link_status": pd.Series(dtype=str), "author_idx": pd.Series(dtype="Int64"),
+         "work_idx": pd.Series(dtype="int64"), "author_name": pd.Series(dtype=str),
+         "institution_idx": pd.Series(dtype="Int64"), "institution_name": pd.Series(dtype=str),
+         "country_code": pd.Series(dtype=str)}))
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE au AS
         SELECT DISTINCT l.cluster_id, l.link_status, a.author_idx, a.work_idx, a.author_name,
                a.institution_idx, a.institution_name, a.country_code
-        FROM read_parquet('{authorships}/*.parquet') a JOIN links l USING (author_idx)""")
+        FROM read_parquet('{authorships}/*.parquet') a JOIN links l USING (author_idx)
+        UNION
+        SELECT DISTINCT cluster_id, link_status, CAST(author_idx AS BIGINT), CAST(work_idx AS BIGINT), author_name,
+               CAST(institution_idx AS BIGINT), institution_name, country_code FROM extra_au""")
     con.execute("""
         CREATE OR REPLACE TEMP TABLE per_author AS
         SELECT cluster_id, work_idx, author_idx, any_value(link_status) AS link_status,
