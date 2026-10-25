@@ -55,7 +55,11 @@ src/02_link_arc_oax.py + src/oax/ → the NEW ARC↔OpenAlex linker, built one s
                                   required above 3 same-name records; exactly one ORCID passes)
                                   then rare family names (2026-10-23, src/oax/rare_name_link.py: family
                                   name carried by <= 20 pool authors; exactly one compatible OpenAlex record,
-                                  pool or not; no field check); hand links from data_persisted/manual_links.csv
+                                  pool or not; no field check)
+                                  then ORCID works and grant acknowledgements (2026-10-25, src/oax/doi_link.py:
+                                  the record holding most works on the ACIF's ORCID list / acknowledging its
+                                  grants, with a fitting printed name; 2+ works and strictly more than the
+                                  next record); hand links from data_persisted/manual_links.csv
                                   (src/oax/manual_links.py: record-keyed link / unlink / reject rows)
                                   → processed/oax_link/ (`--calibrate` scores stage 2 on ORCID-linked ACIFs)
 src/00h_extract_citation_baselines.py → processed/citation_baselines/ (2026-10-23): OpenAlex-wide citations
@@ -4033,7 +4037,37 @@ fields against the ARC grant fields test whether the whole record is someone els
 - Rerun (cycle converged in round 2): kept ACIFs 22,623; linked 21,749; unlinked 874 (was 923); accepted works 2,664,738
   (unsure 155,809, reject 104,541); no hand-file id missing from the build; Gemini verdicts: 30 carried to new labels, 70 dropped.
 - Considered, not built: an ORCID-DOI linker stage and a grant-acknowledgement linker stage (analysis/41 shows ~13
-  and ~47 ACIFs each); `docs/pipeline_todo.md` 2026-10-24.
+  and ~47 ACIFs each); `docs/pipeline_todo.md` 2026-10-24. -- Built 2026-10-25, below.
+
+## 2026-10-25: unattributed works accepted; linker stages 7 and 8; ECR plots
+
+Decisions (user: "1 accept, 2. do it, 3. do it, 4. skip it, 5 skip them"):
+- **Unattributed ORCID-listed works accepted outright** (`src/oeuvre/classify.py`, rule `unattributed: on ORCID list`):
+  the work is on the person's own ORCID record and the byline name fits, which is stronger evidence than the graph
+  rules. 17,568 works carry the rule after the rerun.
+- **Linker stage 7 (ORCID works) and stage 8 (grant acknowledgements)**, `src/oax/doi_link.py`, run in `02` after the
+  rare-name stage on ACIFs still unlinked: per (ACIF, OpenAlex author) the number of works -- on the ACIF's ORCID record
+  by DOI (stage 7), acknowledging one of its ARC grants (stage 8, as analysis/36) -- carrying that author with a printed
+  name fitting the ACIF (`orcid_works.printed_name_fits`). The top record is accepted with 2+ works, strictly more than
+  the next, and for stage 7 20%+ of the ORCID DOIs found in OpenAlex; refused when another ACIF has the record or it
+  carries an ORCID another ACIF holds or one refused by hand. Calibration on ORCID-linked ACIFs (`--calibrate`): stage 7
+  14,433 of 14,482 picks right (99.7%), stage 8 9,147 of 9,208 (99.3%). Outputs `oax_link/orcid_doi_*`, `grant_ack_*`;
+  `analysis/38_unlinked_report.py` shows both. New links on this run: 2 (Timothy Fisher, a mixed Purdue record; Leonid
+  Petrov) and 1 (Ji Yang) -- the hand links of 2026-10-24 had already taken most of what analysis/41 found.
+- Skipped (user): unattributed works for people with no ORCID; the doubtful cases of the 2026-10-24 list.
+- **Rerun** (cycle converged in round 1): kept ACIFs 22,623; linked 21,752; unlinked **871**; accepted works 2,666,107
+  (unsure 155,330, reject 104,245); no hand-file id missing; Gemini verdicts 30 carried, 70 dropped.
+
+**ECR plots** (`analysis/42_ecr_boxplots.py` -> `processed/figures/ecr_works_citations_{boxplot,violin}[_cumulative].png`,
+`processed/ecr_person_years.parquet`): early-career fellows (DECRA 2,618, APD 1,012, APDI 285; FELLOWSHIP_TIER), works and
+citations per year from -15 to +30 years relative to the award (announcement = commencement year - 1;
+`--commencement` for the commencement year), one row of panels per ARC panel (data_persisted/for_panels_2020.csv),
+works and citations side by side. `--violin`: split violins, awards up to 2012 left, 2013 on right; citations as
+log10(1+c), works axis capped at the 99th percentile. Years after a person's last accepted work are dropped;
+`--cumulative` plots cumulative works. Citations are received per year, not cumulative. **Panel order, always (user):
+MPCE, EIC, BSB, SBE, HCA top to bottom** -- by output and by discipline cluster. Findings: the later cohort has 2-4x the
+cumulative works at award; medians at award / +10 years, up to 2012 vs 2013 on: BSB 10/46 vs 23/70.5, EIC 14/83 vs
+40/116.5, HCA 3/19 vs 13/39, MPCE 13/59 vs 25/75.5, SBE 8/40 vs 24/73.
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.

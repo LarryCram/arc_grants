@@ -27,12 +27,13 @@ from src.oax import manual_links as ml
 
 OUT = PROCESSED_DATA / "unlinked_report.md"
 STAGES = [("name", "name_decisions"), ("works", "works_decisions"), ("scopus", "scopus_decisions"),
-          ("orcid_hint", "orcid_hint_decisions"), ("rare_name", "rare_name_decisions")]
+          ("orcid_hint", "orcid_hint_decisions"), ("rare_name", "rare_name_decisions"),
+          ("orcid_doi", "orcid_doi_decisions"), ("grant_ack", "grant_ack_decisions")]
 REFUSED = {"record_name_differs", "record_linked_elsewhere", "pass_other_orcid", "record_other_orcid",
            "weak_shared_record", "several_acifs"}
 AMBIGUOUS = {"several_pass", "several_university", "several_coinvestigator", "several_profiles",
-             "several_records", "several_candidates"}
-NO_CANDIDATE = {"no_candidate", "no_orcid_candidate", "no_profile", "not_rare"}
+             "several_records", "several_candidates", "tied"}
+NO_CANDIDATE = {"no_candidate", "no_orcid_candidate", "no_profile", "not_rare", "no_evidence"}
 
 
 def table(s: pd.Series, head: str, total: int) -> list[str]:
@@ -67,6 +68,9 @@ def main():
     rec = rec[rec.cluster_id.isin(set(u.cluster_id))]
 
     for s, f in STAGES:
+        if not (OAX_LINK_DIR / f"{f}.parquet").exists():
+            u[s] = None
+            continue
         d = pd.read_parquet(OAX_LINK_DIR / f"{f}.parquet")[["cluster_id", "status"]].drop_duplicates("cluster_id")
         u = u.merge(d.rename(columns={"status": s}), on="cluster_id", how="left")
     _, unl, _, _ = ml.resolve(ml.load(), set(a.cluster_id))

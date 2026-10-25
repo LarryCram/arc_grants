@@ -66,6 +66,7 @@ from src.oax import works_link as wl
 from src.oax import orcid_hint_link as hl
 from src.oax import rare_name_link as rn
 from src.oax import manual_links as ml
+from src.oax import doi_link as dl
 from src.oax.orcid_link import (MINOR_SHARE, apply_overrides, decide, hand_acif_links, hand_record_authors, load_acifs, load_authors,
                                 load_name_evidence, load_outside_authors, load_overrides, orcid_links,
                                 shared_orcids, unmatched)
@@ -272,6 +273,28 @@ def rare_name_section(acifs, rdec, rlinks, rcal) -> list[str]:
         L.append(f"- {r.cluster_id} ({', '.join(r.full_names)}): A{r.author_idx} {r.author_name} ({r.works} works"
                  f"{', outside the pool' if not r.in_pool else ''})")
     return L + [""]
+
+
+def doi_section(acifs, odec, olinks, gdec, glinks, dcal) -> list[str]:
+    a = acifs.set_index("cluster_id")
+    L = ["## Stages 7 and 8, ORCID works and grant acknowledgements (2026-10-25)", "",
+         f"Rule: the OpenAlex record holding the most works that the ACIF's own ORCID record lists (stage 7) or that "
+         f"acknowledge one of its ARC grants (stage 8), with an authorship whose printed name fits the ACIF; at least "
+         f"{dl.MIN_WORKS} works and strictly more than the next record (stage 7 also {dl.MIN_SHARE:.0%}+ of the ORCID DOIs "
+         "found in OpenAlex); refused when linked to another ACIF or carrying an ORCID another ACIF holds or one refused "
+         "by hand (src/oax/doi_link.py).", ""]
+    for title, d, lk in (("Stage 7, ORCID works", odec, olinks), ("Stage 8, grant acknowledgements", gdec, glinks)):
+        L += [f"**{title}**: ACIFs tried {len(d):,}; linked {len(lk):,}; "
+              + ", ".join(f"{k} {v:,}" for k, v in d.status.value_counts().items()), ""]
+        for r in lk.itertuples():
+            L.append(f"- {r.cluster_id} ({', '.join(a.loc[r.cluster_id].full_names)}): A{r.author_idx}, {r.n} works "
+                     f"(next {r.n_second}; found {r.works_found})" + (f"; record ORCID {r.record_orcid}" if r.record_orcid else ""))
+        L.append("")
+    if dcal is not None:
+        L += ["Calibration on ORCID-linked ACIFs (picked record = one of their ORCID-linked records):", "",
+              f"- stage 7: accepted {dcal[0]['accepted']:,} of {dcal[0]['acifs']:,}; right {dcal[0]['right']:,}",
+              f"- stage 8: accepted {dcal[1]['accepted']:,} of {dcal[1]['acifs']:,}; right {dcal[1]['right']:,}", ""]
+    return L
 
 
 def orcid_hint_section(acifs, hev, hdec, hlinks, hcal) -> list[str]:
@@ -490,6 +513,31 @@ def main():
         kd, _kl = rn.decide(known.cluster_id, rkeys, rmain, rcounts, kc, {}, {}, {}, rare_max=rn.CALIBRATION_MAX)
         rcal = rn.calibrate(kd, acc_links[["cluster_id", "author_idx"]])
 
+    # stage 7, ORCID works, and stage 8, grant acknowledgements, for ACIFs the rare names left unlinked (2026-10-25)
+    o_ids = rdec.loc[~rdec.status.str.startswith("accept"), "cluster_id"]
+    taken.update({int(a_): c for c, a_ in zip(rlinks.cluster_id, rlinks.author_idx)})
+    held = {o: c for c, os in zip(acifs.cluster_id, acifs.orcids) for o in os}
+    dsub = pd.read_parquet(ACIFS_ARC, columns=["cluster_id", "orcids", "full_name_keys", "grant_codes"])
+    oev, ofound = dl.orcid_doi_evidence(con, dsub[dsub.cluster_id.isin(set(o_ids))], ocache)
+    odec, olinks = dl.decide(o_ids, oev, ofound, "accept_orcid_doi", taken, dl.record_orcids(con, set(oev.author_idx)),
+                             held, hctx[4], min_share=dl.MIN_SHARE)
+    g_ids = odec.loc[~odec.status.str.startswith("accept"), "cluster_id"]
+    taken.update({int(a_): c for c, a_ in zip(olinks.cluster_id, olinks.author_idx)})
+    gev, gfound = dl.grant_ack_evidence(con, dsub[dsub.cluster_id.isin(set(g_ids))])
+    gdec, glinks = dl.decide(g_ids, gev, gfound, "accept_grant_ack", taken, dl.record_orcids(con, set(gev.author_idx)),
+                             held, hctx[4])
+    dcal = None
+    if args.calibrate:
+        kd = dsub[dsub.cluster_id.isin(set(known.cluster_id))]
+        kev, kfound = dl.orcid_doi_evidence(con, kd, ocache)
+        k1, _ = dl.decide(kd.cluster_id, kev, kfound, "accept_orcid_doi", {}, dl.record_orcids(con, set(kev.author_idx)),
+                          held, {}, min_share=dl.MIN_SHARE)
+        kev2, kfound2 = dl.grant_ack_evidence(con, kd)
+        k2, _ = dl.decide(kd.cluster_id, kev2, kfound2, "accept_grant_ack", {}, dl.record_orcids(con, set(kev2.author_idx)),
+                          held, {})
+        dcal = (dl.calibrate(k1, acc_links[["cluster_id", "author_idx"]], "accept_orcid_doi"),
+                dl.calibrate(k2, acc_links[["cluster_id", "author_idx"]], "accept_grant_ack"))
+
     acc = pd.concat([
         links.loc[links.status.str.startswith("accept"), ["cluster_id", "author_idx", "status"]].assign(stage="orcid"),
         hand.assign(stage="hand"),
@@ -497,7 +545,9 @@ def main():
         wlinks[["cluster_id", "author_idx", "status"]].assign(stage="works"),
         slinks[["cluster_id", "author_idx", "status"]].assign(stage="scopus"),
         hlinks[["cluster_id", "author_idx", "status"]].assign(stage="orcid_hint"),
-        rlinks[["cluster_id", "author_idx", "status"]].assign(stage="rare_name")], ignore_index=True)
+        rlinks[["cluster_id", "author_idx", "status"]].assign(stage="rare_name"),
+        olinks[["cluster_id", "author_idx", "status"]].assign(stage="orcid_doi"),
+        glinks[["cluster_id", "author_idx", "status"]].assign(stage="grant_ack")], ignore_index=True)
     acc = acc.astype({"author_idx": "int64"})
     unlink_dropped = acc[acc.cluster_id.isin(unlinked)]        # manual_links.csv unlink rows win over every stage
     acc = acc[~acc.cluster_id.isin(unlinked)]
@@ -518,6 +568,10 @@ def main():
     hlinks.to_parquet(OAX_LINK_DIR / "orcid_hint_links.parquet", index=False)
     rdec.to_parquet(OAX_LINK_DIR / "rare_name_decisions.parquet", index=False)
     rlinks.to_parquet(OAX_LINK_DIR / "rare_name_links.parquet", index=False)
+    odec.to_parquet(OAX_LINK_DIR / "orcid_doi_decisions.parquet", index=False)
+    olinks.to_parquet(OAX_LINK_DIR / "orcid_doi_links.parquet", index=False)
+    gdec.to_parquet(OAX_LINK_DIR / "grant_ack_decisions.parquet", index=False)
+    glinks.to_parquet(OAX_LINK_DIR / "grant_ack_links.parquet", index=False)
     ev.to_parquet(OAX_LINK_DIR / "works_evidence.parquet", index=False)
     wdec.to_parquet(OAX_LINK_DIR / "works_decisions.parquet", index=False)
     wlinks.to_parquet(OAX_LINK_DIR / "works_links.parquet", index=False)
@@ -530,6 +584,7 @@ def main():
                      + scopus_section(acifs, sev, sdec, slinks, scal)
                      + orcid_hint_section(acifs, hev, hdec, hlinks, hcal)
                      + rare_name_section(acifs, rdec, rlinks, rcal)
+                     + doi_section(acifs, odec, olinks, gdec, glinks, dcal)
                      + ["## Hand links from manual_links.csv", "",
                         f"- link rows applied: {len(mlinks):,}; unlink rows applied: {len(unlinked):,} "
                         f"(links they removed from other stages: {len(unlink_dropped):,}); reject rows: {len(mrejected):,} "

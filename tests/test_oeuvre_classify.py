@@ -17,7 +17,7 @@ def test_rules_requests_and_verdicts(tmp_path):
                   "component_anchored": anchored, "in_core": core})
         w.append({"cluster_id": "C1", "work_idx": wi, "publication_year": y, "fields": [{"name": field, "share": 1.0}],
                   "title": f"t{wi}", "type": "article", "source_id": None, "authors_count": 2, "cited_by_count": 0,
-                  "authorships": [], "doi": None})
+                  "authorships": [{"author_idx": 1, "link_status": "accept_name_key", "printed_name": "X"}], "doi": None})
     for i, y in enumerate(range(2000, 2011, 2), 1):                  # core 1-6, field A, 2000-2010
         add(i, 1, 6, 3, True, y, "A")
     add(7, 7, 1, 1, False, 2005, "Z")                               # anchored component
@@ -36,6 +36,8 @@ def test_rules_requests_and_verdicts(tmp_path):
     add(40, 40, 1, 0, False, 2006, "A"); add(41, 41, 1, 0, False, 2006, "A")   # fits core, absent from Scopus
     add(50, 1, 6, 3, True, 2012, "A"); add(51, 1, 6, 3, True, 2012, "A")  # Oct26 reference entries, 2 authors, no DOI
     add(52, 1, 6, 3, True, 2012, "A")                               # a reference entry alone in its book
+    add(60, 60, 1, 0, False, 2030, "C")                             # unattributed, on the ORCID list -> accept
+    w[-1]["authorships"] = [{"author_idx": None, "link_status": "orcid_doi_unattributed", "printed_name": "X"}]
     for x in w:
         if x["work_idx"] in (19, 40, 41):
             x.update(doi=f"10.1/W{x['work_idx']}")
@@ -70,6 +72,7 @@ def test_rules_requests_and_verdicts(tmp_path):
     assert [r[i] for i in (34, 35)] == ["reference work: one per book", "reference work: collapsed"]
     assert [r[i] for i in (50, 51, 52)] == ["reference work: one per book", "reference work: collapsed",
                                              "reference work: one per book"]
+    assert r[60] == cls.UNATTRIBUTED_RULE
     req = cls.requests_table(con).set_index("kind")
     assert list(req.loc["component", "work_idxs"]) == [14, 15, 16, 17, 18]
     assert list(req.loc["works", "work_idxs"]) == [20, 21]
@@ -83,6 +86,7 @@ def test_rules_requests_and_verdicts(tmp_path):
     assert k.loc[14, "decision"] == "accept" and k.loc[14, "decided_by"] == "gemini"
     assert k.loc[20, "decision"] == "reject" and k.loc[21, "decision"] == "unsure"
     assert k.loc[9, "decision"] == "reject" and k.loc[1, "decided_by"] == "rule"
+    assert k.loc[60, "decision"] == "accept" and k.loc[60, "decided_by"] == "rule"
     # fits core, decided from the trusted Scopus profile
     assert k.loc[19, "decision"] == "accept" and k.loc[19, "decided_by"] == "scopus" and k.loc[19, "on_scopus_profile"]
     assert k.loc[40, "decision"] == "reject" and k.loc[41, "decision"] == "unsure"

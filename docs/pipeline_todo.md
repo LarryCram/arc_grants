@@ -1,6 +1,13 @@
 # Full TODO list — ARC Grants → OpenAlex pipeline
 
-## 2026-10-24 update — read this first
+## 2026-10-25 update — read this first
+
+Items 1-3 of 2026-10-24 done (CLAUDE.md "2026-10-25"): unattributed ORCID-listed works accepted outright; linker
+stages 7 (ORCID works) and 8 (grant acknowledgements) built, calibrated 99.7% / 99.3%, 3 new links; unlinked 871.
+Items 4 and 5 skipped (user). New: `analysis/42_ecr_boxplots.py` (ECR works/citations by year from award, by panel;
+panel order always MPCE, EIC, BSB, SBE, HCA). Next: Sinatra step 2 (γ) -- 2026-10-23 item 9.
+
+## 2026-10-24 update
 
 Done (CLAUDE.md "2026-10-24 (later)"): linkage challenge (analysis/39) and four batches of hand review; unlinked review
 (analysis/41) with 54 hand links; unattributed works in oeuvre step 1 (item 5 below of 2026-10-23, the ORCID-DOI part).

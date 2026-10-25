@@ -18,6 +18,10 @@ else its source.
                                             necessarily the person's entry)
   reject  'reference work: collapsed'      the other entries of that book
 
+Unattributed works first of all (2026-10-25, user: accept): a work step 1 took in through an authorship with no
+author record, on the person's own ORCID list (src/oeuvre/orcid_works.py), is accepted outright:
+  accept  'unattributed: on ORCID list'
+
 Then, in order (the core and components come from step 4, acif_work_graph.parquet):
   accept  'core'                works in the ACIF's anchored core
   accept  'anchored component'  another component holding an anchored work
@@ -56,6 +60,9 @@ from collections import Counter
 import pandas as pd
 
 from config.settings import OPENALEX_COMPACT_DIR, OPENALEX_DIR
+from src.oeuvre.orcid_works import UNATTRIBUTED_STATUS
+
+UNATTRIBUTED_RULE = "unattributed: on ORCID list"
 
 PRE_CAREER = 15
 FIT_PAD = 5
@@ -191,13 +198,17 @@ def _rules(con, works_path, graph_path) -> None:
                  ELSE 'works' END AS rule
         FROM cw LEFT JOIN core_stats s USING (cluster_id) LEFT JOIN comp_stats c USING (cluster_id, component)
         LEFT JOIN core_fields f ON f.cluster_id = cw.cluster_id AND f.top_field = cw.top_field""")
-    con.execute("""
+    con.execute(f"""
         CREATE OR REPLACE TEMP TABLE cls AS
         SELECT c.cluster_id, c.work_idx, c.component,
-               CASE WHEN ref.ref_rule IS NULL THEN c.rule_decision
+               CASE WHEN u.work_idx IS NOT NULL THEN 'accept'
+                    WHEN ref.ref_rule IS NULL THEN c.rule_decision
                     WHEN ref.ref_rule = 'reference work: collapsed' THEN 'reject' ELSE 'accept' END AS rule_decision,
-               coalesce(ref.ref_rule, c.rule) AS rule
-        FROM cls0 c LEFT JOIN ref USING (cluster_id, work_idx)""")
+               CASE WHEN u.work_idx IS NOT NULL THEN '{UNATTRIBUTED_RULE}' ELSE coalesce(ref.ref_rule, c.rule) END AS rule
+        FROM cls0 c LEFT JOIN ref USING (cluster_id, work_idx)
+        LEFT JOIN (SELECT cluster_id, work_idx FROM cw
+                   WHERE list_contains([x.link_status FOR x IN authorships], '{UNATTRIBUTED_STATUS}')) u
+               USING (cluster_id, work_idx)""")
 
 
 def _request_key(kind: str, cluster_id: str, items: list[int]) -> str:
