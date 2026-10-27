@@ -5,8 +5,8 @@
 Done (CLAUDE.md "2026-10-27"): AREA5 replaces ARC panels in the fellowship plots (mid-career and senior added); Trove
 thesis harvest (00i) and matching (analysis/43, ~91% right, recall 66%); hand PhD file `data_persisted/manual_phd.csv`;
 1970 placeholder guard (src/oeuvre/year_fix.py). Open:
-1. **Rerun the cycle and 03** (user's go): applies the Kim and Eklund hand links and the 1970 guard; then rerun
-   analysis/42 (plots) and analysis/43.
+1. ~~Rerun the cycle and 03~~ -- done 2026-10-27; PhD per ACIF built (analysis/44, acif_phd.parquet). Open: the 490
+   year conflicts between PhD sources; the australian_probable group (early share 1) holds overseas PhDs like Aubert.
 2. **Works by ORCID DOI from refused (mixed) records** -- Takashi Kubota's ATLAS works sit on the refused "T. Kubota"
    record; extend src/oeuvre/orcid_works.py beyond unattributed authorships.
 3. **Linker misses for people using their middle name or another romanisation** (Dag -> D. Magnus Eklund, Hansik ->

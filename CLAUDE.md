@@ -4145,7 +4145,17 @@ refused records -- not built); Greenhalgh's and Verma-Gaur's early works are all
 works dated 1970 against 854,000 / 926,000 in 1969 / 1971 (Unix time zero; also 1900, 1800, 1500 and future years).
 `src/oeuvre/year_fix.py`, step 2b of 03: a kept work dated 1970 takes the ACIF's ORCID-record year for its DOI, else a
 Scopus year, else NULL when its source has no other work before 1976; `publication_year_oax` keeps OpenAlex's year.
-1,086 accepted rows were dated 1970 before. Built and tested (2 tests); **03 not yet rerun with it** (user's go).
+1,086 accepted rows were dated 1970 before. Built and tested (2 tests).
+
+**Rerun the same day (user: "OK")**: 02 (Kim and Eklund linked; linked ACIFs 21,753, unlinked 870), 02b (no new merge;
+kept ACIFs 22,623), 03 (1970 rows: 1,698 kept -- ORCID year 48, Scopus 1, unknown 245, left 1,404; Matt Allen's 2010
+paper now has no year: neither his ORCID record nor Scopus gives one; accepted works 2,666,177), analysis/43, the plots.
+**PhD per ACIF**: `analysis/44_acif_phd.py` -> `processed/trove_theses/acif_phd.parquet` / `acif_phd.md`: the first
+source with the fact -- hand (confirmed), ORCID, Trove, OpenAlex dissertation, hand (probable), then the early share
+(0 -> overseas_probable, 1 -> australian_probable; country only). phd_year is None unless a source gives it (user: no
+estimate). All ACIFs: australian 45%, overseas 12%, australian_probable 16%, overseas_probable 14%, unknown 13%; year
+known 58% (CI 53%, ECR 75%, MCR 66%, SR 46%). PhD year minus first fellowship announcement: ECR median -4 (10-90%: -6..0),
+MCR -9, SR -20. 490 ACIFs have dated sources more than a year apart (year_conflict; the first source wins).
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.

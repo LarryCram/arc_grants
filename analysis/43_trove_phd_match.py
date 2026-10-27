@@ -156,10 +156,11 @@ def orcid_phd(orcids, cache):
                 e = s.get("education-summary") or {}
                 end = ((e.get("end-date") or {}).get("year") or {}).get("value")
                 if PHD.search(e.get("role-title") or "") and end:
-                    ys.append((int(end), ((e.get("organization") or {}).get("address") or {}).get("country")))
+                    org = e.get("organization") or {}
+                    ys.append((int(end), (org.get("address") or {}).get("country"), org.get("name")))
         if ys:
             return min(ys)
-    return (None, None)
+    return (None, None, None)
 
 
 def own_work_heps(names: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
@@ -282,12 +283,13 @@ def acifs() -> pd.DataFrame:
     a["first_fellow_tier"] = a.cluster_id.map(first.tier)
     a["group"] = a.first_fellow_tier.fillna("CI only")
     hand = manual_phd(rec)
-    for c in ["status", "abroad", "university", "country", "year"]:
+    for c in ["status", "abroad", "university", "country", "year", "thesis_title", "source"]:
         a[f"hand_phd_{c}"] = a.cluster_id.map(hand[c])
     cache = diskcache.Cache(str(DISKCACHE_DIR / "orcid_records_authenticated"))
     op = a.orcids.map(lambda o: orcid_phd(o, cache))
     a["orcid_phd_year"] = op.map(lambda x: x[0])
     a["orcid_phd_country"] = op.map(lambda x: x[1])
+    a["orcid_phd_org"] = op.map(lambda x: x[2])
     a["orcid_thesis_titles"] = a.orcids.map(lambda o: orcid_thesis_titles(o, cache))
     return a
 
