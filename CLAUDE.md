@@ -65,6 +65,10 @@ src/02_link_arc_oax.py + src/oax/ → the NEW ARC↔OpenAlex linker, built one s
 src/00h_extract_citation_baselines.py → processed/citation_baselines/ (2026-10-23): OpenAlex-wide citations
                                   received at each paper age per field x publication year (full and fractional
                                   counts) -- the normalisers for the Sinatra et al. 2016 author features
+src/00i_extract_trove_theses.py → processed/trove_theses/ (2026-10-27): every Australian-content thesis Trove holds
+                                  (API v3, category research, l-format Thesis, by decade), whole work records with
+                                  every version's Dublin Core in a diskcache (DISKCACHE_DIR/trove_theses; trove_token
+                                  in .env); matched to ACIFs by analysis/43_trove_phd_match.py (not a pipeline stage)
 src/00g_extract_orcid_hints.py  → live ORCID /records for the hint candidates of ACIFs the last linker run
                                   left unlinked (into the ORCID record cache, marked _fetched_live); run
                                   after 02, then rerun 02 (as 00f --targets unlinked)
@@ -81,7 +85,9 @@ src/03_build_oeuvres.py + src/oeuvre/ → the oeuvre extractor (2026-10-07), on 
                                   field/subfield shares), then step 2, acif_works_kept.parquet
                                   (drops paratext, retracted, types other than article/preprint/
                                   book/book-chapter/review/report/dissertation, and works where the
-                                  ACIF's own authorship has no institution and no DOI), then step 3,
+                                  ACIF's own authorship has no institution and no DOI; since 2026-10-27
+                                  step 2b, src/oeuvre/year_fix.py, corrects OpenAlex's 1970 placeholder year
+                                  from the ORCID record or Scopus -- not yet run), then step 3,
                                   acif_works_single.parquet (versions sharing a DOI or a usable
                                   normalised title reduced to the version of record; publication_year
                                   = earliest version; updated editions -- same source or book chapters
@@ -125,6 +131,8 @@ resting tools, not updated; some import archived modules and will not run as the
   affiliation id (EID) per university, 'Variants' = university name variants),
   `manual_splits_by_grant.csv`, `manual_confirmed_not_suspicious.csv`,
   `enrichment_blocklist.csv`,
+  `manual_phd.csv` (PhD findings by hand, keyed on an ARC record id, read by analysis/43, 2026-10-27),
+  `trove_source_hep.csv` (Trove repository code -> ARC HEP, user-confirmed, 2026-10-27),
   `for_concordance.csv`, `for_divisions.csv`, `for_adjacent_divisions.csv`) plus the ANZSRC/Scopus/OpenAlex/ERA source
   `.xlsx` reference files. Previously split across `config/*.csv` (some git-tracked but
   unlabelled as precious) and `data/*.xlsx` (entirely gitignored, i.e. genuinely unrecoverable
@@ -4064,10 +4072,80 @@ citations per year from -15 to +30 years relative to the award (announcement = c
 `--commencement` for the commencement year), one row of panels per ARC panel (data_persisted/for_panels_2020.csv),
 works and citations side by side. `--violin`: split violins, awards up to 2012 left, 2013 on right; citations as
 log10(1+c), works axis capped at the 99th percentile. Years after a person's last accepted work are dropped;
-`--cumulative` plots cumulative works. Citations are received per year, not cumulative. **Panel order, always (user):
-MPCE, EIC, BSB, SBE, HCA top to bottom** -- by output and by discipline cluster. Findings: the later cohort has 2-4x the
+`--cumulative` plots cumulative works. Citations are received per year, not cumulative. Panel order (user): MPCE,
+EIC, BSB, SBE, HCA top to bottom -- by output and by discipline cluster. Findings: the later cohort has 2-4x the
 cumulative works at award; medians at award / +10 years, up to 2012 vs 2013 on: BSB 10/46 vs 23/70.5, EIC 14/83 vs
 40/116.5, HCA 3/19 vs 13/39, MPCE 13/59 vs 25/75.5, SBE 8/40 vs 24/73.
+
+**2026-10-26: AREA5 replaces the ARC panels in the ECR plots** (user: AREA5 "is the coarse clustering that brings
+considerable similarity"). Note on the panels: `data_persisted/for_panels_2020.csv` maps FOR2020 groups/divisions to
+the **current ARC advisory committees** (BSB, EIC, HCA, MPCE, SBE; user) -- its source was not recorded when it was
+added on 2026-08-09; it still serves `analysis/07_analyse_ecr_fellowships.py`. **AREA5** is in `research_classification`
+(`Resolver().resolve(code, 'FOR2020', 'FOR2020_AREA5')`, from the user's division-level table `FoR_Areas.csv`; also used
+by SpectralRankingGlobal): MCS (46, 49), PSE (33, 34, 40, 51), LES (30, 31, 37, 41), BHS (32, 42), SSH (35, 36, 38, 39,
+43, 44, 47, 48, 50, 52), IND (45) -- the Leiden main fields with Veterinary moved to LES. ECR cohort by area: SSH 1,247,
+PSE 1,156, LES 901, MCS 433, BHS 178 (ARC funds little clinical work). The panel figures were deleted and regenerated
+under the same names with AREA5; the area order (provisional MCS, PSE, LES, BHS, SSH) is to be decided from the violins.
+Same day (user): the same plots for mid-career (from -20) and senior (from -25) fellows (`--tier mcr|sr`, outputs
+prefixed `mcr_` / `sr_`), the award year drawn as a dashed line.
+
+## 2026-10-27: Trove PhD theses, the 1970 date placeholder, hand PhD findings (2014 DECRA cohort review)
+
+**Trove theses** (`src/00i_extract_trove_theses.py`; user: the Deakin "Database of Australian doctorates" lives on in
+Trove). API v3, `category=research`, `l-format=Thesis`, `q=thesis`, `l-australian=y`, by decade (1990s-2020s),
+`bulkHarvest` cursor paging, `reclevel=full&include=workversions` -- each version's Dublin Core (creator, contributor
+= supervisors, type, metadataSource = library NUC code); whole records cached once (`work:{id}`), multi-decade works
+fetched once; run detached. 487,031 distinct works; 347,678 clean (Deakin repository-only records dropped -- staff
+research outputs typed "monograph | thesis"; article / conference types and 2+ authors dropped; a book or still-image
+type alone no longer drops a record that has a thesis version: Cameron Holley's ANU PhD shares a Trove work with its
+book). Degree from type and notes (doctoral 89,839, masters, honours, unknown). Thesis university from a creator
+organisation (00e's HEP name table) or a repository code: derived when 90%+ of 20+ theses naming a university agree,
+plus `data_persisted/trove_source_hep.csv` (user-confirmed codes; SAU:IR -> `UA|UNISA`: Adelaide and UniSA theses
+share it, and only UniSA's name their university, so the derived map said UniSA alone -- Paul Oliver's Adelaide thesis
+was refused; a thesis university can be 2+ HEPs). 18 old university names added to HEP_concordances Variants (James Cook
+University of North Queensland, UWS Nepean/Hawkesbury/Macarthur, University of Ballarat, ...).
+
+**Matching** (`analysis/43_trove_phd_match.py`, analysis only; truth = ORCID education entries with a doctoral role
+and end year, 6,755 ACIFs, 4,196 Australian). Names through NameParser: key / related (nickname list, compact given
+names; clipped forms dropped -- they paired Chinese syllables, Ling/Lingxue) / compound (one part of a compound
+family name plus a shared full given name: Olsen-Kettle's UQ thesis as Louise Marie Kettle; needs confirmation) /
+initials (needs confirmation) / title (an ORCID thesis work or an OpenAlex dissertation on the person's own record with
+the Trove title). Evidence: own accepted or unsure works naming the thesis university, thesis year -4..+1; an own work
+within 6 years echoing the thesis title; or a name only this ACIF carries with one candidate. Timing: thesis -2..+8
+years from the start of the main run of accepted works (leading works 5+ years before the next skipped); CIs need no
+PhD before a grant (user); fellows' thesis <= first fellowship announcement + 1, early-career >= announcement - 8
+(DECRA 5 years + 1 overseas + 2 parental, user); for early-career fellows the window replaces the gap test unless
+there is overseas evidence (Ingram, Murray: theses 3 and 8 years before their first accepted work). Duplicate Trove
+works of one thesis merged (21,999; they tied with themselves: Stanwix, Hossain). Result: accepted theses agree with
+ORCID ~91% (CI 89%, ECR 94%, MCR 92%, SR 90%), recall 66% on Australian ORCID PhDs; coverage CI 37%, ECR 56%, MCR 44%,
+SR 22%; overseas ORCID PhDs given a thesis 5%. Output `processed/trove_theses/acif_trove_phd.parquet`, report
+`trove_phd_match.md`.
+
+**Overseas evidence**: ORCID PhD abroad; an OpenAlex dissertation with only non-Australian institutions; the early
+Australian share (own institutions of the accepted and unsure works in the first 4 years, starting at the first year
+with an institution) = 0. The share predicts an Australian ORCID PhD with AUC 0.87 (share 0: 11% Australian; share 1:
+89%), but misses overseas PhDs who publish only after moving (Aubert's INRS/ANU co-tutelle, Wilkening, Catto, Mackay,
+Peden) and is weak for old and HASS PhDs (user: before ~2000 few fields published during a PhD).
+
+**Hand PhD findings** (user: "some way to add phd findings to an ACIF ... a csv"): `data_persisted/manual_phd.csv`
+(unique_id, status confirmed/probable, abroad yes/no, university, country, year, thesis_title, source, notes), keyed on
+an ARC record id; an abroad row is overseas evidence; a confirmed row overrules (abroad takes no Trove thesis;
+Australian with a year takes one within a year). Seeded with the 2014 DECRA cohort review (22 rows: CVs and staff pages
+from the user, a few web searches). Of 187 2014 DECRA holders: Australian evidence 91, overseas 88, both 7,
+unexplained 0; the reviewed overseas PhDs include INRS Québec, Glasgow, Oxford, Durham, SLU, NYU, MIT, Reading,
+Birmingham, Berkeley, Newcastle upon Tyne, Tokyo, Stellenbosch, Ruhr, UC Santa Cruz.
+
+**The review also found** linkage faults among the 8 holders with no accepted work before the award: Hansik Kim
+publishes as Han-Seek Kim (the 2026-10-23 hand link pointed to a one-paper "H.S. Kim" record; now A5001822290) and
+Dag Eklund as D. Magnus Eklund (never linked; hand link to A5026820477) -- both in manual_links.csv, effective at the
+next cycle run; Takashi Kubota's pre-2014 ATLAS works sit on a refused mixed record (needs works by ORCID DOI from
+refused records -- not built); Greenhalgh's and Verma-Gaur's early works are all unsure (thin Scopus profiles).
+
+**OpenAlex 1970 placeholder** (found through Matt Allen: his 2010 paper 10.5130/cjlg.v0i6.1617 dated 1970): ~1,004,000
+works dated 1970 against 854,000 / 926,000 in 1969 / 1971 (Unix time zero; also 1900, 1800, 1500 and future years).
+`src/oeuvre/year_fix.py`, step 2b of 03: a kept work dated 1970 takes the ACIF's ORCID-record year for its DOI, else a
+Scopus year, else NULL when its source has no other work before 1976; `publication_year_oax` keeps OpenAlex's year.
+1,086 accepted rows were dated 1970 before. Built and tested (2 tests); **03 not yet rerun with it** (user's go).
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.

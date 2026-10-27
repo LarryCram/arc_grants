@@ -1,0 +1,13 @@
+source,hep_code,notes
+TU:IR,UTAS,"Trove repository code -> ARC HEP, confirmed by user 2026-10-27 (too few theses with a catalogue university to derive it)"
+NNCU:IR,UON,"confirmed by user 2026-10-27"
+VIT:IR,RMIT,"confirmed by user 2026-10-27"
+VSWT:IR,SUT,"confirmed by user 2026-10-27"
+VVUT:IR,VU,"confirmed by user 2026-10-27"
+NUWS,WSU,"confirmed by user 2026-10-27"
+NUNE:IR,UNE,"confirmed by user 2026-10-27"
+QUSQ:IR,USQ,"confirmed by user 2026-10-27"
+NCSU:IR,CSU,"confirmed by user 2026-10-27"
+QCQU:IR,CQU,"confirmed by user 2026-10-27"
+QSCUC:RB,USC,"confirmed by user 2026-10-27"
+SAU:IR,UA|UNISA,"2026-10-27, user: Adelaide and UniSA theses share this code (UniSA theses name their university, Adelaide ones mostly do not, so the derived map said UniSA only); either university counts"

@@ -10,6 +10,9 @@ Steps so far:
                           (src/oeuvre/acif_works.py)
   2. acif_works_kept.parquet / work_drops.parquet   rows dropped as paratext, retracted, a type not
                           kept, or no institution on the ACIF's own authorship and no DOI (src/oeuvre/work_filter.py)
+  2b. acif_works_kept.parquet, in place: OpenAlex's 1970 date placeholder replaced from the ACIF's ORCID record
+                          or Scopus, or set unknown when the source has no works before 1976 (src/oeuvre/year_fix.py,
+                          2026-10-27); columns publication_year_oax, year_fix
   3. acif_works_single.parquet   one row per (ACIF, work): versions (same DOI or usable normalised
                           title) reduced to the version of record, earliest year as publication_year
                           (src/oeuvre/versions.py)
@@ -42,6 +45,7 @@ from src.oeuvre.acif_works import DOMINANT_SHARE, LINKS, accepted_links, build_a
 from src.oeuvre.citations import work_citations_by_year
 from src.oeuvre.gemini import load_verdicts
 from src.oeuvre.orcid_works import claimed_dois, unattributed_authorships
+from src.oeuvre.year_fix import fix_placeholder_years
 from src.oeuvre.scopus_check import trusted_profile_dois
 from src.oeuvre.versions import MAX_TITLE_WORKS, reduce_versions
 from src.oeuvre.work_filter import KEEP_TYPES, filter_works
@@ -331,6 +335,13 @@ def classify_section(con, req: pd.DataFrame, verdicts: dict) -> list[str]:
     return L + [""]
 
 
+def year_fix_section(c: dict) -> list[str]:
+    return ["## Step 2b: OpenAlex's 1970 date placeholder (src/oeuvre/year_fix.py)", "",
+            f"- kept rows dated 1970: {c.get('dated_placeholder', 0):,}; year from the ACIF's ORCID record "
+            f"{c.get('orcid', 0):,}, from Scopus {c.get('scopus', 0):,}; source has no works before 1976, year "
+            f"unknown {c.get('late', 0):,}; left as 1970 {c.get('kept_placeholder', 0):,}", ""]
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser()
@@ -353,12 +364,14 @@ def main():
     secs = time.time() - t
     kept, dropped = filter_works(con, OEUVRE_DIR / "acif_works.parquet", OEUVRE_DIR / "acif_works_kept.parquet",
                                  OEUVRE_DIR / "work_drops.parquet")
+    ycounts = fix_placeholder_years(con, OEUVRE_DIR / "acif_works_kept.parquet", kept_acifs)
     counts = reduce_versions(con, OEUVRE_DIR / "acif_works_kept.parquet", OEUVRE_DIR / "acif_works_single.parquet")
     acifs, coinv = acif_inputs()
     gcounts = build_work_graph(con, OEUVRE_DIR / "acif_works_single.parquet", OEUVRE_DIR / "acif_work_graph.parquet",
                                acifs, coinv)
     text = "\n".join(["# Oeuvres", ""] + acif_works_section(con, OEUVRE_DIR / "acif_works.parquet", links, secs, ucounts)
-                     + filter_section(con, n_in, kept, dropped) + versions_section(con, counts)
+                     + filter_section(con, n_in, kept, dropped) + year_fix_section(ycounts)
+                     + versions_section(con, counts)
                      + graph_section(con, gcounts) + step5(con) + step6(con))
     (OEUVRE_DIR / "report.md").write_text(text, encoding="utf-8")
     print(text)

@@ -1,5 +1,22 @@
 # Full TODO list — ARC Grants → OpenAlex pipeline
 
+## 2026-10-27 update — read this first
+
+Done (CLAUDE.md "2026-10-27"): AREA5 replaces ARC panels in the fellowship plots (mid-career and senior added); Trove
+thesis harvest (00i) and matching (analysis/43, ~91% right, recall 66%); hand PhD file `data_persisted/manual_phd.csv`;
+1970 placeholder guard (src/oeuvre/year_fix.py). Open:
+1. **Rerun the cycle and 03** (user's go): applies the Kim and Eklund hand links and the 1970 guard; then rerun
+   analysis/42 (plots) and analysis/43.
+2. **Works by ORCID DOI from refused (mixed) records** -- Takashi Kubota's ATLAS works sit on the refused "T. Kubota"
+   record; extend src/oeuvre/orcid_works.py beyond unattributed authorships.
+3. **Linker misses for people using their middle name or another romanisation** (Dag -> D. Magnus Eklund, Hansik ->
+   Han-Seek Kim): count how many unlinked or one-work ACIFs fit this.
+4. **Unsure early works for thinly covered people** (Greenhalgh, Verma-Gaur, Ingram): their pre-award works are unsure
+   because no trusted Scopus profile exists; the ECR plots count accepted works only.
+5. PhD evidence for other cohorts: extend the 2014 review (web searches + manual_phd.csv) to other DECRA years; check
+   repository codes shared by two universities (the SAU:IR bias); the AREA5 order for the plots.
+6. Mobility analysis (phase model pre-PhD / PhD / postdoc / award, user's ppppddd...fff timelines) -- proposed, not built.
+
 ## 2026-10-25 update — read this first
 
 Items 1-3 of 2026-10-24 done (CLAUDE.md "2026-10-25"): unattributed ORCID-listed works accepted outright; linker
