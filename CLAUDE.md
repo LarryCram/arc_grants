@@ -3970,7 +3970,7 @@ fields against the ARC grant fields test whether the whole record is someone els
   was linked by the name stage to the psychiatrist Bernard J. Carroll (Michigan/Duke) -> `manual_merges.csv` row
   (UQ staff profile) and a `manual_links.csv` reject row.
 - **Sinatra et al. 2016 author features** (docs/pipeline_todo.md 2026-10-23 item 9; paper and supplementary in
-  resources/, not committed). Decisions (user): ECR fellowships first -- what selectors could see at announcement
+  resources/, committed 2026-10-27). Decisions (user): ECR fellowships first -- what selectors could see at announcement
   vs later; γ, c10, Q (eq. S28, uncertainty σp/√N); normalise by OpenAlex field x year x age over all OpenAlex;
   proxy c/(age+1) for papers younger than 10 years; drop c = 0 works from the log measures; academic age from
   min(publication_year) (provisional); fractional counting (c / authors) on all works with the full count kept;
