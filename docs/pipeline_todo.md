@@ -34,9 +34,10 @@ thesis harvest (00i) and matching (analysis/43, ~91% right, recall 66%); hand Ph
      against known PhD years; 5 had no basis). analysis/43 still uses 5 for its gap test -- not changed.
 8. **Theses 1950s-1980s (done 2026-10-29, CLAUDE.md "2026-10-28/29")**. Open: the 120 people who lost the
    rare-name / single-candidate route to a namesake's old thesis (counting only time-plausible candidates restores
-   ~900 but drops agreement 92.4% -> 89.4%; not adopted); old colleges of advanced education (SACAE 705, Claremont
-   647, ...) are not mapped to their successor universities; pre-1990 theses agree with ORCID ~85% (old catalogue
-   records rarely say the degree, so masters theses compete).
+   ~900 but drops agreement 92.4% -> 89.4%; not adopted); pre-1990 theses agree with ORCID ~85% (old catalogue
+   records rarely say the degree, so masters theses compete). Not to do (user, 2026-10-29): mapping old colleges of
+   advanced education (SACAE, Claremont, ...) to their successor universities -- the aim is the PhD date, and a CAE
+   thesis has no bearing on whether an ACIF is one person.
 
 ## 2026-10-25 update — read this first
 

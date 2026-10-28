@@ -4183,7 +4183,9 @@ date has a 'u' or no date (tests/test_00i_trove_years.py); files rebuilt from th
 ORCID PhDs of the 1960s-80s come 3+ years before the first accepted work for 20-32%, the 2010s 3%). Result: accepted
 theses 9,153 -> 10,305 (ORCID agreement ~90%; new pre-1990 theses ~85%); PhD year known 58% -> 62% of ACIFs; CIs whose
 first accepted work is before 1988 35% -> 65%, senior fellows likewise 41% -> 65%. 120 people lost a rare-name single-
-candidate acceptance to a namesake's old thesis (open, docs/pipeline_todo.md 2026-10-27 item 8).
+candidate acceptance to a namesake's old thesis (open, docs/pipeline_todo.md 2026-10-27 item 8). Theses naming an old
+college of advanced education (SACAE 705, Claremont Teachers College 647, ...) stay without a university -- not mapped
+(user: the aim is the PhD date; a CAE thesis has no bearing on whether an ACIF is one person).
 
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
