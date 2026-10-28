@@ -109,6 +109,24 @@ def _vals(items, key):
     return out
 
 
+def work_years(w: dict) -> list[int]:
+    """Years in the work's 'issued', without Trove's 1900 placeholder (2026-10-29): a catalogue date of '19uu'
+    (decade unknown) is issued as 1900, so 1,020 works start at 1900 ('1900-2017', Ton Otto's 1991 ANU thesis).
+    The years are those the versions were issued in (their union is the work's 'issued' range); a version's 1900 is
+    dropped when its own date has a 'u' or it has no date. The versions' dc dates are not used otherwise: they are
+    sparse and mix in record time stamps and subject periods. No version years: the work's 'issued'."""
+    year = r"(1[89]\d\d|20\d\d)"
+    ys = []
+    for v in w.get("version", []) or []:
+        vy = [int(y) for i in v.get("issued") or [] for y in re.findall(year, str(i))]
+        dates = [d for rr in v.get("record") or [] if isinstance(rr, dict)
+                 for d in _vals(((rr.get("metadata") or {}).get("dc") or {}).get("date"), "value")]
+        if not dates or any("u" in d.lower() for d in dates):
+            vy = [y for y in vy if y != 1900]
+        ys += vy
+    return ys or [int(y) for y in re.findall(year, str(w.get("issued") or ""))]
+
+
 def summarise(w: dict) -> dict:
     creators, contributors, types, sources, descs = set(), set(), set(), set(), []
     for v in w.get("version", []) or []:
@@ -126,7 +144,7 @@ def summarise(w: dict) -> dict:
     text = " | ".join(sorted(types) + descs)
     degree = ("doctoral" if DOCTORAL.search(text) else "masters" if MASTERS.search(text)
               else "honours" if HONOURS.search(text) else "unknown")
-    ys = [int(y) for y in re.findall(r"(1[89]\d\d|20\d\d)", str(w.get("issued") or ""))]
+    ys = work_years(w)
     return {"work_id": w["id"], "title": w.get("title"), "issued": w.get("issued"),
             "year_start": min(ys) if ys else None, "year_end": max(ys) if ys else None,
             "single_year": bool(ys) and min(ys) == max(ys),

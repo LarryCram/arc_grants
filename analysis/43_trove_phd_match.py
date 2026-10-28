@@ -3,7 +3,7 @@ analysis/43_trove_phd_match.py -- PhD thesis (year, university) for ARC investig
 harvest (src/00i_extract_trove_theses.py), checked against the PhD years people give on their ORCID records
 (2026-10-27, user: "do it" -- after the 1990s-2020s harvest). A test and a first table, not a pipeline stage.
 
-Theses: every Australian-content thesis Trove holds for the 1990s-2020s (487,031 distinct). Cleaned:
+Theses: every Australian-content thesis Trove holds for the 1950s-2020s (566,415 distinct; 1950s-1980s added 2026-10-29). Cleaned:
   - Deakin repository-only records dropped (VDU:IR, 132,010: staff research outputs typed "monograph | thesis");
   - works with an article / journal / conference / book type, or 2+ authors, dropped;
   - degree from the records' type and short notes (00i's degree: doctoral / masters / honours / unknown);
@@ -28,7 +28,10 @@ works confirm, then a doctoral label, then the later year (accepted only if stri
 Truth: the ACIF's ORCID record (cache) -- a doctoral education entry with an end year; an Australian one for the
 recall test (Trove only holds Australian theses).
 Timing: thesis year -2..+8 from the start of the ACIF's main run of accepted works (leading works 5+ years
-before the next skipped: main_run_start()), for everyone; against grants, none for CIs (user, 2026-10-26: a CI need not hold a PhD before a grant); for fellows the thesis is no
+before the next skipped: main_run_start()), for everyone; -5..+8 for a thesis before OLD_THESIS (2026-10-29, user:
+"make the 5 year change" -- before ~2000 few people published during or before a PhD; ORCID PhDs of the 1960s-80s
+come 3+ years before the first accepted work for 20-32%, the 2010s 3%; the wider bound adds ~290 theses, overall
+agreement with ORCID 92.4% -> 92.0%); against grants, none for CIs (user, 2026-10-26: a CI need not hold a PhD before a grant); for fellows the thesis is no
 later than the first fellowship's announcement year + 1, and for early-career fellows no earlier than 8 years
 before it (APD ~2, DECRA ~4 years after the PhD; career interruptions allowed).
 Later the same day (user: "yes", after the 2014 DECRA cohort review): own works count when accepted or unsure (the
@@ -78,6 +81,7 @@ NO_CLIPPED = 99                # nicknames list only (clipped forms paired Chine
 RELATION_RANK = {"key": 0, "related": 1, "compound": 2, "initials": 3, "title": 4}
 TITLE_WORDS = 8                # ORCID thesis title vs Trove title: first 8 normalised words
 GAP_MIN, GAP_MAX = -2, 8
+OLD_THESIS, OLD_GAP_MIN = 1995, -5   # a thesis before 1995 may come up to 5 years before the first accepted work
 ISOLATED = 5                   # a leading work 5+ years before the next is not the start of the main run       # thesis year - first accepted work (ORCID-dated PhDs: median +2..+3, user's pppp/ddd model)
 EARLY_YEARS = 4                # early Australian share: the first 4 years of the main run
 TITLE_SHARED = 4               # own work title vs thesis title: 4+ shared content words
@@ -492,7 +496,7 @@ def main():
     p["in_window"] = ~(late | early)
     p["unique_name"] = (p.n_acifs_for_thesis == 1)
     p["gap"] = p.year - p.first_work
-    p["gap_ok"] = p.gap.between(GAP_MIN, GAP_MAX)
+    p["gap_ok"] = p.gap.between(GAP_MIN, GAP_MAX) | ((p.year < OLD_THESIS) & p.gap.between(OLD_GAP_MIN, GAP_MAX))
     # overseas-PhD evidence (2026-10-27): ORCID education abroad, an OpenAlex dissertation abroad, or early works
     # with no Australian institution
     p["overseas_hint"] = ((p.orcid_phd_country.notna() & p.orcid_phd_country.ne("AU")) | p.oax_dissertation_abroad
@@ -541,7 +545,7 @@ def main():
     p.drop(columns=["hep_codes"]).to_parquet(OUT, index=False)
 
     L = ["# Trove PhD theses for ARC investigators", "",
-         f"Theses (1990s-2020s, Australian content): {len(d):,}; clean {d.clean.sum():,} (Deakin repository-only "
+         f"Theses (1950s-2020s, Australian content): {len(d):,}; clean {d.clean.sum():,} (Deakin repository-only "
          f"{d.deakin_only.sum():,}, non-thesis type {d.not_thesis_type.sum():,}, 2+ authors {(d.n_authors > 1).sum():,} removed); "
          f"degree of clean theses: {d[d.clean].degree.value_counts().to_dict()}",
          f"University found for {d[d.clean].uni.notna().mean():.0%} of clean theses "
@@ -556,7 +560,7 @@ def main():
           "| pairs | n | agree |", "|---|---|---|"]
     q = p[p.orcid_phd_year.notna()]
     for lab, m in [("all name pairs", q.index == q.index), ("in window (fellows)", q.in_window),
-                   ("thesis -2..+8 years from start of main run", q.gap_ok),
+                   ("thesis -2..+8 years from start of main run (-5 before 1995)", q.gap_ok),
                    ("grant university", q.uni_match.eq(True)), ("own works name the thesis university", q.works_uni.eq(True)),
                    ("own work title echoes the thesis title", q.own_title), ("overseas hint", q.overseas_hint),
                    ("unique name, one candidate", q.unique_name & (q.n_theses_for_acif == 1)),

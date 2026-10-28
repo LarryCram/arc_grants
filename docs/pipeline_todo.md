@@ -16,6 +16,27 @@ thesis harvest (00i) and matching (analysis/43, ~91% right, recall 66%); hand Ph
 5. PhD evidence for other cohorts: extend the 2014 review (web searches + manual_phd.csv) to other DECRA years; check
    repository codes shared by two universities (the SAU:IR bias); the AREA5 order for the plots.
 6. Mobility analysis (phase model pre-PhD / PhD / postdoc / award, user's ppppddd...fff timelines) -- proposed, not built.
+7. **Sinatra measures, redesigned 2026-10-28 with the user** (supersedes the step list of 2026-10-23 item 9):
+   - Aim: do the Sinatra values at award time signify anything? Compute for EVERY ACIF and every career year; the
+     2025 value is the asymptote; the spread of early values around it adds to Sinatra. No minimum career filter at
+     computation time (filters / weights at analysis time).
+   - gamma(t) = ln N(t) / ln t, read off the cumulative count -- no fit, no window, no prefactor A (user: N is
+     already a cumulant; the DF of gamma as a function of t is the object).
+   - c10 where possible (papers 10+ years old at T), never mixed with the proxy; the max(c/t) proxy (normalised
+     citations per year since publication) for everyone, plus its mean log. Year of the top paper is random
+     (Sinatra) -- nothing to correct for.
+   - Q is a career constant in Sinatra; Q(T) is only its estimate at T. ln Q = <log c10> - mu_p; mu_p from the
+     population lognormal fit (later step); rankings don't depend on it.
+   - Institutional support as a driver of Q (later work): "rich" = Group of Eight FOR NOW (user dislikes it); test
+     between people (career Q vs main institution) and within movers (papers at Go8 vs other ARC universities).
+   - Full counts lead, fractional alongside. Step 1 = `analysis/46_sinatra_measures.py` -> `processed/sinatra/`.
+   - Career start (user, 2026-10-28): leading works 3+ years before the next accepted work are dropped (tested
+     against known PhD years; 5 had no basis). analysis/43 still uses 5 for its gap test -- not changed.
+8. **Theses 1950s-1980s (done 2026-10-29, CLAUDE.md "2026-10-28/29")**. Open: the 120 people who lost the
+   rare-name / single-candidate route to a namesake's old thesis (counting only time-plausible candidates restores
+   ~900 but drops agreement 92.4% -> 89.4%; not adopted); old colleges of advanced education (SACAE 705, Claremont
+   647, ...) are not mapped to their successor universities; pre-1990 theses agree with ORCID ~85% (old catalogue
+   records rarely say the degree, so masters theses compete).
 
 ## 2026-10-25 update — read this first
 

@@ -4157,6 +4157,34 @@ estimate). All ACIFs: australian 45%, overseas 12%, australian_probable 16%, ove
 known 58% (CI 53%, ECR 75%, MCR 66%, SR 46%). PhD year minus first fellowship announcement: ECR median -4 (10-90%: -6..0),
 MCR -9, SR -20. 490 ACIFs have dated sources more than a year apart (year_conflict; the first source wins).
 
+## 2026-10-28/29: fellowship plots redone; Sinatra measures for everyone; theses 1950s-1980s
+
+**Plots** (`analysis/42_ecr_boxplots.py`, rewritten; user): cumulative works and annual citations only, one page each,
+columns ECR / MCR / SR (and a 4-column version adding non-fellow CIs at their first in-scope grant), common x and y,
+AREA5 rows PSE, MCS, LES, BHS, SSH; lines at 1, 10, 100; stronger median and mean markers; fan charts (10-90 and
+25-75 bands, median, per-panel median / mean / share below the mean / top-10% share at award) for policy readers;
+per-area award-year tables (`fellows_award_summary.md`). Outputs `processed/figures/fellows_*.png`; superseded figures
+removed. At award about two-thirds of people are below the mean in works, three-quarters in citations.
+
+**Sinatra measures** (design: docs/pipeline_todo.md 2026-10-27 item 7). `analysis/45_top_paper_proxy.py`: the top
+paper by the short-window proxy (c_a/(a+1) over the same-field, same-year OpenAlex mean) against the top by c10 at
+T = 2005/2010/15 -- Spearman of top values 0.86-0.90, same paper 59-66%, mean-log agreement 0.92-0.96.
+`analysis/46_sinatra_measures.py` -> `processed/sinatra/{paper_measures,person_year,person}.parquet`: every ACIF and
+career year (21,715 ACIFs, 583,863 person-years): gamma(t) = ln N / ln t (no fit), c10-based Q core (papers 10+ years
+old) and the proxy max and mean log, full and fractional, each paper's own-institution class (Go8 / other ARC
+university / other / none; Go8 as "rich" for now, user). Career start: leading works 3+ years before the next are
+dropped (user, tested on known PhD years). gamma medians ECR 1.44, MCR 1.49, SR 1.50, CI 1.32.
+
+**Theses 1950s-1980s** (user: "yep"): 00i harvested 1950s-80s (3,744 / 12,890 / 29,968 / 42,072 works; 566,415
+distinct in all). Trove issues a catalogue date of '19uu' as 1900 (1,020 works, e.g. "1900-2017" for Ton Otto's 1991
+ANU thesis): `00i.work_years()` now takes the years the versions were issued in, without a version's 1900 when its own
+date has a 'u' or no date (tests/test_00i_trove_years.py); files rebuilt from the cache. analysis/43: a thesis before
+1995 may come up to 5 years before the first accepted work (user: before ~2000 few published during or before a PhD;
+ORCID PhDs of the 1960s-80s come 3+ years before the first accepted work for 20-32%, the 2010s 3%). Result: accepted
+theses 9,153 -> 10,305 (ORCID agreement ~90%; new pre-1990 theses ~85%); PhD year known 58% -> 62% of ACIFs; CIs whose
+first accepted work is before 1988 35% -> 65%, senior fellows likewise 41% -> 65%. 120 people lost a rare-name single-
+candidate acceptance to a namesake's old thesis (open, docs/pipeline_todo.md 2026-10-27 item 8).
+
 ## Next Priority (start of next session)
 Analysis pipeline complete as of 2026-06-18.
 
